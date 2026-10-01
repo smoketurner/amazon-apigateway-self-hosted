@@ -419,6 +419,11 @@ impl RequestContext {
         if let (Value::Object(fields), Some(trace)) = (&mut context, self.trace) {
             fields.insert("xrayTraceId".to_owned(), json!(trace.id().to_string()));
         }
+        if let Some(cert) = self.identity.client_cert()
+            && let Some(Value::Object(identity)) = context.get_mut("identity")
+        {
+            identity.insert("clientCert".to_owned(), cert.to_json());
+        }
         if let (Value::Object(fields), Some(release)) = (&mut context, self.api.release) {
             fields.insert("isCanaryRequest".to_owned(), json!(release.is_canary()));
         }
@@ -454,6 +459,8 @@ pub(crate) mod tests {
     use axum::http::HeaderValue;
 
     use super::*;
+    use crate::client_cert::ClientCertDetails;
+    use crate::client_cert::tests::certificate;
     use crate::identity::TrustedProxies;
 
     /// A request from 192.0.2.1 to `POST /pets/7` on `POST /pets/{petId}`.
@@ -599,5 +606,25 @@ pub(crate) mod tests {
             release: None,
         };
         assert_eq!(info.stage_name(), "$default");
+    }
+
+    #[test]
+    fn the_client_certificate_is_a_context_variable_only_when_there_is_one() {
+        let mut ctx = request(ApiKind::Rest);
+        assert!(ctx.variables()["identity"].get("clientCert").is_none());
+        let (der, _) = certificate("mtls client");
+        ctx.identity = ctx
+            .identity
+            .with_verified_certificate(ClientCertDetails::from_der(der.as_ref()).unwrap());
+        let vars = ctx.variables();
+        assert_eq!(
+            vars["identity"]["clientCert"]["subjectDN"],
+            "C=US,O=Acme,CN=mtls client"
+        );
+        assert_eq!(vars["identity"]["sourceIp"], "192.0.2.1");
+        assert_eq!(
+            ctx.context_value("identity.clientCert.issuerDN").as_deref(),
+            Some("C=US,O=Acme,CN=mtls client")
+        );
     }
 }

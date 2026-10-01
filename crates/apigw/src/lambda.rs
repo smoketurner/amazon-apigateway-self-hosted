@@ -348,7 +348,7 @@ impl<'a> ProxyEvent<'a> {
     /// The `identity` block of payload 1.0: fields API Gateway fills only for
     /// IAM, Cognito, and mutual TLS callers are present as `null`.
     fn identity(&self) -> Value {
-        json!({
+        let mut identity = json!({
             "accessKey": null,
             "accountId": null,
             "caller": null,
@@ -361,7 +361,13 @@ impl<'a> ProxyEvent<'a> {
             "user": null,
             "userAgent": self.ctx.header_str("user-agent"),
             "userArn": null,
-        })
+        });
+        if let (Value::Object(fields), Some(cert)) =
+            (&mut identity, self.ctx.identity.client_cert())
+        {
+            fields.insert("clientCert".to_owned(), cert.to_json());
+        }
+        identity
     }
 
     fn v1(&self) -> Value {
@@ -461,10 +467,16 @@ impl<'a> ProxyEvent<'a> {
                 let variables: StringFields = self.stage_variables.into_iter().collect();
                 fields.insert("stageVariables".to_owned(), Value::Object(variables.0));
             }
-            if let Some(authorizer) = ctx.authorizer.event_value(PayloadVersion::V2)
-                && let Some(Value::Object(request_context)) = fields.get_mut("requestContext")
-            {
-                request_context.insert("authorizer".to_owned(), authorizer);
+            if let Some(Value::Object(request_context)) = fields.get_mut("requestContext") {
+                if let Some(authorizer) = ctx.authorizer.event_value(PayloadVersion::V2) {
+                    request_context.insert("authorizer".to_owned(), authorizer);
+                }
+                if let Some(cert) = ctx.identity.client_cert() {
+                    request_context.insert(
+                        "authentication".to_owned(),
+                        json!({"clientCert": cert.to_json()}),
+                    );
+                }
             }
             if !body.body.is_null() {
                 fields.insert("body".to_owned(), body.body);
@@ -485,8 +497,10 @@ mod tests {
     use axum::routing::post;
 
     use super::*;
-    use crate::authz::RouteAuthorizer;
+    use crate::authz::{RouteAuthorizer, RoutePolicy};
     use crate::aws::{CredentialsMode, FunctionArn, LambdaEndpoints};
+    use crate::client_cert::ClientCertDetails;
+    use crate::client_cert::tests::certificate;
     use crate::header_case::HeaderCase;
     use crate::integration::Integration;
     use crate::model::{MethodMatch, Protections, RouteKey, RoutePath};
@@ -678,6 +692,7 @@ mod tests {
             },
             protections: Protections::default(),
             authorizer: RouteAuthorizer::None,
+            policy: RoutePolicy::None,
             throttle: None,
             unenforced: Vec::new(),
         }
@@ -912,5 +927,52 @@ mod tests {
 
     async fn next_data(body: &mut Body) -> Bytes {
         try_next_data(body).await.unwrap()
+    }
+
+    fn with_client_cert(mut ctx: RequestContext) -> RequestContext {
+        let (der, _) = certificate("mtls client");
+        ctx.identity = ctx
+            .identity
+            .with_verified_certificate(ClientCertDetails::from_der(der.as_ref()).unwrap());
+        ctx
+    }
+
+    #[test]
+    fn client_certificates_appear_where_each_payload_version_puts_them() {
+        let ctx = with_client_cert(incoming(b""));
+        let v1 = event(&ctx, PayloadVersion::V1);
+        let cert = &v1["requestContext"]["identity"]["clientCert"];
+        assert_eq!(cert["subjectDN"], "C=US,O=Acme,CN=mtls client");
+        assert!(
+            cert["clientCertPem"]
+                .as_str()
+                .unwrap()
+                .starts_with("-----BEGIN CERTIFICATE-----")
+        );
+        assert!(
+            cert["validity"]["notBefore"]
+                .as_str()
+                .unwrap()
+                .ends_with("GMT")
+        );
+        assert_eq!(
+            v1["requestContext"]["identity"].as_object().unwrap().len(),
+            13
+        );
+        let v2 = event(&ctx, PayloadVersion::V2);
+        assert_eq!(
+            v2["requestContext"]["authentication"]["clientCert"]["subjectDN"],
+            "C=US,O=Acme,CN=mtls client"
+        );
+        assert!(v2["requestContext"].get("identity").is_none());
+    }
+
+    #[test]
+    fn events_have_no_client_certificate_fields_without_one() {
+        let ctx = incoming(b"");
+        let v1 = event(&ctx, PayloadVersion::V1);
+        assert!(v1["requestContext"]["identity"].get("clientCert").is_none());
+        let v2 = event(&ctx, PayloadVersion::V2);
+        assert!(v2["requestContext"].get("authentication").is_none());
     }
 }

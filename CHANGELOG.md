@@ -16,6 +16,13 @@ All notable changes to this project are documented here. The format follows
   provided, with Jayway JsonPath semantics for paths. Output size, evaluation steps, and nesting
   are bounded and reported as typed errors. Its tests replay about 960 templates rendered by
   Apache Velocity 1.7 and Jayway JsonPath 2.9, and a cargo-fuzz target lives in `fuzz/`.
+- Resource policies are evaluated as API Gateway evaluates them: an explicit `Deny` ends the request
+  before authentication, then the policy is combined with the authorizer's decision per the
+  authorization-flow tables (no authorizer, Lambda authorizer, Cognito user pool). `aws:SourceIp`
+  (`IpAddress`, `NotIpAddress`), `aws:UserAgent`, `aws:Referer`, `aws:SecureTransport`, and date
+  conditions are evaluated against the trusted client address; conditions that cannot be decided
+  count as matching for a `Deny` and not matching for an `Allow`. Denials answer `403` with AWS's
+  message.
 - Cognito user pool authorizers (REST) and JWT authorizers (HTTP APIs) are evaluated. Tokens are
   verified (RS256/RS384/RS512) against the issuer's published keys, fetched over HTTPS with a 1.5 s
   timeout and 150 KB cap, cached for two hours, and refreshed at most every 30 s when a token names an
@@ -85,6 +92,15 @@ All notable changes to this project are documented here. The format follows
   on its own, and `/ping` and `/sping` answer 200 as on API Gateway. `--domain-cert-dir` serves
   each domain its own certificate by SNI, reloaded when the files change. `/routes` lists each
   domain's mappings and APIs.
+- Mutual TLS: a custom domain with a `mutualTlsAuthentication` truststore requires client
+  certificates. The CA bundle is read from S3 (`truststoreUri` at `truststoreVersion`) and
+  re-read on every refresh; clients must present a certificate chained to it, unexpired, in the
+  TLS handshake, and requests to the domain from a client that did not (for example one that asked
+  for a different name in SNI) are refused. A domain whose truststore cannot be loaded refuses
+  every connection rather than serving unverified. `$context.identity.clientCert.*` (access logs),
+  and `requestContext.identity.clientCert` and `requestContext.authentication.clientCert` in
+  Lambda events, carry `clientCertPem`, `subjectDN`, `issuerDN`, `serialNumber`, and `validity`;
+  a certificate reported by a trusted proxy in `X-Forwarded-Client-Cert` is described the same way.
 - Log delivery uses bounded queues that drop (and count) events instead of slowing requests,
   and flushes everything on shutdown.
 - REST gateway responses: every error the gateway generates (missing authentication token,
@@ -129,6 +145,12 @@ All notable changes to this project are documented here. The format follows
   integrations that use a VPC link from an in-cluster URL; REST routes send the integration
   URI's host as the `Host` header, HTTP API routes send the request path (with the stage prefix
   API Gateway adds). Routes whose link has no mapping still answer `501`, now naming the flag.
+
+### Removed
+
+- `--unsupported-resource-policy` (`APIGW_UNSUPPORTED_RESOURCE_POLICY`): resource policies are
+  evaluated, so routes no longer answer `403` for every policy. A policy that cannot be read still
+  refuses its routes.
 
 ### Changed
 

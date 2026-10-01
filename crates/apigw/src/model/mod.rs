@@ -161,7 +161,6 @@ pub(crate) enum Protection {
 pub(crate) struct Protections(BTreeSet<Protection>);
 
 impl Protections {
-    #[cfg(test)]
     pub(crate) fn contains(&self, protection: Protection) -> bool {
         self.0.contains(&protection)
     }

@@ -14,7 +14,7 @@ use serde_json::{Map, Value, json};
 use super::identity_source::{IdentitySource, IdentitySources};
 use super::pattern::TokenPattern;
 use super::policy::{AccessRequest, Decision, MethodArn, PolicyDocument};
-use super::{AuthRequest, Denial};
+use super::{AuthRequest, Authorized, Denial};
 use crate::aws::{ArnScope, FunctionArn, IntegrationCredentials, RoleArn};
 use crate::digest::Sha256Digest;
 use crate::integration::{LambdaTarget, StageVariables};
@@ -197,10 +197,7 @@ impl LambdaAuthorizer {
         }
     }
 
-    pub(super) async fn authorize(
-        &self,
-        request: &AuthRequest<'_>,
-    ) -> Result<AuthorizerContext, Denial> {
+    pub(super) async fn authorize(&self, request: &AuthRequest<'_>) -> Result<Authorized, Denial> {
         let ctx = request.ctx;
         let identity = self
             .sources
@@ -234,14 +231,14 @@ impl LambdaAuthorizer {
         if let Some(ref key) = cache_key
             && let Some(cached) = self.cached(request.state, key).await
         {
-            return cached.authorize(&arn);
+            return Ok(cached.authorize(&arn));
         }
         let answer = self.invoke(request, &identity, &arn).await?;
-        let decision = answer.response.authorize(&arn);
+        let authorized = answer.response.authorize(&arn);
         if let Some(key) = cache_key {
             self.remember(request.state, key, answer.payload).await;
         }
-        decision
+        Ok(authorized)
     }
 
     /// Where this request's identity is cached. The caller's credentials are
@@ -407,36 +404,36 @@ impl AuthorizerResponse {
             .collect()
     }
 
-    /// Evaluates this response for `arn`: what `$context.authorizer` becomes if
-    /// the method is allowed.
-    fn authorize(&self, arn: &MethodArn) -> Result<AuthorizerContext, Denial> {
+    /// Evaluates this response for `arn`. The context is kept whatever the
+    /// decision, since a resource policy may still allow the request.
+    fn authorize(&self, arn: &MethodArn) -> Authorized {
         match *self {
             Self::Policy {
                 ref principal_id,
                 ref policy,
                 ref context,
-            } => match policy.evaluate(&AccessRequest::invoke(arn)) {
-                Decision::Allow => {
-                    let mut values = context.clone();
-                    values.insert(
-                        "principalId".to_owned(),
-                        Value::String(principal_id.clone()),
-                    );
-                    Ok(AuthorizerContext::lambda(values))
+            } => {
+                let mut values = context.clone();
+                values.insert(
+                    "principalId".to_owned(),
+                    Value::String(principal_id.clone()),
+                );
+                Authorized {
+                    context: AuthorizerContext::lambda(values),
+                    decision: policy.evaluate(&AccessRequest::invoke(arn)),
                 }
-                Decision::ExplicitDeny => Err(Denial::ExplicitDeny),
-                Decision::ImplicitDeny => Err(Denial::ImplicitDeny),
-            },
+            }
             Self::Simple {
                 authorized,
                 ref context,
-            } => {
-                if authorized {
-                    Ok(AuthorizerContext::lambda(context.clone()))
+            } => Authorized {
+                context: AuthorizerContext::lambda(context.clone()),
+                decision: if authorized {
+                    Decision::Allow
                 } else {
-                    Err(Denial::ExplicitDeny)
-                }
-            }
+                    Decision::ExplicitDeny
+                },
+            },
         }
     }
 }

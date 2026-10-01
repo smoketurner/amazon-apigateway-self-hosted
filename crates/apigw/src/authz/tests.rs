@@ -5,6 +5,7 @@
 #![expect(clippy::unwrap_used, reason = "tests assert on known-good fixtures")]
 #![expect(clippy::indexing_slicing, reason = "tests index known JSON fields")]
 
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -20,6 +21,7 @@ use crate::authz::KeyStore;
 use crate::aws::{AwsClients, CredentialsMode, LambdaEndpoints};
 use crate::gateway::{ApiContext, AuthorizationMode, Enforcement, Unsupported};
 use crate::gateway_response::GatewayResponses;
+use crate::identity::TrustedProxies;
 use crate::integration::StageVariables;
 use crate::model::{ApiKind, ApiModel, IntegrationOverrides, StageSettings};
 use crate::observability::StageObserver;
@@ -138,7 +140,7 @@ fn verdict(event: &Value) -> (Option<&'static str>, String) {
 }
 
 pub(super) struct Harness {
-    router: Router,
+    pub(super) router: Router,
     pub(super) summaries: Vec<RouteSummary>,
     pub(super) auth_calls: Arc<Calls>,
     pub(super) backend_calls: Arc<Calls>,
@@ -222,7 +224,6 @@ impl Harness {
             )),
             enforcement: Enforcement {
                 authorization: mode,
-                resource_policy: Unsupported::Reject,
                 request_validation: Unsupported::Reject,
             },
             responses: GatewayResponses::default(),
@@ -247,8 +248,30 @@ impl Harness {
         }
     }
 
+    /// A request whose client address could not be established.
     pub(super) async fn call(
         &self,
+        method: Method,
+        uri: &str,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, Value) {
+        self.send(None, method, uri, headers).await
+    }
+
+    /// A request from the client at `peer` (an IPv4 address).
+    pub(super) async fn call_from(
+        &self,
+        peer: &str,
+        method: Method,
+        uri: &str,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, Value) {
+        self.send(Some(peer), method, uri, headers).await
+    }
+
+    async fn send(
+        &self,
+        peer: Option<&str>,
         method: Method,
         uri: &str,
         headers: &[(&str, &str)],
@@ -257,12 +280,13 @@ impl Harness {
         for (name, value) in headers {
             request = request.header(*name, *value);
         }
-        let response = self
-            .router
-            .clone()
-            .oneshot(request.body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let mut request = request.body(Body::empty()).unwrap();
+        if let Some(peer) = peer {
+            let peer: SocketAddr = format!("{peer}:5000").parse().unwrap();
+            let identity = TrustedProxies::none().identify(peer, request.headers_mut());
+            request.extensions_mut().insert(identity);
+        }
+        let response = self.router.clone().oneshot(request).await.unwrap();
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
             .await
