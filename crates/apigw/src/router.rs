@@ -414,6 +414,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::authz::KeyStore;
     use crate::aws::{CredentialsMode, LambdaEndpoints};
     use crate::cors::Cors;
     use crate::gateway::{AuthorizationMode, Unsupported};
@@ -468,6 +469,7 @@ mod tests {
             enforcement,
             http: reqwest::Client::new(),
             aws: aws(),
+            keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
             observer: StageObserver::disabled(),
             release: None,
         })
@@ -1297,6 +1299,7 @@ mod tests {
             enforcement: STRICT,
             http: reqwest::Client::new(),
             aws,
+            keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
             observer: StageObserver::disabled(),
             release: None,
         });

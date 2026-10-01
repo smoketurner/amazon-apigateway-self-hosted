@@ -146,7 +146,11 @@ impl<'a> Pipeline<'a> {
     /// that a request that is turned away costs no buffering.
     /// `--insecure-skip-authorization` skips it.
     async fn authorize(&self, ctx: &mut RequestContext) -> Result<(), Denial> {
-        let RouteAuthorizer::Evaluated(ref authorizer) = self.route.authorizer else {
+        let RouteAuthorizer::Evaluated {
+            ref authorizer,
+            ref scopes,
+        } = self.route.authorizer
+        else {
             return Ok(());
         };
         if self.api.enforcement.authorization == AuthorizationMode::Skip {
@@ -154,9 +158,11 @@ impl<'a> Pipeline<'a> {
         }
         let request = AuthRequest {
             aws: &self.api.aws,
+            keys: &self.api.keys,
+            state: &self.api.state,
             ctx,
         };
-        ctx.authorizer = authorizer.authorize(&request).await?;
+        ctx.authorizer = authorizer.authorize(&request, scopes).await?;
         Ok(())
     }
 

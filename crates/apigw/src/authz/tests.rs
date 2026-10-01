@@ -16,6 +16,7 @@ use axum::routing::post;
 use serde_json::{Value, json};
 use tower::ServiceExt as _;
 
+use crate::authz::KeyStore;
 use crate::aws::{AwsClients, CredentialsMode, LambdaEndpoints};
 use crate::gateway::{ApiContext, AuthorizationMode, Enforcement, Unsupported};
 use crate::gateway_response::GatewayResponses;
@@ -27,19 +28,19 @@ use crate::state::{InMemory, InMemoryLimits, StateBackend};
 use crate::vpc_link::VpcLinks;
 
 const AUTH_FUNCTION: &str = "arn:aws:lambda:us-east-1:123456789012:function:auth";
-const ECHO_FUNCTION: &str = "arn:aws:lambda:us-east-1:123456789012:function:echo";
+pub(super) const ECHO_FUNCTION: &str = "arn:aws:lambda:us-east-1:123456789012:function:echo";
 
-fn lambda_uri(function: &str) -> String {
+pub(super) fn lambda_uri(function: &str) -> String {
     format!("arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/{function}/invocations")
 }
 
-fn echo_integration() -> Value {
+pub(super) fn echo_integration() -> Value {
     json!({"type": "aws_proxy", "httpMethod": "POST", "uri": lambda_uri(ECHO_FUNCTION),
         "payloadFormatVersion": "1.0"})
 }
 
 #[derive(Default)]
-struct Calls {
+pub(super) struct Calls {
     events: Mutex<Vec<Value>>,
     count: AtomicUsize,
 }
@@ -53,11 +54,11 @@ impl Calls {
             .push(event.clone());
     }
 
-    fn count(&self) -> usize {
+    pub(super) fn count(&self) -> usize {
         self.count.load(Ordering::SeqCst)
     }
 
-    fn last(&self) -> Value {
+    pub(super) fn last(&self) -> Value {
         self.events
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -136,15 +137,24 @@ fn verdict(event: &Value) -> (Option<&'static str>, String) {
     }
 }
 
-struct Harness {
+pub(super) struct Harness {
     router: Router,
-    summaries: Vec<RouteSummary>,
-    auth_calls: Arc<Calls>,
-    backend_calls: Arc<Calls>,
+    pub(super) summaries: Vec<RouteSummary>,
+    pub(super) auth_calls: Arc<Calls>,
+    pub(super) backend_calls: Arc<Calls>,
 }
 
 impl Harness {
-    async fn start(doc: &Value, kind: ApiKind, mode: AuthorizationMode) -> Self {
+    pub(super) async fn start(doc: &Value, kind: ApiKind, mode: AuthorizationMode) -> Self {
+        Self::start_with(doc, kind, mode, KeyStore::new(reqwest::Client::new(), [])).await
+    }
+
+    pub(super) async fn start_with(
+        doc: &Value,
+        kind: ApiKind,
+        mode: AuthorizationMode,
+        keys: KeyStore,
+    ) -> Self {
         let auth_calls = Arc::new(Calls::default());
         let backend_calls = Arc::new(Calls::default());
         let auth = Arc::clone(&auth_calls);
@@ -226,6 +236,7 @@ impl Harness {
             release: None,
             http: reqwest::Client::new(),
             aws,
+            keys: Arc::new(keys),
         });
         let (router, summaries) = build(&model, &api, &BasePath::default());
         Self {
@@ -236,7 +247,7 @@ impl Harness {
         }
     }
 
-    async fn call(
+    pub(super) async fn call(
         &self,
         method: Method,
         uri: &str,
@@ -267,7 +278,7 @@ impl Harness {
     }
 
     /// The `requestContext.authorizer` the backend received on its last call.
-    fn backend_authorizer(&self) -> Value {
+    pub(super) fn backend_authorizer(&self) -> Value {
         self.backend_calls.last()["requestContext"]["authorizer"].clone()
     }
 }

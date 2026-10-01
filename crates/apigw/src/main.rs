@@ -7,6 +7,7 @@ mod aws;
 mod canary;
 mod config;
 mod cors;
+mod digest;
 mod entropy;
 mod gateway;
 mod gateway_response;

@@ -10,6 +10,7 @@ use axum::http::{HeaderName, StatusCode};
 use axum::response::Response;
 use uuid::Uuid;
 
+use crate::authz::KeyStore;
 use crate::aws::AwsClients;
 use crate::canary::Release;
 use crate::cors::Cors;
@@ -155,6 +156,7 @@ pub(crate) struct ApiContext {
     pub(crate) vpc_links: VpcLinks,
     pub(crate) http: reqwest::Client,
     pub(crate) aws: Arc<AwsClients>,
+    pub(crate) keys: Arc<KeyStore>,
     pub(crate) observer: StageObserver,
     /// Which release of a canary stage this context serves; `None` when the
     /// stage has no canary.
