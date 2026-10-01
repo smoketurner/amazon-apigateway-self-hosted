@@ -451,7 +451,7 @@ mod tests {
         Delivery, LogGroup, MetricsNamespace, MetricsSettings, Settings, StreamName, TraceDelivery,
     };
     use crate::router::{BasePath, build};
-    use crate::state::{InMemory, InMemoryLimits, StateBackend};
+    use crate::state::{InMemoryLimits, StateBackend};
     use crate::vpc_link::VpcLinks;
     use std::num::NonZeroU32;
 
@@ -544,9 +544,7 @@ mod tests {
             stage_variables: Arc::default(),
             responses: GatewayResponses::default(),
             cors: None,
-            state: Arc::new(StateBackend::InMemory(InMemory::new(
-                InMemoryLimits::default(),
-            ))),
+            state: Arc::new(StateBackend::with_limits(InMemoryLimits::default())),
             replicas: NonZeroU32::MIN,
             vpc_links: VpcLinks::default(),
             enforcement: Enforcement {
@@ -556,6 +554,7 @@ mod tests {
             http: reqwest::Client::new(),
             aws: clients,
             keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
+            usage: None,
             observer: StageObserver::new(&observability, &model, "abc", Some("prod"), None),
             release: None,
             payload: Arc::default(),

@@ -429,6 +429,10 @@ impl<'a> ProxyEvent<'a> {
             "userAgent": self.ctx.header_str("user-agent"),
             "userArn": null,
         });
+        if let (Value::Object(fields), Some(key)) = (&mut identity, self.ctx.api_key.as_ref()) {
+            fields.insert("apiKey".to_owned(), json!(key.value()));
+            fields.insert("apiKeyId".to_owned(), json!(key.id()));
+        }
         if let (Value::Object(fields), Some(cert)) =
             (&mut identity, self.ctx.identity.client_cert())
         {
@@ -575,6 +579,7 @@ mod tests {
     use crate::payload::PayloadSettings;
     use crate::pipeline::context::tests::request;
     use crate::pipeline::context::{AuthorizerContext, QueryString};
+    use crate::usage::RouteApiKey;
 
     fn variables() -> StageVariables {
         StageVariables::new(BTreeMap::from([("env".to_owned(), "local".to_owned())]))
@@ -827,6 +832,7 @@ mod tests {
             protections: Protections::default(),
             authorizer: RouteAuthorizer::None,
             policy: RoutePolicy::None,
+            api_key: RouteApiKey::NotRequired,
             throttle: None,
             cache: None,
             unenforced: Vec::new(),

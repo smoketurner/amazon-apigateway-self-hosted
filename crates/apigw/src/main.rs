@@ -4,6 +4,7 @@
 mod app;
 mod authz;
 mod aws;
+mod backoff;
 mod cache;
 mod canary;
 mod client_cert;
@@ -36,6 +37,7 @@ mod router;
 mod source;
 mod state;
 mod throttle;
+mod usage;
 mod vpc_link;
 
 use clap::Parser as _;

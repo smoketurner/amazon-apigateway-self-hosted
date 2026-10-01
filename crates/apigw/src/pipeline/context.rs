@@ -4,6 +4,7 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 
 use apigw_vtl::{JsonPath, Value as VtlValue};
@@ -176,6 +177,38 @@ impl AuthorizerContext {
     }
 }
 
+/// The API key a request presented, as far as later stages may know it. The
+/// value, when the request carried one, lives only as long as the request and
+/// never appears in `Debug` output.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ApiKeyIdentity {
+    id: String,
+    value: Option<String>,
+}
+
+impl ApiKeyIdentity {
+    pub(crate) fn new(id: String, value: Option<String>) -> Self {
+        Self { id, value }
+    }
+
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub(crate) fn value(&self) -> Option<&str> {
+        self.value.as_deref()
+    }
+}
+
+impl fmt::Debug for ApiKeyIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ApiKeyIdentity")
+            .field("id", &self.id)
+            .field("value", &self.value.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
+}
+
 /// Outcome of the integration call, for `$context.integration.*`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct IntegrationOutcome {
@@ -223,6 +256,7 @@ pub(crate) struct RequestContext {
     pub(crate) identity: ClientIdentity,
     pub(crate) body: Bytes,
     pub(crate) authorizer: AuthorizerContext,
+    pub(crate) api_key: Option<ApiKeyIdentity>,
     pub(crate) stage_variables: Arc<StageVariables>,
     /// The API's binary media types and compression settings.
     pub(crate) payload: Arc<PayloadSettings>,
@@ -363,6 +397,7 @@ impl RequestContext {
             identity,
             body: Bytes::new(),
             authorizer: AuthorizerContext::default(),
+            api_key: None,
             stage_variables: Arc::clone(&api.stage_variables),
             payload: Arc::clone(&api.payload),
             trace,
@@ -459,6 +494,8 @@ impl RequestContext {
             "identity": {
                 "sourceIp": self.source_ip(),
                 "userAgent": self.header_str("user-agent"),
+                "apiKey": self.api_key.as_ref().and_then(ApiKeyIdentity::value),
+                "apiKeyId": self.api_key.as_ref().map(ApiKeyIdentity::id),
             },
             "path": self.full_path,
             "protocol": self.protocol(),
@@ -546,6 +583,7 @@ pub(crate) mod tests {
             identity,
             body: Bytes::new(),
             authorizer: AuthorizerContext::default(),
+            api_key: None,
             trace: None,
             stage_variables: Arc::default(),
             payload: Arc::default(),

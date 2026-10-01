@@ -26,8 +26,9 @@ use crate::identity::ClientIdentity;
 use crate::integration::Integration;
 use crate::model::{ApiKind, ApiModel, Feature, MethodMatch, Protections, RouteKey, RoutePath};
 use crate::pipeline::Pipeline;
-use crate::route::Route;
+use crate::route::{AccessRules, Route};
 use crate::throttle::ThrottleSettings;
+use crate::usage::ApiKeyRules;
 
 /// A stage prefix such as `/prod` that every route is served under, as on an
 /// `execute-api` endpoint. Empty serves routes at the root, as on a custom domain.
@@ -245,6 +246,12 @@ fn axum_path(path: &str) -> Result<String, String> {
 fn compile_routes(model: &ApiModel, ctx: &ApiContext) -> Vec<Route> {
     let authorizers = Authorizers::compile(model, &ctx.stage_variables);
     let policies = ResourcePolicies::compile(model, &ctx.api_id);
+    let api_keys = ApiKeyRules::compile(model, ctx.usage.as_deref());
+    let access = AccessRules {
+        authorizers: &authorizers,
+        policies: &policies,
+        api_keys: &api_keys,
+    };
     let throttling = ThrottleSettings::new(
         &ctx.api_id,
         ctx.stage.as_deref(),
@@ -265,8 +272,7 @@ fn compile_routes(model: &ApiModel, ctx: &ApiContext) -> Vec<Route> {
                 operation,
                 model.kind,
                 &ctx.stage_variables,
-                &authorizers,
-                &policies,
+                &access,
                 &throttling,
                 &ctx.vpc_links,
             );
@@ -566,7 +572,7 @@ pub(crate) mod tests {
     use crate::model::{MethodSettings, SettingsScope};
     use crate::observability::StageObserver;
     use crate::payload::PayloadSettings;
-    use crate::state::{InMemory, InMemoryLimits, StateBackend};
+    use crate::state::{InMemoryLimits, StateBackend};
     use crate::vpc_link::VpcLinks;
     use std::num::NonZeroU32;
 
@@ -576,9 +582,7 @@ pub(crate) mod tests {
     };
 
     fn test_state() -> Arc<StateBackend> {
-        Arc::new(StateBackend::InMemory(InMemory::new(
-            InMemoryLimits::default(),
-        )))
+        Arc::new(StateBackend::with_limits(InMemoryLimits::default()))
     }
 
     fn aws() -> Arc<AwsClients> {
@@ -613,6 +617,7 @@ pub(crate) mod tests {
             http: reqwest::Client::new(),
             aws: aws(),
             keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
+            usage: None,
             observer: StageObserver::disabled(),
             release: None,
             payload: Arc::default(),
@@ -1687,6 +1692,7 @@ pub(crate) mod tests {
             http: reqwest::Client::new(),
             aws,
             keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
+            usage: None,
             observer: StageObserver::disabled(),
             release: None,
             payload: Arc::default(),

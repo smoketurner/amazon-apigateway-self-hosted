@@ -29,7 +29,7 @@ Management's
 | Stage variables | Read from the stage and substituted into integration URIs; overridable locally |
 | Lambda authorizers | `TOKEN` and `REQUEST` (REST), `REQUEST` with payload 1.0/2.0 and simple responses (HTTP): invoked, cached by identity source, and the returned policy evaluated per method; `--insecure-skip-authorization` skips them |
 | Cognito user pool authorizers (REST), JWT authorizers (HTTP) | Tokens are verified against the issuer's published keys, fetched over HTTPS (the gateway needs outbound access to the identity provider); claims and scopes are checked as API Gateway checks them; `--insecure-skip-authorization` skips them |
-| API keys | **Not checked yet.** Answer `403 Forbidden` unless `--insecure-skip-authorization` is set |
+| API keys and usage plans | REST APIs: a method that requires a key admits only an enabled key that belongs to a usage plan of the stage (`403 Forbidden` otherwise); the plan's throttles (plan-wide and per method) and day/week/month quotas count the key (`429`). Keys come from the `x-api-key` header or, with key source `AUTHORIZER`, from the Lambda authorizer's `usageIdentifierKey`. Key values are held only as SHA-256 hashes. `--insecure-skip-authorization` skips the check; HTTP APIs and `--openapi-file` sources cannot check keys and answer `403` |
 | IAM (`AWS_IAM`) auth | Cannot be verified outside AWS. REST answers `403 Missing Authentication Token`, HTTP `403 Forbidden`, unless `--insecure-skip-authorization` is set |
 | Resource policies | Evaluated in two phases as API Gateway evaluates them: an explicit `Deny` ends the request before authentication, then the policy is combined with the authorizer's decision per AWS's outcome tables. `aws:SourceIp` uses the trusted client address (see `--trusted-proxies`). Never skipped by `--insecure-skip-authorization`; a policy that cannot be read refuses every route with `403` |
 | Request validators | **Not run yet.** Validated routes answer `501` unless `--unsupported-validation=ignore` |
@@ -69,6 +69,9 @@ Every flag has an environment variable (`apigw --help` lists them). The main one
 | `--config-cache` | `APIGW_CONFIG_CACHE` | none | Last-known-good definition, used when AWS is unreachable at startup |
 | `--stage-variable NAME=VALUE` | `APIGW_STAGE_VARIABLE_<NAME>` | | Override a stage variable |
 | `--integration-overrides` | `APIGW_INTEGRATION_OVERRIDES` | none | Re-point individual routes (below) |
+| `--valkey-url` | `APIGW_VALKEY_URL` | unset | Valkey (or Redis-compatible) server holding throttle, usage-plan quota, and authorizer-cache state, so every replica counts against the same limits and `--replicas` no longer divides them. Use `rediss://`; `redis://` is accepted with a warning. Credentials in the URL are never logged. Unset keeps per-replica in-memory state |
+| `--valkey-ca-cert` | `APIGW_VALKEY_CA_CERT` | unset | PEM root certificate to trust for a `rediss://` server the system roots do not cover |
+| `--usage-refresh-seconds` | `APIGW_USAGE_REFRESH_SECONDS` | `60` | Seconds between reads of API keys, usage plans, and their associations (0 reads once); reads are paced for the account's control-plane limit |
 | `--insecure-skip-authorization` | `APIGW_INSECURE_SKIP_AUTHORIZATION` | off | Serve authorizer, API key, and IAM routes without checking credentials |
 | `--integration-credentials` | `APIGW_INTEGRATION_CREDENTIALS` | `assume` | `assume` runs integrations as their `credentials` role; `gateway` uses the gateway's own credentials |
 | `--vpc-link CONNECTION_ID=URL` | `APIGW_VPC_LINKS` | none | Serve a VPC link's integrations from an in-cluster URL (repeatable; [VPC links](docs/deployment.md#vpc-links)) |
@@ -284,6 +287,7 @@ are flushed every 5 seconds, when a batch is full, and at shutdown.
 |---|---|---|
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/restapis/<id>/stages/<stage>/exports/oas30`, `.../restapis/<id>/stages/<stage>` | REST APIs |
 | `apigateway:GET` | the same two resources for the stage named by `--canary-export-stage` | canary releases from a shadow stage |
+| `apigateway:GET` | `arn:aws:apigateway:<region>::/usageplans`, `.../usageplans/*/keys`, `.../apikeys` | API keys and usage plans of a REST API stage |
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/apis/<id>/exports/OAS30`, `.../apis/<id>/stages/<stage>` | HTTP APIs |
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/v2/domainnames/<domain>`, `.../apimappings`, `.../routingrules`, `arn:aws:apigateway:<region>::/restapis/<id>` | `--domain-name` |
 | `s3:GetObject` | the truststore object of each mutual TLS domain (`s3:GetObjectVersion` when the domain pins a `truststoreVersion`) | mutual TLS |

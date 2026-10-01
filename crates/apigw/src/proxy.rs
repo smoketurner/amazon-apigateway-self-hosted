@@ -617,6 +617,7 @@ mod tests {
     use crate::model::{ApiKind, MethodMatch, Protections, ResponseTransferMode, RouteKey};
     use crate::pipeline::context::QueryString;
     use crate::pipeline::context::tests::request;
+    use crate::usage::RouteApiKey;
 
     impl HttpProxy {
         /// The URL of a proxied request: the client's query string is carried over.
@@ -673,6 +674,7 @@ mod tests {
             protections: Protections::default(),
             authorizer: RouteAuthorizer::None,
             policy: RoutePolicy::None,
+            api_key: RouteApiKey::NotRequired,
             unenforced: Vec::new(),
             throttle: None,
             cache: None,
