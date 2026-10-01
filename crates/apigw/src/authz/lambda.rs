@@ -17,7 +17,7 @@ use super::identity_source::{IdentitySource, IdentitySources};
 use super::policy::{AccessRequest, Decision, MethodArn, PolicyDocument};
 use super::{AuthRequest, Denial};
 use crate::aws::{ArnScope, FunctionArn, IntegrationCredentials, RoleArn};
-use crate::integration::{LambdaProxy, StageVariables};
+use crate::integration::{LambdaTarget, StageVariables};
 use crate::lambda::ProxyEvent;
 use crate::model::{ApiKind, AuthorizerSpec, PayloadVersion};
 use crate::pipeline::context::AuthorizerContext;
@@ -122,8 +122,10 @@ impl LambdaAuthorizer {
                 .as_deref()
                 .ok_or("the authorizer has no authorizerUri")?,
         );
-        let function: FunctionArn = LambdaProxy::function_arn(&uri)
-            .ok_or("authorizerUri is not a Lambda function")?
+        let function: FunctionArn = uri
+            .parse::<LambdaTarget>()
+            .map_err(|_| "authorizerUri is not a Lambda function")?
+            .function
             .parse()?;
         let scope = function
             .scope()
