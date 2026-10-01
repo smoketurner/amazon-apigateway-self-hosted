@@ -36,15 +36,17 @@ use proxy_header::io::ProxiedStream;
 use proxy_header::{ParseConfig, Protocol};
 use rustls::pki_types::pem::PemObject as _;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::danger::ClientCertVerifier;
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio::task::JoinSet;
-use tokio_rustls::TlsAcceptor;
+use tokio_rustls::{LazyConfigAcceptor, server};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 
+use crate::client_cert::ClientCertDetails;
 use crate::domain::DomainName;
 use crate::header_case::{HeaderCaseQueue, HeaderCaseTap};
 use crate::identity::TrustedProxies;
@@ -90,8 +92,64 @@ impl ConnLimits {
 /// a remounted secret) needs no restart.
 #[derive(Clone)]
 pub(crate) struct Tls {
-    acceptor: TlsAcceptor,
+    default: Arc<rustls::ServerConfig>,
+    domains: Arc<[Arc<DomainTls>]>,
     certs: Arc<CertSet>,
+}
+
+/// Whether the clients of a custom domain must present a certificate.
+#[derive(Clone)]
+pub(crate) enum ClientAuth {
+    /// The domain has no truststore: any client may connect.
+    Open,
+    /// Clients must present a certificate this verifier accepts.
+    Required(Arc<dyn ClientCertVerifier>),
+    /// The domain requires client certificates but its truststore is not
+    /// loaded, so no client can be verified: connections are refused.
+    Unavailable,
+}
+
+/// The TLS configuration of one custom domain, which differs from the default
+/// in whether clients must present a certificate. Starts [`ClientAuth::Unavailable`]
+/// so a domain is never served before its client authentication is known.
+pub(crate) struct DomainTls {
+    name: DomainName,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+    resolver: Arc<dyn ResolvesServerCert>,
+    config: RwLock<Option<Arc<rustls::ServerConfig>>>,
+}
+
+impl DomainTls {
+    /// Changes whether (and by which truststore) clients are verified. Takes
+    /// effect for new connections.
+    ///
+    /// # Errors
+    ///
+    /// When rustls rejects the configuration; the previous one stays in place.
+    pub(crate) fn set_client_auth(&self, auth: ClientAuth) -> Result<(), TlsError> {
+        let config = match auth {
+            ClientAuth::Unavailable => None,
+            ClientAuth::Open => Some(Arc::new(Tls::server_config(
+                &self.provider,
+                &self.resolver,
+                None,
+            )?)),
+            ClientAuth::Required(verifier) => Some(Arc::new(Tls::server_config(
+                &self.provider,
+                &self.resolver,
+                Some(verifier),
+            )?)),
+        };
+        *self.config.write().unwrap_or_else(PoisonError::into_inner) = config;
+        Ok(())
+    }
+
+    fn config(&self) -> Option<Arc<rustls::ServerConfig>> {
+        self.config
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
 }
 
 /// The PEM files of a custom domain's certificate.
@@ -251,22 +309,25 @@ impl Tls {
     /// Server TLS with aws-lc-rs from PEM files; HTTP/2 is offered via ALPN.
     #[cfg(test)]
     pub(crate) fn from_pem_files(cert_path: &Path, key_path: &Path) -> Result<Self, TlsError> {
-        Self::with_domains(cert_path, key_path, &[])
+        Self::with_domains(cert_path, key_path, &[], &[])
     }
 
-    /// As [`Tls::from_pem_files`], with a certificate per custom domain served
-    /// to clients whose SNI names the domain.
+    /// As [`Tls::from_pem_files`], with `domains` as the custom domains served
+    /// here (each with its own client authentication, see
+    /// [`Tls::domain`]) and `certs` as the certificates of those that have
+    /// their own, served to clients whose SNI names the domain.
     pub(crate) fn with_domains(
         cert_path: &Path,
         key_path: &Path,
-        domains: &[DomainCert],
+        domains: &[DomainName],
+        certs: &[DomainCert],
     ) -> Result<Self, TlsError> {
         let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-        let mut stores = Vec::with_capacity(domains.len());
-        for domain in domains {
+        let mut stores = Vec::with_capacity(certs.len());
+        for cert in certs {
             stores.push((
-                domain.name.clone(),
-                CertStore::open(&domain.cert, &domain.key, &provider)?,
+                cert.name.clone(),
+                CertStore::open(&cert.cert, &cert.key, &provider)?,
             ));
         }
         let certs = Arc::new(CertSet {
@@ -274,15 +335,100 @@ impl Tls {
             domains: stores,
         });
         let resolver: Arc<dyn ResolvesServerCert> = Arc::<CertSet>::clone(&certs);
-        let mut config = rustls::ServerConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()?
-            .with_no_client_auth()
-            .with_cert_resolver(resolver);
-        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        let default = Arc::new(Self::server_config(&provider, &resolver, None)?);
+        let domains: Arc<[Arc<DomainTls>]> = domains
+            .iter()
+            .map(|name| {
+                Arc::new(DomainTls {
+                    name: name.clone(),
+                    provider: Arc::clone(&provider),
+                    resolver: Arc::clone(&resolver),
+                    config: RwLock::new(None),
+                })
+            })
+            .collect();
         Ok(Self {
-            acceptor: TlsAcceptor::from(Arc::new(config)),
+            default,
+            domains,
             certs,
         })
+    }
+
+    fn server_config(
+        provider: &Arc<rustls::crypto::CryptoProvider>,
+        resolver: &Arc<dyn ResolvesServerCert>,
+        verifier: Option<Arc<dyn ClientCertVerifier>>,
+    ) -> Result<rustls::ServerConfig, TlsError> {
+        let builder = rustls::ServerConfig::builder_with_provider(Arc::clone(provider))
+            .with_safe_default_protocol_versions()?;
+        let builder = match verifier {
+            Some(verifier) => builder.with_client_cert_verifier(verifier),
+            None => builder.with_no_client_auth(),
+        };
+        let mut config = builder.with_cert_resolver(Arc::clone(resolver));
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        Ok(config)
+    }
+
+    /// The certificate the client proved it holds in the handshake, when the
+    /// configuration asked for one. A certificate that rustls verified but this
+    /// gateway cannot describe is not reported, so a request that needs one is
+    /// refused.
+    fn verified_client_certificate(
+        io: &server::TlsStream<ClientStream>,
+    ) -> Option<ClientCertDetails> {
+        let certificate = io.get_ref().1.peer_certificates()?.first()?;
+        match ClientCertDetails::from_der(certificate.as_ref()) {
+            Ok(details) => Some(details),
+            Err(err) => {
+                tracing::warn!(%err, "a verified client certificate could not be read");
+                None
+            }
+        }
+    }
+
+    /// The TLS state of the custom domain `name`, if this listener serves it.
+    pub(crate) fn domain(&self, name: &DomainName) -> Option<Arc<DomainTls>> {
+        self.domains.iter().find(|d| &d.name == name).cloned()
+    }
+
+    /// The configuration for a client that asked for `server_name`: its
+    /// domain's, or the default. `None` when the domain refuses every client
+    /// (a truststore that is required but not loaded). An exact domain name
+    /// wins over a wildcard that also matches.
+    fn config_for(&self, server_name: Option<&str>) -> Option<Arc<rustls::ServerConfig>> {
+        let Some(server_name) = server_name else {
+            return Some(Arc::clone(&self.default));
+        };
+        let exact = self
+            .domains
+            .iter()
+            .find(|d| !d.name.as_str().starts_with("*.") && d.name.matches(server_name));
+        match exact.or_else(|| self.domains.iter().find(|d| d.name.matches(server_name))) {
+            Some(domain) => domain.config(),
+            None => Some(Arc::clone(&self.default)),
+        }
+    }
+
+    /// Whether a client asking for `server_name` would be served at all, rather
+    /// than refused because its domain's client authentication is unavailable.
+    #[cfg(test)]
+    pub(crate) fn serves(&self, server_name: &str) -> bool {
+        self.config_for(Some(server_name)).is_some()
+    }
+
+    /// Runs the TLS handshake on `stream`, choosing the configuration from the
+    /// client's SNI.
+    async fn accept(&self, stream: ClientStream) -> io::Result<server::TlsStream<ClientStream>> {
+        let start = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream).await?;
+        let server_name = start.client_hello().server_name().map(str::to_owned);
+        let Some(config) = self.config_for(server_name.as_deref()) else {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the domain's client authentication is not available",
+            ));
+        };
+        start.into_stream(config).await
     }
 
     /// Reloads every certificate whose files changed. A file that fails to load
@@ -448,7 +594,7 @@ impl Edge {
 /// What every connection of one listener shares.
 #[derive(Clone)]
 struct ConnShared {
-    tls: TlsAcceptor,
+    tls: Tls,
     app: Router,
     limits: ConnLimits,
     edge: Edge,
@@ -468,7 +614,7 @@ pub(crate) async fn serve(
 ) {
     let slots = Arc::new(Semaphore::new(max_connections));
     let shared = ConnShared {
-        tls: tls.acceptor.clone(),
+        tls,
         app,
         limits,
         edge,
@@ -582,6 +728,7 @@ async fn serve_connection(
         },
     };
 
+    let verified_cert = Tls::verified_client_certificate(&io);
     let activity = Activity::default();
     let idle = activity.subscribe();
     let header_case = HeaderCaseQueue::default();
@@ -589,7 +736,10 @@ async fn serve_connection(
     let service =
         TowerToHyperService::new(tower::service_fn(move |req: hyper::Request<Incoming>| {
             let mut req = req.map(Body::new);
-            let identity = edge.trusted.identify(peer, req.headers_mut());
+            let mut identity = edge.trusted.identify(peer, req.headers_mut());
+            if let Some(ref certificate) = verified_cert {
+                identity = identity.with_verified_certificate(certificate.clone());
+            }
             req.extensions_mut().insert(identity);
             if let Some(spelling) = header_case.pop() {
                 req.extensions_mut().insert(spelling);
@@ -752,6 +902,10 @@ pub(crate) mod test_tls {
     }
 
     impl TestCert {
+        pub(crate) fn der(&self) -> CertificateDer<'static> {
+            self.cert.clone()
+        }
+
         /// Writes the PEM files to a fresh directory and returns their paths.
         pub(crate) fn write(&self) -> (PathBuf, PathBuf) {
             let dir = std::env::temp_dir().join(format!("apigw-tls-{}", uuid::Uuid::now_v7()));
@@ -861,6 +1015,8 @@ mod tests {
 
     use super::test_tls::{TestCert, generate, generate_for};
     use super::*;
+    use crate::client_cert::tests::{TestCa, TestClient, ca as new_ca};
+    use crate::domain::Truststore;
 
     const SHORT: ConnLimits = ConnLimits {
         proxy_header: Duration::from_millis(300),
@@ -897,6 +1053,24 @@ mod tests {
                         .map_or("none", |case| case.spelling("x-mixed-case"))
                         .to_owned()
                 }),
+            )
+            .route(
+                "/client-cert",
+                get(
+                    |Extension(identity): Extension<ClientIdentity>| async move {
+                        format!(
+                            "{}|{}",
+                            identity.has_verified_certificate(),
+                            identity.client_cert().map_or_else(
+                                || "none".to_owned(),
+                                |c| c
+                                    .to_json()
+                                    .get("subjectDN")
+                                    .map_or_else(String::new, ToString::to_string)
+                            )
+                        )
+                    },
+                ),
             )
             .route(
                 "/forwarded",
@@ -987,7 +1161,14 @@ mod tests {
                 }
             })
             .collect();
-        let tls = Tls::with_domains(&cert, &key, &domains).unwrap();
+        let names: Vec<DomainName> = domains.iter().map(|d| d.name.clone()).collect();
+        let tls = Tls::with_domains(&cert, &key, &names, &domains).unwrap();
+        for name in &names {
+            tls.domain(name)
+                .unwrap()
+                .set_client_auth(ClientAuth::Open)
+                .unwrap();
+        }
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let shutdown = CancellationToken::new();
@@ -1061,11 +1242,13 @@ mod tests {
         let first = generate_for(&["api.example.test"]);
         let (cert_path, key_path) = first.write();
         let (default_cert, default_key) = default.write();
+        let name: DomainName = "api.example.test".parse().unwrap();
         let tls = Tls::with_domains(
             &default_cert,
             &default_key,
+            std::slice::from_ref(&name),
             &[DomainCert {
-                name: "api.example.test".parse().unwrap(),
+                name: name.clone(),
                 cert: cert_path.clone(),
                 key: key_path.clone(),
             }],
@@ -1091,6 +1274,200 @@ GET /spelling HTTP/1.1\r\nhost: localhost\r\nx-MIXED-case: x\r\nconnection: clos
         assert!(first < second, "{response}");
         shutdown.cancel();
         tokio::time::timeout(BOUND, handle).await.unwrap().unwrap();
+    }
+
+    const GET_CLIENT_CERT: &str =
+        "GET /client-cert HTTP/1.1\r\nhost: secure.example.test\r\nconnection: close\r\n\r\n";
+
+    /// A listener with `secure.example.test` requiring client certificates
+    /// issued by `trusted` and `open.example.test` requiring none.
+    async fn start_mutual_tls(
+        default: &TestCert,
+        secure: &TestCert,
+        trusted: Option<&TestCa>,
+    ) -> (SocketAddr, CancellationToken, Tls) {
+        let (cert, key) = default.write();
+        let (secure_cert, secure_key) = secure.write();
+        let secure_name: DomainName = "secure.example.test".parse().unwrap();
+        let open_name: DomainName = "open.example.test".parse().unwrap();
+        let tls = Tls::with_domains(
+            &cert,
+            &key,
+            &[secure_name.clone(), open_name.clone()],
+            &[DomainCert {
+                name: secure_name.clone(),
+                cert: secure_cert,
+                key: secure_key,
+            }],
+        )
+        .unwrap();
+        tls.domain(&open_name)
+            .unwrap()
+            .set_client_auth(ClientAuth::Open)
+            .unwrap();
+        let auth = match trusted {
+            Some(ca) => ClientAuth::Required(
+                Truststore::parse(ca.pem.as_bytes())
+                    .unwrap()
+                    .verifier()
+                    .unwrap(),
+            ),
+            None => ClientAuth::Unavailable,
+        };
+        tls.domain(&secure_name)
+            .unwrap()
+            .set_client_auth(auth)
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = CancellationToken::new();
+        tokio::spawn(serve(
+            listener,
+            tls.clone(),
+            app(),
+            SHORT,
+            8,
+            Edge::direct(),
+            shutdown.clone(),
+        ));
+        (addr, shutdown, tls)
+    }
+
+    /// Requests `/client-cert` as `server_name`, presenting `client` when given.
+    /// `None` when the connection or the request fails.
+    async fn client_cert_response(
+        server: &TestCert,
+        addr: SocketAddr,
+        server_name: &str,
+        client: Option<&TestClient>,
+    ) -> Option<String> {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(server.der()).unwrap();
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let builder = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots);
+        let config = match client {
+            Some(client) => builder
+                .with_client_auth_cert(client.chain.clone(), client.key.clone_key())
+                .unwrap(),
+            None => builder.with_no_client_auth(),
+        };
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+        let mut stream = connector
+            .connect(
+                rustls::pki_types::ServerName::try_from(server_name.to_owned()).unwrap(),
+                tcp,
+            )
+            .await
+            .ok()?;
+        let head = GET_CLIENT_CERT.replace("secure.example.test", server_name);
+        stream.write_all(head.as_bytes()).await.ok()?;
+        let mut out = Vec::new();
+        tokio::time::timeout(BOUND, stream.read_to_end(&mut out))
+            .await
+            .ok()?
+            .ok()?;
+        let response = String::from_utf8_lossy(&out).into_owned();
+        response.starts_with("HTTP/1.1 200").then_some(response)
+    }
+
+    #[tokio::test]
+    async fn a_client_with_a_trusted_certificate_connects_and_is_identified_by_it() {
+        let secure = generate_for(&["secure.example.test"]);
+        let ca = new_ca("test ca");
+        let client = ca.issue("client one", 2020, 2090);
+        let (addr, shutdown, _tls) = start_mutual_tls(&generate(), &secure, Some(&ca)).await;
+        let response = client_cert_response(&secure, addr, "secure.example.test", Some(&client))
+            .await
+            .unwrap();
+        assert!(
+            response.ends_with("true|\"C=US,O=Acme,CN=client one\""),
+            "{response}"
+        );
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn clients_without_a_trusted_certificate_cannot_connect_to_a_mutual_tls_domain() {
+        let secure = generate_for(&["secure.example.test"]);
+        let ca = new_ca("test ca");
+        let other_ca = new_ca("other ca");
+        let (addr, shutdown, _tls) = start_mutual_tls(&generate(), &secure, Some(&ca)).await;
+        let name = "secure.example.test";
+        assert!(
+            client_cert_response(&secure, addr, name, None)
+                .await
+                .is_none(),
+            "no certificate"
+        );
+        assert!(
+            client_cert_response(&secure, addr, name, Some(&other_ca.issue("x", 2020, 2090)))
+                .await
+                .is_none(),
+            "a certificate from another CA"
+        );
+        assert!(
+            client_cert_response(&secure, addr, name, Some(&ca.issue("x", 2000, 2001)))
+                .await
+                .is_none(),
+            "an expired certificate"
+        );
+        assert!(
+            client_cert_response(&secure, addr, name, Some(&ca.issue("x", 2090, 2095)))
+                .await
+                .is_none(),
+            "a certificate that is not valid yet"
+        );
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn other_names_are_not_asked_for_a_certificate() {
+        let default = generate_for(&["localhost", "open.example.test"]);
+        let secure = generate_for(&["secure.example.test"]);
+        let ca = new_ca("test ca");
+        let (addr, shutdown, _tls) = start_mutual_tls(&default, &secure, Some(&ca)).await;
+        for name in ["localhost", "open.example.test"] {
+            let response = client_cert_response(&default, addr, name, None)
+                .await
+                .unwrap();
+            assert!(response.ends_with("false|none"), "{name}: {response}");
+        }
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_domain_whose_truststore_is_unavailable_refuses_every_client() {
+        let secure = generate_for(&["secure.example.test"]);
+        let ca = new_ca("test ca");
+        let client = ca.issue("client", 2020, 2090);
+        let (addr, shutdown, tls) = start_mutual_tls(&generate(), &secure, None).await;
+        let name = "secure.example.test";
+        assert!(
+            client_cert_response(&secure, addr, name, Some(&client))
+                .await
+                .is_none()
+        );
+        assert!(tls.config_for(Some(name)).is_none());
+        let domain: DomainName = name.parse().unwrap();
+        let verifier = Truststore::parse(ca.pem.as_bytes())
+            .unwrap()
+            .verifier()
+            .unwrap();
+        tls.domain(&domain)
+            .unwrap()
+            .set_client_auth(ClientAuth::Required(verifier))
+            .unwrap();
+        assert!(
+            client_cert_response(&secure, addr, name, Some(&client))
+                .await
+                .is_some(),
+            "loading the truststore opens the domain to trusted clients"
+        );
+        shutdown.cancel();
     }
 
     #[tokio::test]

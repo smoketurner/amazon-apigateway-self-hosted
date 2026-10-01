@@ -17,8 +17,10 @@ use serde_json::Value;
 /// One request the mock received.
 #[derive(Debug, Clone)]
 pub(crate) struct Call {
-    /// The `X-Amz-Target` header, e.g. `Logs_20140328.PutLogEvents`.
+    /// The `X-Amz-Target` header, e.g. `Logs_20140328.PutLogEvents`, or the
+    /// request path for services that do not use one.
     pub(crate) target: String,
+    pub(crate) query: Option<String>,
     pub(crate) body: Value,
 }
 
@@ -98,6 +100,7 @@ async fn handle(
         .unwrap_or_else(PoisonError::into_inner)
         .push(Call {
             target: target.clone(),
+            query: uri.query().map(str::to_owned),
             body,
         });
     let reply = shared.reply_for(&target);
