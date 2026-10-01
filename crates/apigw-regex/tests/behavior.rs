@@ -34,14 +34,14 @@ fn backtrack_limit_is_a_typed_error() {
 #[test]
 fn linear_patterns_are_not_subject_to_the_backtrack_limit() {
     let options = RegexOptions::default().with_backtrack_limit(1);
-    let regex = JavaRegex::with_options(r"(a+)+b", &options).unwrap();
+    let regex = JavaRegex::with_options("(a+)+b", &options).unwrap();
     assert!(!regex.matches(&format!("{}c", "a".repeat(5_000))).unwrap());
 }
 
 #[test]
 fn oversized_programs_are_rejected_at_compile_time() {
     let options = RegexOptions::default().with_size_limit(10_000);
-    let err = JavaRegex::with_options(r"((a{100}){100}){100}", &options).unwrap_err();
+    let err = JavaRegex::with_options("((a{100}){100}){100}", &options).unwrap_err();
     assert!(matches!(err, RegexError::Engine(_)), "{err:?}");
     assert!(err.is_untranslatable());
 }

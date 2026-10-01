@@ -488,6 +488,7 @@ mod tests {
     use crate::authz::RouteAuthorizer;
     use crate::aws::{CredentialsMode, FunctionArn, LambdaEndpoints};
     use crate::header_case::HeaderCase;
+    use crate::integration::Integration;
     use crate::model::{MethodMatch, Protections, RouteKey, RoutePath};
     use crate::pipeline::context::tests::request;
     use crate::pipeline::context::{AuthorizerContext, QueryString};
@@ -672,7 +673,7 @@ mod tests {
             key: RouteKey::new(&MethodMatch::Any, &path),
             method: MethodMatch::Any,
             path,
-            integration: crate::integration::Integration::Unsupported {
+            integration: Integration::Unsupported {
                 reason: String::new(),
             },
             protections: Protections::default(),
@@ -828,7 +829,7 @@ mod tests {
 
         let mut body = response.into_body();
         let first = next_data(&mut body).await;
-        assert_eq!(&first[..], b"first;");
+        assert_eq!(&*first, b"first;");
         release.send(()).unwrap();
         let mut rest = Vec::new();
         while let Some(chunk) = try_next_data(&mut body).await {

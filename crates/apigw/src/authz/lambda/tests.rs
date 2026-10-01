@@ -33,9 +33,9 @@ fn token_pattern_classes_are_ascii_as_in_java() {
 
 #[test]
 fn java_constructs_beyond_plain_regular_expressions_work() {
-    assert!(matches(r"(?i)bearer .+", "BEARER x"));
-    assert!(matches(r"Bearer (?!none$).+", "Bearer x"));
-    assert!(!matches(r"Bearer (?!none$).+", "Bearer none"));
+    assert!(matches("(?i)bearer .+", "BEARER x"));
+    assert!(matches("Bearer (?!none$).+", "Bearer x"));
+    assert!(!matches("Bearer (?!none$).+", "Bearer none"));
     assert!(matches(r"(\w)\1", "aa"));
 }
 
@@ -74,7 +74,7 @@ fn malformed_responses_are_configuration_errors() {
         br#"{"principalId":"u","policyDocument":"{}"}"#,
         br#"{"principalId":"u","policyDocument":{"Statement":[]},"context":[]}"#,
         br#"{"principalId":"u","policyDocument":{"Statement":[]},"context":{"k":null}}"#,
-        br"[]",
+        b"[]",
         b"",
     ] {
         assert_eq!(

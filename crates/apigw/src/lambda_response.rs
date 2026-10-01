@@ -321,7 +321,7 @@ mod tests {
         assert_eq!(response.headers()["x-num"], "2");
         assert_eq!(response.headers().get_all("x-many").iter().count(), 2);
         assert_eq!(response.headers()["set-cookie"], "c=1");
-        assert_eq!(&body_of(response).await[..], b"hi");
+        assert_eq!(&*body_of(response).await, b"hi");
     }
 
     #[tokio::test]
@@ -364,7 +364,7 @@ mod tests {
         assert!(response.headers().get("transfer-encoding").is_none());
         assert!(response.headers().get("connection").is_none());
         assert_eq!(response.headers()["x-keep"], "1");
-        assert_eq!(&body_of(response).await[..], b"hello");
+        assert_eq!(&*body_of(response).await, b"hello");
     }
 
     #[tokio::test]
@@ -378,7 +378,7 @@ mod tests {
                 ProxyResponse::into_http(payload.as_bytes(), PayloadVersion::V2).unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(response.headers()["content-type"], "application/json");
-            assert_eq!(&body_of(response).await[..], expected.as_bytes());
+            assert_eq!(&*body_of(response).await, expected.as_bytes());
         }
     }
 
@@ -414,7 +414,7 @@ mod tests {
         wire.extend_from_slice(&PRELUDE_DELIMITER);
         wire.extend_from_slice(b"first");
         let (prelude, payload) = StreamPrelude::split(&wire, wire.len() - 5 - 8).unwrap();
-        assert_eq!(&payload[..], b"first");
+        assert_eq!(&*payload, b"first");
         let mut response = Response::new(Body::empty());
         prelude.into_head(&mut response).unwrap();
         assert_eq!(response.status(), StatusCode::ACCEPTED);

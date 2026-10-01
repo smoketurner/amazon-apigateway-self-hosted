@@ -357,7 +357,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for HeaderCaseTap<S> {
         let this = self.get_mut();
         let before = buf.filled().len();
         let poll = Pin::new(&mut this.inner).poll_read(cx, buf);
-        if let Poll::Ready(Ok(())) = poll
+        if matches!(poll, Poll::Ready(Ok(())))
             && let Some(fresh) = buf.filled().get(before..)
         {
             for head in this.scanner.feed(fresh) {

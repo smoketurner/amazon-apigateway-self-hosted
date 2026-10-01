@@ -239,11 +239,12 @@ mod tests {
     use super::*;
     use crate::authz::RouteAuthorizer;
     use crate::integration::Integration;
-    use crate::model::{ApiKind, MethodMatch, Protections, RouteKey};
+    use crate::model::{ApiKind, MethodMatch, Protections, ResponseTransferMode, RouteKey};
     use crate::pipeline::context::QueryString;
+    use crate::pipeline::context::tests::request;
 
     fn incoming(params: &[(&str, &str)], query: Option<&str>) -> RequestContext {
-        let mut ctx = crate::pipeline::context::tests::request(ApiKind::Rest);
+        let mut ctx = request(ApiKind::Rest);
         ctx.headers
             .insert("x-tenant", HeaderValue::from_static("acme"));
         ctx.method = Method::GET;
@@ -263,7 +264,7 @@ mod tests {
             query_params: BTreeMap::new(),
             headers: BTreeMap::new(),
             timeout: Duration::from_secs(1),
-            transfer: crate::model::ResponseTransferMode::Buffered,
+            transfer: ResponseTransferMode::Buffered,
         }
     }
 

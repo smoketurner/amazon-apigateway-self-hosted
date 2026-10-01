@@ -21,7 +21,9 @@ use crate::gateway::{ApiContext, AuthorizationMode, Enforcement, Unsupported};
 use crate::gateway_response::GatewayResponses;
 use crate::integration::StageVariables;
 use crate::model::{ApiKind, ApiModel, IntegrationOverrides, StageSettings};
-use crate::router::{RouteSummary, build};
+use crate::observability::StageObserver;
+use crate::router::{BasePath, RouteSummary, build};
+use crate::state::{InMemory, InMemoryLimits, StateBackend};
 
 const AUTH_FUNCTION: &str = "arn:aws:lambda:us-east-1:123456789012:function:auth";
 const ECHO_FUNCTION: &str = "arn:aws:lambda:us-east-1:123456789012:function:echo";
@@ -213,15 +215,15 @@ impl Harness {
                 request_validation: Unsupported::Reject,
             },
             responses: GatewayResponses::default(),
-            state: Arc::new(crate::state::StateBackend::InMemory(
-                crate::state::InMemory::new(crate::state::InMemoryLimits::default()),
-            )),
+            state: Arc::new(StateBackend::InMemory(InMemory::new(
+                InMemoryLimits::default(),
+            ))),
             replicas: std::num::NonZeroU32::MIN,
-            observer: crate::observability::StageObserver::disabled(),
+            observer: StageObserver::disabled(),
             http: reqwest::Client::new(),
             aws,
         });
-        let (router, summaries) = build(&model, &api, &crate::router::BasePath::default());
+        let (router, summaries) = build(&model, &api, &BasePath::default());
         Self {
             router,
             summaries,

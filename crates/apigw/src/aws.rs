@@ -683,7 +683,7 @@ mod tests {
         let app = axum::Router::new()
             .route(
                 "/ok",
-                post(|headers: HeaderMap, body: axum::body::Bytes| async move {
+                post(|headers: HeaderMap, body: Bytes| async move {
                     let trace = headers
                         .get("x-amzn-trace-id")
                         .and_then(|v| v.to_str().ok())

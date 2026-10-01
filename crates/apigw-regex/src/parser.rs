@@ -346,7 +346,7 @@ impl Parser {
         Ok(vec![node])
     }
 
-    fn parse_named_character(&mut self, start: usize) -> RegexError {
+    fn parse_named_character(&self, start: usize) -> RegexError {
         if self.raw(0) == Some('{') {
             RegexError::unsupported(Unsupported::NamedCharacter, start)
         } else {
@@ -354,7 +354,7 @@ impl Parser {
         }
     }
 
-    fn parse_boundary(&mut self, negated: bool, start: usize) -> Result<Node, RegexError> {
+    fn parse_boundary(&self, negated: bool, start: usize) -> Result<Node, RegexError> {
         if self.raw(0) == Some('{') {
             return Err(RegexError::unsupported(Unsupported::GraphemeCluster, start));
         }
