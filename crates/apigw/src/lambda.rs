@@ -13,8 +13,10 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::gateway::{self, ApiContext, Incoming};
+use crate::integration::LambdaProxy;
+use crate::model::{PayloadVersion, RoutePath};
 use crate::proxy::timeout_error;
-use crate::spec::{LambdaProxy, PayloadVersion, Route, RoutePath};
+use crate::route::Route;
 
 pub(crate) async fn invoke(
     ctx: &ApiContext,
@@ -34,12 +36,12 @@ pub(crate) async fn invoke(
         .send();
     let output = match tokio::time::timeout(target.timeout, call).await {
         Err(_) => {
-            tracing::warn!(route = %route.route_key(), function = target.function, "Lambda invocation timed out");
+            tracing::warn!(route = %route.key, function = target.function, "Lambda invocation timed out");
             return timeout_error(ctx.kind);
         }
         Ok(Err(err)) => {
             tracing::error!(
-                route = %route.route_key(),
+                route = %route.key,
                 function = target.function,
                 err = %aws_sdk_lambda::error::DisplayErrorContext(err),
                 "Lambda invocation failed"
@@ -49,14 +51,14 @@ pub(crate) async fn invoke(
         Ok(Ok(output)) => output,
     };
     if let Some(function_error) = output.function_error {
-        tracing::warn!(route = %route.route_key(), function = target.function, function_error, "Lambda function returned an error");
+        tracing::warn!(route = %route.key, function = target.function, function_error, "Lambda function returned an error");
         return internal_error();
     }
     let payload = output.payload.map(Blob::into_inner).unwrap_or_default();
     match into_response(&payload, target.payload) {
         Ok(response) => response,
         Err(reason) => {
-            tracing::error!(route = %route.route_key(), function = target.function, reason, "malformed Lambda proxy response");
+            tracing::error!(route = %route.key, function = target.function, reason, "malformed Lambda proxy response");
             internal_error()
         }
     }
@@ -179,7 +181,7 @@ fn event_v2(ctx: &ApiContext, route: &Route, incoming: &Incoming) -> Value {
         join_into(&mut query, key, value);
     }
     let (body, is_base64) = encode_body(&incoming.body);
-    let route_key = route.route_key();
+    let route_key = &route.key;
     let host = incoming.header_str("host").unwrap_or_default();
     let mut event = json!({
         "version": "2.0",
@@ -327,7 +329,8 @@ mod tests {
 
     use super::*;
     use crate::gateway::{AuthorizationMode, Enforcement, Unsupported};
-    use crate::spec::{ApiKind, Integration, MethodMatch, Protections};
+    use crate::integration::{Integration, StageVariables};
+    use crate::model::{ApiKind, MethodMatch, Protections, RouteKey};
 
     fn ctx(kind: ApiKind) -> ApiContext {
         let config = aws_config::SdkConfig::builder()
@@ -337,7 +340,10 @@ mod tests {
             kind,
             api_id: "abc123".to_owned(),
             stage: Some("prod".to_owned()),
-            stage_variables: BTreeMap::from([("env".to_owned(), "local".to_owned())]),
+            stage_variables: StageVariables::new(BTreeMap::from([(
+                "env".to_owned(),
+                "local".to_owned(),
+            )])),
             enforcement: Enforcement {
                 authorization: AuthorizationMode::Enforce,
                 resource_policy: Unsupported::Reject,
@@ -349,13 +355,17 @@ mod tests {
     }
 
     fn route() -> Route {
+        let method = MethodMatch::Exact(Method::POST);
+        let path = RoutePath::Resource("/pets/{petId}".to_owned());
         Route {
-            method: MethodMatch::Exact(Method::POST),
-            path: RoutePath::Resource("/pets/{petId}".to_owned()),
+            key: RouteKey::new(&method, &path),
+            method,
+            path,
             integration: Integration::Unsupported {
                 reason: String::new(),
             },
             protections: Protections::default(),
+            unenforced: Vec::new(),
         }
     }
 
@@ -423,7 +433,7 @@ mod tests {
         req.query = None;
         req.path_params.clear();
         let mut context = ctx(ApiKind::Rest);
-        context.stage_variables.clear();
+        context.stage_variables = StageVariables::default();
         let v1 = event_v1(&context, &route(), &req);
         assert!(v1["queryStringParameters"].is_null());
         assert!(v1["pathParameters"].is_null());

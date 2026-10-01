@@ -5,6 +5,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `ApiModel`: the export and `GetStage` are imported into one typed model covering
+  integrations (all fields, `$ref` resolution), request parameters and bodies, validators,
+  authorizers, models, gateway responses, binary media types, compression, API key source,
+  CORS, resource policy, and stage settings (method/route settings, access logs, tracing,
+  canary, caching). `/routes` lists every imported feature that is not enforced yet.
+- Refresh calls `GetStage` first and re-downloads the export only when the deployment changed;
+  failed refreshes back off exponentially with jitter.
+
 ### Fixed
 
 - Resource policies and request validators were silently ignored because the REST export did

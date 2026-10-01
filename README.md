@@ -34,6 +34,9 @@ Management's
 | `AWS`/`HTTP` (non-proxy, VTL mapping templates), VPC links | Answer `501`; listed with the reason on `/routes` |
 | Unknown route | REST: `403 {"message":"Missing Authentication Token"}`; HTTP: `404 {"message":"Not Found"}` |
 
+`/routes` on the admin listener lists, per route, its protections, any problems, and any
+imported settings not enforced yet, plus the API-wide settings not enforced yet.
+
 Every response carries a request ID (`x-amzn-requestid` for REST APIs, `apigw-requestid` for
 HTTP APIs).
 

@@ -6,7 +6,9 @@ use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::Response;
 
 use crate::gateway::{self, Incoming, is_hop_by_hop};
-use crate::spec::{ApiKind, HttpProxy, ParamSource, Route, RoutePath};
+use crate::integration::{HttpProxy, ParamSource};
+use crate::model::{ApiKind, RoutePath};
+use crate::route::Route;
 
 pub(crate) async fn forward(
     client: &reqwest::Client,
@@ -18,7 +20,7 @@ pub(crate) async fn forward(
     let url = match target_url(target, route, &incoming) {
         Ok(url) => url,
         Err(err) => {
-            tracing::error!(route = %route.route_key(), uri = target.uri, %err, "invalid integration URI");
+            tracing::error!(route = %route.key, uri = target.uri, %err, "invalid integration URI");
             return internal_error();
         }
     };
@@ -70,11 +72,11 @@ pub(crate) async fn forward(
     let upstream = match result {
         Ok(upstream) => upstream,
         Err(err) if err.is_timeout() => {
-            tracing::warn!(route = %route.route_key(), "integration timed out");
+            tracing::warn!(route = %route.key, "integration timed out");
             return timeout_error(kind);
         }
         Err(err) => {
-            tracing::warn!(route = %route.route_key(), err = %err, "integration request failed");
+            tracing::warn!(route = %route.key, err = %err, "integration request failed");
             return internal_error();
         }
     };
@@ -220,7 +222,8 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::spec::{Integration, MethodMatch, Protections};
+    use crate::integration::Integration;
+    use crate::model::{MethodMatch, Protections, RouteKey};
 
     fn incoming(params: &[(&str, &str)], query: Option<&str>) -> Incoming {
         let mut headers = HeaderMap::new();
@@ -253,11 +256,14 @@ mod tests {
     }
 
     fn route(path: &str, target: &HttpProxy) -> Route {
+        let path = RoutePath::Resource(path.to_owned());
         Route {
+            key: RouteKey::new(&MethodMatch::Any, &path),
             method: MethodMatch::Any,
-            path: RoutePath::Resource(path.to_owned()),
+            path,
             integration: Integration::HttpProxy(target.clone()),
             protections: Protections::default(),
+            unenforced: Vec::new(),
         }
     }
 

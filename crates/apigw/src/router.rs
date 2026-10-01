@@ -16,9 +16,9 @@ use tower::ServiceExt as _;
 use uuid::Uuid;
 
 use crate::gateway::{self, ApiContext, Enforcement, RequestId, request_id_header};
-use crate::spec::{
-    ApiDefinition, ApiKind, Integration, MethodMatch, Protections, Route, RoutePath,
-};
+use crate::integration::Integration;
+use crate::model::{ApiKind, ApiModel, Feature, MethodMatch, Protections, RouteKey, RoutePath};
+use crate::route::Route;
 
 /// A stage prefix such as `/prod` that every route is served under, as on an
 /// `execute-api` endpoint. Empty serves routes at the root, as on a custom domain.
@@ -56,18 +56,23 @@ pub(crate) struct Loaded {
 pub(crate) struct LoadSummary {
     pub(crate) api_id: String,
     pub(crate) stage: Option<String>,
+    pub(crate) deployment_id: Option<String>,
     pub(crate) loaded_at: String,
+    /// API- and stage-level features imported but not enforced yet.
+    pub(crate) unenforced: Vec<Feature>,
     pub(crate) routes: Vec<RouteSummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct RouteSummary {
-    pub(crate) route_key: String,
+    pub(crate) route_key: RouteKey,
     pub(crate) integration: &'static str,
     pub(crate) target: Option<String>,
     pub(crate) protections: Protections,
     /// Why the route is not being served as API Gateway would serve it.
     pub(crate) problems: Vec<String>,
+    /// Settings on this route that are imported but not enforced yet.
+    pub(crate) unenforced: Vec<Feature>,
 }
 
 impl RouteSummary {
@@ -86,11 +91,12 @@ impl RouteSummary {
             }
         };
         Self {
-            route_key: route.route_key(),
+            route_key: route.key.clone(),
             integration: route.integration.kind(),
             target,
             protections: route.protections.clone(),
             problems,
+            unenforced: route.unenforced.clone(),
         }
     }
 }
@@ -144,14 +150,19 @@ fn axum_path(path: &str) -> Result<String, String> {
 }
 
 pub(crate) fn build(
-    definition: &ApiDefinition,
+    model: &ApiModel,
     ctx: &Arc<ApiContext>,
     base: &BasePath,
 ) -> (Router, Vec<RouteSummary>) {
-    let mut summaries = Vec::with_capacity(definition.routes.len());
+    let routes: Vec<Route> = model
+        .operations
+        .iter()
+        .map(|operation| Route::compile(operation, model.kind, &ctx.stage_variables))
+        .collect();
+    let mut summaries = Vec::with_capacity(routes.len());
     let mut default = None;
     let mut by_path: BTreeMap<String, BTreeMap<MethodMatch, Route>> = BTreeMap::new();
-    for route in &definition.routes {
+    for route in &routes {
         let mut summary = RouteSummary::new(route, ctx.enforcement);
         match route.path {
             RoutePath::Default => default = Some(Arc::new(route.clone())),
@@ -178,7 +189,7 @@ pub(crate) fn build(
         if let Err(err) = matcher.insert(path.as_str(), ()) {
             tracing::error!(path, %err, "route conflicts with another route; skipping it");
             for summary in &mut summaries {
-                if methods.values().any(|r| r.route_key() == summary.route_key) {
+                if methods.values().any(|r| r.key == summary.route_key) {
                     summary.problems.push(format!("not served: {err}"));
                 }
             }
@@ -267,8 +278,6 @@ pub(crate) fn admin(current: watch::Receiver<Arc<Loaded>>) -> Router {
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests assert on known-good fixtures")]
 mod tests {
-    use std::collections::BTreeMap;
-
     use axum::body::Body;
     use axum::http::StatusCode;
     use proptest::prelude::*;
@@ -276,7 +285,8 @@ mod tests {
 
     use super::*;
     use crate::gateway::{AuthorizationMode, Unsupported};
-    use crate::spec::{IntegrationOverrides, Protection};
+    use crate::integration::StageVariables;
+    use crate::model::{IntegrationOverrides, Protection, StageSettings};
 
     const STRICT: Enforcement = Enforcement {
         authorization: AuthorizationMode::Enforce,
@@ -292,7 +302,7 @@ mod tests {
             kind,
             api_id: "abc".to_owned(),
             stage: None,
-            stage_variables: BTreeMap::new(),
+            stage_variables: StageVariables::default(),
             enforcement,
             http: reqwest::Client::new(),
             lambda: aws_sdk_lambda::Client::new(&config),
@@ -329,10 +339,14 @@ mod tests {
         enforcement: Enforcement,
         base: &str,
     ) -> (Router, Vec<RouteSummary>) {
-        let def =
-            ApiDefinition::from_openapi(doc, kind, &BTreeMap::new(), &IntegrationOverrides::new())
-                .unwrap();
-        build(&def, &ctx(kind, enforcement), &base.parse().unwrap())
+        let model = ApiModel::import(
+            doc,
+            kind,
+            StageSettings::default(),
+            &IntegrationOverrides::default(),
+        )
+        .unwrap();
+        build(&model, &ctx(kind, enforcement), &base.parse().unwrap())
     }
 
     fn protected_doc() -> Value {
@@ -640,7 +654,9 @@ mod tests {
                 summary: LoadSummary {
                     api_id: "abc".to_owned(),
                     stage: None,
+                    deployment_id: None,
                     loaded_at: String::new(),
+                    unenforced: Vec::new(),
                     routes: summary,
                 },
             })
