@@ -19,13 +19,12 @@ impl HttpProxy {
         client: &reqwest::Client,
         route: &Route,
         ctx: &mut RequestContext,
-    ) -> Response {
-        let kind = ctx.api.kind;
+    ) -> Result<Response, GatewayError> {
         let url = match self.target_url(&route.path, ctx) {
             Ok(url) => url,
             Err(err) => {
                 tracing::error!(route = %route.key, uri = self.uri, %err, "invalid integration URI");
-                return GatewayError::IntegrationFailure.response(kind);
+                return Err(GatewayError::ApiConfiguration);
             }
         };
         let method = self.method.clone().unwrap_or_else(|| ctx.method.clone());
@@ -67,11 +66,11 @@ impl HttpProxy {
             Ok(upstream) => upstream,
             Err(err) if err.is_timeout() => {
                 tracing::warn!(route = %route.key, "integration timed out");
-                return GatewayError::IntegrationTimeout.response(kind);
+                return Err(GatewayError::IntegrationTimeout);
             }
             Err(err) => {
                 tracing::warn!(route = %route.key, err = %err, "integration request failed");
-                return GatewayError::IntegrationFailure.response(kind);
+                return Err(GatewayError::IntegrationUnreachable);
             }
         };
         let headers_after = u64::try_from(started.elapsed().as_millis()).ok();
@@ -91,7 +90,7 @@ impl HttpProxy {
             }
         }
         *response.body_mut() = Body::from_stream(upstream.bytes_stream());
-        response
+        Ok(response)
     }
 
     /// Fills `{name}` placeholders in the integration URI and carries the
@@ -152,6 +151,8 @@ impl ParamSource {
                 .find(|(key, _)| key == name)
                 .map(|(_, value)| value),
             Self::Header(ref name) => ctx.header_str(name).map(str::to_owned),
+            Self::Context(ref path) => ctx.context_value(path),
+            Self::StageVariable(ref name) => ctx.stage_variables.get(name).map(str::to_owned),
             Self::Literal(ref value) => Some(value.clone()),
         }
     }
@@ -233,7 +234,7 @@ mod tests {
     use super::*;
     use crate::integration::Integration;
     use crate::model::{ApiKind, MethodMatch, Protections, RouteKey};
-    use crate::pipeline::QueryString;
+    use crate::pipeline::context::QueryString;
 
     fn incoming(params: &[(&str, &str)], query: Option<&str>) -> RequestContext {
         let mut ctx = crate::pipeline::context::tests::request(ApiKind::Rest);
@@ -395,7 +396,11 @@ mod tests {
         addr
     }
 
-    async fn send(target: HttpProxy, route_path: &str, mut request: RequestContext) -> Response {
+    async fn send(
+        target: HttpProxy,
+        route_path: &str,
+        mut request: RequestContext,
+    ) -> Result<Response, GatewayError> {
         let route = route(route_path, &target);
         target
             .forward(&reqwest::Client::new(), &route, &mut request)
@@ -419,7 +424,7 @@ mod tests {
             "x-forwarded-for",
             HeaderValue::from_static("198.51.100.1, 192.0.2.9"),
         );
-        let response = send(target, "/{proxy+}", request).await;
+        let response = send(target, "/{proxy+}", request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["x-upstream"], "yes");
         assert!(response.headers().get("connection").is_none());
@@ -448,7 +453,7 @@ mod tests {
         let addr = upstream().await;
         let mut target = proxy(&format!("http://{addr}/echo/fixed"));
         target.method = Some(Method::PUT);
-        let response = send(target, "/x", incoming(&[], None)).await;
+        let response = send(target, "/x", incoming(&[], None)).await.unwrap();
         let body = axum::body::to_bytes(response.into_body(), 1 << 20)
             .await
             .unwrap();
@@ -461,24 +466,29 @@ mod tests {
         let addr = upstream().await;
         let mut target = proxy(&format!("http://{addr}/slow"));
         target.timeout = Duration::from_millis(100);
-        let response = send(target, "/slow", incoming(&[], None)).await;
-        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        let error = send(target, "/slow", incoming(&[], None))
+            .await
+            .unwrap_err();
+        assert_eq!(error, GatewayError::IntegrationTimeout);
     }
 
     #[tokio::test]
-    async fn unreachable_upstreams_and_bad_uris_answer_502() {
+    async fn unreachable_upstreams_and_bad_uris_are_gateway_errors() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let closed = listener.local_addr().unwrap();
         drop(listener);
-        let response = send(
+        let error = send(
             proxy(&format!("http://{closed}/")),
             "/x",
             incoming(&[], None),
         )
-        .await;
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-        let response = send(proxy("http://up/{missing}"), "/x", incoming(&[], None)).await;
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        .await
+        .unwrap_err();
+        assert_eq!(error, GatewayError::IntegrationUnreachable);
+        let error = send(proxy("http://up/{missing}"), "/x", incoming(&[], None))
+            .await
+            .unwrap_err();
+        assert_eq!(error, GatewayError::ApiConfiguration);
     }
 
     proptest! {

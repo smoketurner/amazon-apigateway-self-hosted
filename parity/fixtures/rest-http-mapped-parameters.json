@@ -1,0 +1,19 @@
+{
+  "name": "rest-http-mapped-parameters",
+  "source": "hand_written",
+  "api": "rest",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    }
+  },
+  "echo": {
+    "method": "GET",
+    "path": "/http-mapped/42",
+    "query": "fixed=literal&mappedQuery=hello&q=hello",
+    "headers": {
+      "x-mapped-header": "abc"
+    }
+  }
+}

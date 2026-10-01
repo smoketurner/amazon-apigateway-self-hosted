@@ -7,6 +7,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `docs/parity.md`, a feature matrix of what `apigw` supports, partially supports, plans (with issue
+  links), or cannot do, for REST and HTTP APIs.
 - Requests run through an explicit `Pipeline` in API Gateway's stage order, carrying a
   `RequestContext` that owns the `$context` variables used by events and, later, templates,
   gateway responses, and access logs.
@@ -23,6 +25,14 @@ All notable changes to this project are documented here. The format follows
 - Istio `X-Forwarded-Client-Cert` is parsed (Subject, Hash, URI/DNS SANs, `Cert`) from trusted
   proxies and kept with the client identity for upcoming mTLS support.
 
+- REST gateway responses: every error the gateway generates (missing authentication token,
+  invalid API key, unauthorized, integration failure and timeout, 413, and the rest) uses API
+  Gateway's default status and message and applies the API's customizations from
+  `x-amazon-apigateway-gateway-responses`: status code, `gatewayresponse.header.*` parameters
+  (literals, `context.*`, `method.request.*`, `stageVariables.*`), and body templates with simple
+  `$context`, `$stageVariables`, and `$method.request.*` substitution (no VTL), with
+  `DEFAULT_4XX`/`DEFAULT_5XX` fallback. Error responses carry `x-amzn-ErrorType` and
+  `x-amz-apigw-id`. The 413 response is not customizable. HTTP APIs keep fixed messages.
 - Lambda proxy events match API Gateway's `requestContext`: `accountId` (from the function
   ARN), `extendedRequestId`, `resourceId`, the full `identity` block, and `protocol`
   (REST reports `HTTP/1.1` as API Gateway documents; HTTP APIs report the client's version).
@@ -40,12 +50,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- An `HTTP_PROXY` backend that cannot be reached now answers REST clients 504 `Network error
+  communicating with endpoint` (`INTEGRATION_FAILURE`) instead of 502; an invalid integration URI
+  answers 500 (`API_CONFIGURATION_ERROR`).
+- `$context.extendedRequestId` is a 12-character token, the same value as the `x-amz-apigw-id`
+  response header.
+- `requestParameters` mappings accept `context.*` and `stageVariables.*` sources.
 - `X-Forwarded-For` sent by a client that is not a trusted proxy is no longer forwarded to
   `HTTP_PROXY` integrations: it is replaced by the client's address. `X-Forwarded-Client-Cert` is
   removed from such requests. Set `--trusted-proxies` to keep forwarding a proxy's headers.
-- `reference/terraform/`: a Terraform stack that deploys REGIONAL REST and HTTP reference APIs
+- `terraform/`: Terraform modules and a `dev` environment that deploy REGIONAL REST and HTTP reference APIs
   (plus an echo Lambda, authorizers, Cognito, service targets, and a GitHub OIDC role) to measure
-  parity against real API Gateway. See `reference/README.md`.
+  parity against real API Gateway. See `terraform/README.md`.
 - `ApiModel`: the export and `GetStage` are imported into one typed model covering
   integrations (all fields, `$ref` resolution), request parameters and bodies, validators,
   authorizers, models, gateway responses, binary media types, compression, API key source,
@@ -53,6 +69,10 @@ All notable changes to this project are documented here. The format follows
   canary, caching). `/routes` lists every imported feature that is not enforced yet.
 - Refresh calls `GetStage` first and re-downloads the export only when the deployment changed;
   failed refreshes back off exponentially with jitter.
+- `crates/apigw-parity`, a dev tool with `record` (capture the reference APIs' behavior as
+  normalized, redacted fixtures) and `replay` (serve the recorded export with `apigw` and diff
+  its answers). Seed cases and hand-written fixtures live in `parity/`; CI runs `replay`, and
+  `.github/workflows/parity.yml` re-records nightly and opens an issue on drift.
 
 ### Fixed
 

@@ -1,0 +1,107 @@
+cases:
+  # MOCK integrations
+  - name: rest-mock-ok
+    api: rest
+    path: /mock
+    compare:
+      headers: [content-type, x-mock]
+
+  - name: rest-mock-teapot
+    api: rest
+    path: /mock/teapot
+    compare:
+      headers: [content-type]
+
+  - name: rest-mock-vtl
+    api: rest
+    path: /mock/vtl
+    query: {name: world}
+    known_gap: "#23"
+    compare:
+      body: json
+
+  - name: rest-cors-preflight
+    api: rest
+    method: OPTIONS
+    path: /cors
+    compare:
+      headers: [access-control-allow-origin, access-control-allow-methods, access-control-allow-headers]
+      body: ignore
+
+  # HTTP_PROXY through the shared-secret function URL echo
+  - name: rest-http-proxy-greedy
+    api: rest
+    path: /http-proxy/a/b
+    query: {x: "1", y: "2"}
+    compare:
+      headers: [content-type]
+      body: ignore
+      echo: {}
+
+  - name: rest-http-proxy-post-body
+    api: rest
+    method: POST
+    path: /http-proxy/items
+    headers: {content-type: application/json}
+    body: '{"name":"widget"}'
+    compare:
+      body: ignore
+      echo: {fields: [method, path, query, body], headers: [content-type]}
+
+  - name: rest-http-mapped-parameters
+    api: rest
+    path: /http-mapped/42
+    query: {q: hello}
+    headers: {x-from-client: abc}
+    compare:
+      body: ignore
+      echo: {headers: [x-mapped-header]}
+
+  # Errors API Gateway answers before any integration runs
+  - name: rest-unknown-route
+    api: rest
+    path: /does-not-exist
+    compare:
+      headers: [content-type]
+
+  - name: rest-wrong-method
+    api: rest
+    method: POST
+    path: /mock
+    compare:
+      headers: [content-type]
+
+  - name: rest-api-key-missing
+    api: rest
+    path: /keyed
+    compare:
+      headers: [content-type]
+
+  - name: rest-token-authorizer-missing-token
+    api: rest
+    path: /authz/token
+    compare:
+      headers: [content-type]
+
+  - name: rest-request-authorizer-missing-identity
+    api: rest
+    path: /authz/request
+    compare:
+      headers: [content-type]
+
+  - name: rest-cognito-authorizer-missing-token
+    api: rest
+    path: /authz/cognito
+    compare:
+      headers: [content-type]
+
+  # Request validation is not run yet; API Gateway rejects before the integration
+  - name: rest-validated-missing-parameters
+    api: rest
+    method: POST
+    path: /validated/1
+    headers: {content-type: application/json}
+    body: '{"name":"widget"}'
+    known_gap: "#36"
+    compare:
+      body: ignore

@@ -1,0 +1,9 @@
+region      = "us-east-1"
+name_prefix = "apigw-ref"
+stage_name  = "ref"
+
+# Opt-in features that bill hourly or change account-wide settings.
+enable_logging                 = false
+manage_account_cloudwatch_role = false
+enable_cache_cluster           = false
+enable_vpc_link                = false

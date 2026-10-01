@@ -32,8 +32,7 @@ impl LambdaProxy {
         route: &Route,
         ctx: &mut RequestContext,
         stage_variables: &StageVariables,
-    ) -> Response {
-        let kind = ctx.api.kind;
+    ) -> Result<Response, GatewayError> {
         let event = ProxyEvent {
             ctx,
             stage_variables,
@@ -44,7 +43,7 @@ impl LambdaProxy {
         .into_bytes();
         if event.len() > LAMBDA_PAYLOAD_LIMIT {
             tracing::warn!(route = %route.key, function = %self.function, bytes = event.len(), "request is larger than Lambda's invocation payload limit");
-            return GatewayError::IntegrationFailure.response(kind);
+            return Err(GatewayError::IntegrationFailure);
         }
         ctx.integration.transfer_mode = Some(self.transfer);
         let started = Instant::now();
@@ -55,13 +54,10 @@ impl LambdaProxy {
             }
         };
         ctx.integration.latency_ms = u64::try_from(started.elapsed().as_millis()).ok();
-        match result {
-            Ok(response) => {
-                ctx.integration.status = Some(response.status().as_u16());
-                response
-            }
-            Err(error) => error.response(kind),
+        if let Ok(ref response) = result {
+            ctx.integration.status = Some(response.status().as_u16());
         }
+        result
     }
 
     async fn invoke_buffered(
@@ -435,7 +431,7 @@ mod tests {
     use crate::aws::{CredentialsMode, FunctionArn, LambdaEndpoints};
     use crate::header_case::HeaderCase;
     use crate::model::{MethodMatch, Protections, RouteKey, RoutePath};
-    use crate::pipeline::QueryString;
+    use crate::pipeline::context::QueryString;
     use crate::pipeline::context::tests::request;
 
     fn variables() -> StageVariables {
@@ -670,7 +666,7 @@ mod tests {
         transfer: ResponseTransferMode,
         endpoint: &reqwest::Url,
         ctx: &mut RequestContext,
-    ) -> Response {
+    ) -> Result<Response, GatewayError> {
         proxy("arn:aws:lambda:us-east-1:123456789012:function:f", transfer)
             .invoke(&clients(endpoint), &lambda_route(), ctx, &variables())
             .await
@@ -699,7 +695,8 @@ mod tests {
             &base.join("ok").unwrap(),
             &mut ctx,
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(ctx.integration.status, Some(200));
         assert_eq!(
@@ -707,24 +704,24 @@ mod tests {
             Some(ResponseTransferMode::Buffered)
         );
 
-        let response = run(
+        let result = run(
             ResponseTransferMode::Buffered,
             &base.join("big").unwrap(),
             &mut incoming(b""),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(result.unwrap_err(), GatewayError::IntegrationFailure);
 
         let oversized = Box::leak(vec![b'a'; LAMBDA_PAYLOAD_LIMIT].into_boxed_slice());
-        let response = run(
+        let result = run(
             ResponseTransferMode::Buffered,
             &base.join("ok").unwrap(),
             &mut incoming(oversized),
         )
         .await;
         assert_eq!(
-            response.status(),
-            StatusCode::BAD_GATEWAY,
+            result.unwrap_err(),
+            GatewayError::IntegrationFailure,
             "the event, larger than the body, exceeds Lambda's request limit"
         );
     }
@@ -768,7 +765,8 @@ mod tests {
             &base.join("stream").unwrap(),
             &mut ctx,
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(response.headers()["x-s"], "1");
         assert_eq!(response.headers()["content-type"], "text/event-stream");
@@ -804,15 +802,15 @@ mod tests {
             );
         let base = serve(app).await;
         for path in ["plain", "badjson", "late"] {
-            let response = run(
+            let result = run(
                 ResponseTransferMode::Stream,
                 &base.join(path).unwrap(),
                 &mut incoming(b""),
             )
             .await;
             assert_eq!(
-                response.status(),
-                StatusCode::INTERNAL_SERVER_ERROR,
+                result.unwrap_err(),
+                GatewayError::MalformedStreamingResponse,
                 "{path}"
             );
         }
@@ -822,13 +820,13 @@ mod tests {
     async fn streaming_endpoint_failures_are_bad_gateways() {
         let app = axum::Router::new().route("/down", post(|| async { StatusCode::BAD_GATEWAY }));
         let base = serve(app).await;
-        let response = run(
+        let result = run(
             ResponseTransferMode::Stream,
             &base.join("down").unwrap(),
             &mut incoming(b""),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(result.unwrap_err(), GatewayError::IntegrationFailure);
     }
 
     struct ReceiverBody(tokio::sync::mpsc::Receiver<Result<Bytes, std::convert::Infallible>>);

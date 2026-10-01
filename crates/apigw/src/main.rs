@@ -5,6 +5,7 @@ mod app;
 mod aws;
 mod config;
 mod gateway;
+mod gateway_response;
 mod header_case;
 mod identity;
 mod integration;

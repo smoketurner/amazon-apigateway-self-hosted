@@ -10,17 +10,15 @@
 
 pub(crate) mod context;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{FromRequestParts as _, RawPathParams, Request};
-use axum::http::{HeaderValue, header};
+use axum::http::header;
 use axum::response::{IntoResponse as _, Response};
-use uuid::Uuid;
 
-pub(crate) use context::{ApiInfo, IntegrationOutcome, QueryString, RequestContext};
+pub(crate) use context::RequestContext;
 
-use crate::gateway::{ApiContext, GatewayError, MAX_BODY_BYTES, RequestId};
-use crate::header_case::HeaderCase;
-use crate::identity::ClientIdentity;
+use crate::gateway::{ApiContext, GatewayError, MAX_BODY_BYTES};
+use crate::gateway_response::Failure;
 use crate::integration::{Integration, MockResponse};
 use crate::model::Protection;
 use crate::route::Route;
@@ -37,14 +35,40 @@ impl<'a> Pipeline<'a> {
     }
 
     pub(crate) async fn run(self, request: Request) -> Response {
+        let (mut parts, body) = request.into_parts();
+        let path_params = RawPathParams::from_request_parts(&mut parts, &())
+            .await
+            .map(|params| {
+                params
+                    .iter()
+                    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                    .collect::<Vec<_>>()
+            });
+        let readable = path_params.is_ok();
+        let mut ctx = RequestContext::new(
+            self.api,
+            Some(self.route),
+            parts,
+            path_params.unwrap_or_default(),
+        );
         if let Some(protection) = self.refusal() {
-            return protection.refusal_response(self.api.kind);
+            return self.fail(&ctx, &protection.refusal(self.api.kind));
         }
-        let ctx = match self.receive(request).await {
-            Ok(ctx) => ctx,
-            Err(error) => return error.response(self.api.kind),
-        };
-        self.integrate(ctx).await
+        if !readable {
+            return self.fail(&ctx, &GatewayError::InvalidRequest.failure(self.api.kind));
+        }
+        match self.receive(body).await {
+            Ok(body) => ctx.body = body,
+            Err(error) => return self.fail(&ctx, &error.failure(self.api.kind)),
+        }
+        match self.integrate(&mut ctx).await {
+            Ok(response) => response,
+            Err(error) => self.fail(&ctx, &error.failure(self.api.kind)),
+        }
+    }
+
+    fn fail(&self, ctx: &RequestContext, failure: &Failure) -> Response {
+        self.api.respond(ctx, failure)
     }
 
     /// The protection that refuses this request, if any: routes whose
@@ -54,80 +78,27 @@ impl<'a> Pipeline<'a> {
         self.api.enforcement.refusals(self.route).next()
     }
 
-    /// Buffers the body (API Gateway buffers too, up to [`MAX_BODY_BYTES`]) and
-    /// captures everything later stages read into a [`RequestContext`].
-    async fn receive(&self, request: Request) -> Result<RequestContext, GatewayError> {
-        let (mut parts, body) = request.into_parts();
-        let path_params = RawPathParams::from_request_parts(&mut parts, &())
+    /// Buffers the body (API Gateway buffers too, up to [`MAX_BODY_BYTES`]).
+    async fn receive(&self, body: Body) -> Result<Bytes, GatewayError> {
+        axum::body::to_bytes(body, MAX_BODY_BYTES)
             .await
-            .map_err(|_| GatewayError::InvalidRequest)?
-            .iter()
-            .map(|(k, v)| (k.to_owned(), v.to_owned()))
-            .collect();
-        let body = axum::body::to_bytes(body, MAX_BODY_BYTES)
-            .await
-            .map_err(|_| GatewayError::RequestTooLarge)?;
-        if !parts.headers.contains_key(header::HOST)
-            && let Some(authority) = parts.uri.authority()
-            && let Ok(host) = HeaderValue::from_str(authority.as_str())
-        {
-            parts.headers.insert(header::HOST, host);
-        }
-        let header_case = parts.extensions.remove::<HeaderCase>().unwrap_or_default();
-        let request_id = parts
-            .extensions
-            .get::<RequestId>()
-            .map_or_else(Uuid::now_v7, |id| id.0);
-        let identity = parts
-            .extensions
-            .remove::<ClientIdentity>()
-            .unwrap_or_else(|| {
-                tracing::warn!("request reached the pipeline without a client identity");
-                ClientIdentity::unknown()
-            });
-        Ok(RequestContext {
-            api: ApiInfo {
-                kind: self.api.kind,
-                api_id: self.api.api_id.clone(),
-                stage: self.api.stage.clone(),
-            },
-            route_key: self.route.key.clone(),
-            resource_path: self.route.path.to_string(),
-            request_id,
-            received: jiff::Timestamp::now(),
-            method: parts.method,
-            path: parts.uri.path().to_owned(),
-            query: QueryString::new(parts.uri.query()),
-            headers: parts.headers,
-            header_case,
-            version: parts.version,
-            path_params,
-            identity,
-            body,
-            authorizer: serde_json::Map::new(),
-            integration: IntegrationOutcome::default(),
-        })
+            .map_err(|_| GatewayError::RequestTooLarge)
     }
 
-    async fn integrate(&self, mut ctx: RequestContext) -> Response {
+    async fn integrate(&self, ctx: &mut RequestContext) -> Result<Response, GatewayError> {
         match self.route.integration {
             Integration::HttpProxy(ref target) => {
-                target.forward(&self.api.http, self.route, &mut ctx).await
+                target.forward(&self.api.http, self.route, ctx).await
             }
             Integration::Lambda(ref target) => {
                 target
-                    .invoke(
-                        &self.api.aws,
-                        self.route,
-                        &mut ctx,
-                        &self.api.stage_variables,
-                    )
+                    .invoke(&self.api.aws, self.route, ctx, &self.api.stage_variables)
                     .await
             }
-            Integration::Mock(ref mock) => mock.respond(),
+            Integration::Mock(ref mock) => Ok(mock.respond()),
             Integration::Unsupported { ref reason } => {
                 tracing::warn!(route = %self.route.key, reason, "unsupported integration invoked");
-                GatewayError::UnsupportedIntegration.response(self.api.kind)
+                Err(GatewayError::UnsupportedIntegration)
             }
         }
     }
