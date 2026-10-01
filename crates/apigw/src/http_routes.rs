@@ -164,7 +164,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::authz::RouteAuthorizer;
+    use crate::authz::{RouteAuthorizer, RoutePolicy};
     use crate::integration::Integration;
     use crate::model::{Protections, RouteKey, RoutePath};
 
@@ -178,6 +178,7 @@ mod tests {
             },
             protections: Protections::default(),
             authorizer: RouteAuthorizer::None,
+            policy: RoutePolicy::None,
             unenforced: Vec::new(),
             throttle: None,
         }

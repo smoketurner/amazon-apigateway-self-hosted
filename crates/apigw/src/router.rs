@@ -15,7 +15,7 @@ use tokio::sync::watch;
 use tower::ServiceExt as _;
 use uuid::Uuid;
 
-use crate::authz::Authorizers;
+use crate::authz::{Authorizers, ResourcePolicies};
 use crate::aws::{AwsClients, RoleArn, RoleStatus};
 use crate::canary::{CanaryRelease, CanarySummary};
 use crate::gateway::{ApiContext, Enforcement, RequestId};
@@ -238,6 +238,7 @@ pub(crate) fn build(
     base: &BasePath,
 ) -> (Router, Vec<RouteSummary>) {
     let authorizers = Authorizers::compile(model, &ctx.stage_variables);
+    let policies = ResourcePolicies::compile(model, &ctx.api_id);
     let throttling = ThrottleSettings::new(
         &ctx.api_id,
         ctx.stage.as_deref(),
@@ -253,6 +254,7 @@ pub(crate) fn build(
                 model.kind,
                 &ctx.stage_variables,
                 &authorizers,
+                &policies,
                 &throttling,
             )
         })
@@ -426,7 +428,6 @@ mod tests {
 
     const STRICT: Enforcement = Enforcement {
         authorization: AuthorizationMode::Enforce,
-        resource_policy: Unsupported::Reject,
         request_validation: Unsupported::Reject,
     };
 
@@ -925,7 +926,6 @@ mod tests {
         let relaxed = Enforcement {
             authorization: AuthorizationMode::Skip,
             request_validation: Unsupported::Ignore,
-            ..STRICT
         };
         let (rest, summaries) = router_with(&protected_doc(), ApiKind::Rest, relaxed, "");
         for path in ["/iam", "/key", "/validated", "/key-and-validated"] {
@@ -957,24 +957,19 @@ mod tests {
             ..STRICT
         };
         let (rest, summaries) = router_with(&doc, ApiKind::Rest, skip_auth, "");
-        assert_eq!(
-            call(&rest, Method::GET, "/open").await,
-            (
-                StatusCode::FORBIDDEN,
-                r#"{"message":"Forbidden"}"#.to_owned()
-            )
+        let (status, body) = call(&rest, Method::GET, "/open").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            body.contains("because no resource-based policy allows the execute-api:Invoke action"),
+            "{body}"
         );
         assert!(
             summaries
                 .iter()
-                .all(|s| s.protections.contains(Protection::ResourcePolicy))
+                .all(|s| s.protections.contains(Protection::ResourcePolicy)
+                    && s.problems.iter().all(|p| !p.contains("resource policy"))),
+            "{summaries:?}"
         );
-        let ignore = Enforcement {
-            resource_policy: Unsupported::Ignore,
-            ..skip_auth
-        };
-        let (rest, _) = router_with(&doc, ApiKind::Rest, ignore, "");
-        assert_eq!(call(&rest, Method::GET, "/open").await.0, StatusCode::OK);
     }
 
     struct Reply {

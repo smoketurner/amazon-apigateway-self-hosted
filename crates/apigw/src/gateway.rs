@@ -34,7 +34,7 @@ pub(crate) enum AuthorizationMode {
     Skip,
 }
 
-/// What to do with a protection this gateway cannot evaluate yet.
+/// What to do with request validators, which this gateway cannot run yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum Unsupported {
     /// Refuse the request so the backend is never reached unprotected.
@@ -47,7 +47,6 @@ pub(crate) enum Unsupported {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Enforcement {
     pub(crate) authorization: AuthorizationMode,
-    pub(crate) resource_policy: Unsupported,
     pub(crate) request_validation: Unsupported,
 }
 
@@ -56,11 +55,6 @@ impl Enforcement {
         if self.authorization == AuthorizationMode::Skip {
             tracing::warn!(
                 "serving routes that require authorization WITHOUT checking credentials"
-            );
-        }
-        if self.resource_policy == Unsupported::Ignore {
-            tracing::warn!(
-                "serving routes under resource policies WITHOUT evaluating the policies"
             );
         }
         if self.request_validation == Unsupported::Ignore {
@@ -74,7 +68,7 @@ impl Enforcement {
 impl Enforcement {
     fn refuses(self, protection: Protection, route: &Route) -> bool {
         match protection {
-            Protection::ResourcePolicy => self.resource_policy == Unsupported::Reject,
+            Protection::ResourcePolicy => route.policy.is_unevaluable(),
             Protection::Authorizer => {
                 self.authorization == AuthorizationMode::Enforce
                     && route.authorizer.is_unevaluable()
@@ -117,9 +111,13 @@ impl Protection {
     /// Why a route with this protection is refused, for `/routes` and logs.
     pub(crate) fn refusal_reason(self, route: &Route) -> String {
         match self {
-            Self::ResourcePolicy => {
-                "has a resource policy, which this gateway does not evaluate; answering 403 (--unsupported-resource-policy=ignore serves it)".to_owned()
-            }
+            Self::ResourcePolicy => format!(
+                "has a resource policy this gateway cannot evaluate: {}; answering 403",
+                route
+                    .policy
+                    .unevaluable_reason()
+                    .unwrap_or("it could not be read")
+            ),
             Self::Iam => {
                 "requires IAM authorization, which cannot be verified outside AWS; answering 403".to_owned()
             }

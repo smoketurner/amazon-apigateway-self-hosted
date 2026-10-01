@@ -546,7 +546,6 @@ mod tests {
             replicas: NonZeroU32::MIN,
             enforcement: Enforcement {
                 authorization: AuthorizationMode::Enforce,
-                resource_policy: Unsupported::Reject,
                 request_validation: Unsupported::Reject,
             },
             http: reqwest::Client::new(),

@@ -31,7 +31,7 @@ Management's
 | Cognito user pool authorizers (REST), JWT authorizers (HTTP) | Tokens are verified against the issuer's published keys, fetched over HTTPS (the gateway needs outbound access to the identity provider); claims and scopes are checked as API Gateway checks them; `--insecure-skip-authorization` skips them |
 | API keys | **Not checked yet.** Answer `403 Forbidden` unless `--insecure-skip-authorization` is set |
 | IAM (`AWS_IAM`) auth | Cannot be verified outside AWS. REST answers `403 Missing Authentication Token`, HTTP `403 Forbidden`, unless `--insecure-skip-authorization` is set |
-| Resource policies | **Not evaluated yet.** Every route of an API with a policy answers `403` unless `--unsupported-resource-policy=ignore` (not affected by `--insecure-skip-authorization`) |
+| Resource policies | Evaluated in two phases as API Gateway evaluates them: an explicit `Deny` ends the request before authentication, then the policy is combined with the authorizer's decision per AWS's outcome tables. `aws:SourceIp` uses the trusted client address (see `--trusted-proxies`). Never skipped by `--insecure-skip-authorization`; a policy that cannot be read refuses every route with `403` |
 | Request validators | **Not run yet.** Validated routes answer `501` unless `--unsupported-validation=ignore` |
 | `AWS`/`HTTP` (non-proxy, VTL mapping templates), VPC links | Answer `501`; listed with the reason on `/routes` |
 | Unknown route | REST: `403 {"message":"Missing Authentication Token"}`; HTTP: `404 {"message":"Not Found"}` |
@@ -72,7 +72,6 @@ Every flag has an environment variable (`apigw --help` lists them). The main one
 | `--integration-credentials` | `APIGW_INTEGRATION_CREDENTIALS` | `assume` | `assume` runs integrations as their `credentials` role; `gateway` uses the gateway's own credentials |
 | `--issuer-endpoint ISSUER=URL` | `APIGW_ISSUER_ENDPOINTS` | none | Fetch a token issuer's signing keys from URL instead of from the issuer (an in-cluster mirror of the identity provider); plain `http` URLs are allowed and logged as a warning |
 | `--lambda-endpoint FUNCTION=URL` | `APIGW_LAMBDA_ENDPOINTS` | none | Invoke a function at a URL speaking Lambda's Invoke protocol (e.g. the Runtime Interface Emulator in-cluster) |
-| `--unsupported-resource-policy` | `APIGW_UNSUPPORTED_RESOURCE_POLICY` | `reject` | `ignore` serves APIs with resource policies unrestricted |
 | `--unsupported-validation` | `APIGW_UNSUPPORTED_VALIDATION` | `reject` | `ignore` forwards requests without running request validators |
 | `--trusted-proxies` | `APIGW_TRUSTED_PROXIES` | none | Comma-separated CIDRs or addresses of proxies whose `X-Forwarded-For` and `X-Forwarded-Client-Cert` are believed ([Client IP](docs/deployment.md#client-ip)) |
 | `--trusted-proxy-hops` | `APIGW_TRUSTED_PROXY_HOPS` | `1` | Proxies between the client and `apigw`, counting the one that connects to it |

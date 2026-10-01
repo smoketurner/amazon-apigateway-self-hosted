@@ -188,8 +188,8 @@ already TLS, so the sidecar forwards it (inside its own mTLS) without trying to 
 
 ### Client IP
 
-`sourceIp` in Lambda events, and later `aws:SourceIp` in resource policies and per-IP
-throttling, need the client's address, but behind Istio or a load balancer the TCP peer is the
+`sourceIp` in Lambda events, `aws:SourceIp` in resource policies, and per-IP
+throttling need the client's address, but behind Istio or a load balancer the TCP peer is the
 proxy. Forwarding headers are written by whoever sends the request, so `apigw` believes them
 only from proxies you name:
 
@@ -233,7 +233,7 @@ Gateway answers a caller who fails that check, and lists each one per route on `
 
 | Protection | Default response | To serve the route anyway |
 |---|---|---|
-| Resource policy (any statement) | `403 Forbidden` | `--unsupported-resource-policy=ignore` |
+| Resource policy that cannot be read (see `/routes`) | `403 Forbidden` | none: resource policies are never skipped |
 | IAM (`AWS_IAM`) | REST `403 Missing Authentication Token`, HTTP `403 Forbidden` | `--insecure-skip-authorization` |
 | An authorizer that cannot be evaluated (see `/routes`) | `401 Unauthorized` | `--insecure-skip-authorization` |
 | API key | `403 Forbidden` | `--insecure-skip-authorization` |
@@ -242,5 +242,7 @@ Gateway answers a caller who fails that check, and lists each one per route on `
 Checks run in API Gateway's order, so a request gets the first applicable response. If
 authentication happens in front of `apigw` (an Istio `RequestAuthentication` +
 `AuthorizationPolicy`, an OAuth proxy), `--insecure-skip-authorization` serves authenticated
-routes. It deliberately does not cover resource policies: an IP allowlist is not something a
-front proxy usually enforces, so ignoring one is a separate, explicit choice.
+routes. It deliberately does not cover resource policies, which are always evaluated: an IP
+allowlist is not something a front proxy usually enforces. With the flag a route's authorizer is
+taken to have allowed the caller, so the policy then decides through explicit denies (and, on
+routes without an authorizer, needs an explicit allow).

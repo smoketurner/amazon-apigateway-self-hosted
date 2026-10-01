@@ -3,9 +3,9 @@
 //!
 //! Evaluation is deny-overrides: an applicable `Deny` wins, otherwise an
 //! applicable `Allow` grants access, otherwise access is implicitly denied. A
-//! statement this gateway cannot evaluate (for example one with a condition)
-//! applies when it is a `Deny` and does not apply when it is an `Allow`, so
-//! doubt never grants access.
+//! statement this gateway cannot evaluate (for example one with a condition on
+//! a key it cannot read) applies when it is a `Deny` and does not apply when it
+//! is an `Allow`, so doubt never grants access.
 
 use std::fmt;
 
@@ -13,6 +13,7 @@ use axum::http::Method;
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::condition::{Conditions, RequestAttributes, Truth};
 use super::glob::{CaseSensitivity, Glob};
 use crate::aws::ArnScope;
 
@@ -60,6 +61,31 @@ impl MethodArn {
         &self.0
     }
 
+    /// The ARN as API Gateway shows it in error messages: the account is
+    /// masked except for its last four digits.
+    pub(crate) fn masked(&self) -> String {
+        let mut parts = self.0.splitn(6, ':');
+        let (Some(arn), Some(partition), Some(service), Some(region), Some(account), Some(rest)) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ) else {
+            return self.0.clone();
+        };
+        let visible: String = account
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        format!("{arn}:{partition}:{service}:{region}:********{visible}:{rest}")
+    }
+
     /// API Gateway answers 414 for a method ARN longer than 1600 bytes, which
     /// path parameter values can cause.
     pub(crate) fn is_too_long(&self) -> bool {
@@ -73,18 +99,44 @@ impl fmt::Display for MethodArn {
     }
 }
 
+/// Who is asking, which decides what a statement's `Principal` means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Caller {
+    /// A policy a Lambda authorizer returned, which has no principals.
+    Authorizer,
+    /// A caller with no IAM identity: a request that is not signed with `SigV4`,
+    /// which is every request this gateway can authenticate.
+    Anonymous,
+}
+
 /// What a policy is asked about.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AccessRequest<'a> {
-    pub(crate) action: &'a str,
-    pub(crate) resource: &'a str,
+    action: &'a str,
+    resource: &'a str,
+    caller: Caller,
+    attributes: Option<&'a RequestAttributes>,
 }
 
 impl<'a> AccessRequest<'a> {
+    /// May the caller of a Lambda authorizer's policy invoke `resource`?
+    /// Conditions in such a policy are not evaluated.
     pub(crate) fn invoke(resource: &'a MethodArn) -> Self {
         Self {
             action: INVOKE_ACTION,
             resource: resource.as_str(),
+            caller: Caller::Authorizer,
+            attributes: None,
+        }
+    }
+
+    /// May an anonymous caller with these request attributes invoke `resource`?
+    pub(crate) fn anonymous(resource: &'a MethodArn, attributes: &'a RequestAttributes) -> Self {
+        Self {
+            action: INVOKE_ACTION,
+            resource: resource.as_str(),
+            caller: Caller::Anonymous,
+            attributes: Some(attributes),
         }
     }
 }
@@ -138,6 +190,8 @@ struct RawStatement {
     resource: Option<OneOrMany<String>>,
     not_resource: Option<OneOrMany<String>>,
     condition: Option<Value>,
+    principal: Option<Value>,
+    not_principal: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -188,23 +242,85 @@ impl Selector {
     }
 }
 
+/// A statement's `Principal` or `NotPrincipal`, reduced to what matters for a
+/// caller with no IAM identity: whether it names everyone (`"*"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrincipalSpec {
+    /// `Principal`; `true` when it names everyone.
+    Includes(bool),
+    /// `NotPrincipal`; `true` when it excludes everyone.
+    Excludes(bool),
+}
+
+impl PrincipalSpec {
+    fn names_everyone(value: &Value) -> bool {
+        match value {
+            Value::String(text) => text == "*",
+            Value::Array(items) => items.iter().any(Self::names_everyone),
+            Value::Object(kinds) => kinds.get("AWS").is_some_and(Self::names_everyone),
+            Value::Null | Value::Bool(_) | Value::Number(_) => false,
+        }
+    }
+
+    fn parse(principal: Option<&Value>, not_principal: Option<&Value>) -> Option<Self> {
+        match (principal, not_principal) {
+            (Some(value), None) => Some(Self::Includes(Self::names_everyone(value))),
+            (None, Some(value)) => Some(Self::Excludes(Self::names_everyone(value))),
+            (Some(_), Some(_)) | (None, None) => None,
+        }
+    }
+
+    fn applicability(self) -> Applicability {
+        match self {
+            Self::Includes(true) | Self::Excludes(false) => Applicability::Applies,
+            Self::Includes(false) | Self::Excludes(true) => Applicability::DoesNotApply,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Statement {
     effect: Effect,
     actions: Selector,
     resources: Selector,
-    has_condition: bool,
+    principal: Option<PrincipalSpec>,
+    conditions: Conditions,
 }
 
 impl Statement {
+    fn principal_applicability(&self, caller: Caller) -> Applicability {
+        match (caller, self.principal) {
+            (Caller::Authorizer, _) => Applicability::Applies,
+            // A resource policy statement without a principal is not valid.
+            (Caller::Anonymous, None) => Applicability::Unknown,
+            (Caller::Anonymous, Some(principal)) => principal.applicability(),
+        }
+    }
+
+    fn condition_applicability(&self, request: &AccessRequest<'_>) -> Applicability {
+        if self.conditions.is_empty() {
+            return Applicability::Applies;
+        }
+        match request
+            .attributes
+            .map(|attributes| self.conditions.evaluate(attributes))
+        {
+            Some(Truth::True) => Applicability::Applies,
+            Some(Truth::False) => Applicability::DoesNotApply,
+            Some(Truth::Unknown) | None => Applicability::Unknown,
+        }
+    }
+
     fn applicability(&self, request: &AccessRequest<'_>) -> Applicability {
-        let selected = [
+        let parts = [
             self.actions.applicability(request.action),
             self.resources.applicability(request.resource),
+            self.principal_applicability(request.caller),
+            self.condition_applicability(request),
         ];
-        if selected.contains(&Applicability::DoesNotApply) {
+        if parts.contains(&Applicability::DoesNotApply) {
             Applicability::DoesNotApply
-        } else if selected.contains(&Applicability::Unknown) || self.has_condition {
+        } else if parts.contains(&Applicability::Unknown) {
             Applicability::Unknown
         } else {
             Applicability::Applies
@@ -232,10 +348,12 @@ impl TryFrom<RawStatement> for Statement {
                 .ok_or(PolicyError::MissingAction)?,
             resources: Selector::new(raw.resource, raw.not_resource, CaseSensitivity::Sensitive)
                 .ok_or(PolicyError::MissingResource)?,
-            has_condition: raw
+            principal: PrincipalSpec::parse(raw.principal.as_ref(), raw.not_principal.as_ref()),
+            conditions: raw
                 .condition
                 .as_ref()
-                .is_some_and(|c| !matches!(c, Value::Object(o) if o.is_empty())),
+                .map(Conditions::parse)
+                .unwrap_or_default(),
         })
     }
 }

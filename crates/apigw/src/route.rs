@@ -1,7 +1,7 @@
 //! A route compiled from the model: what the router matches and the gateway
 //! executes.
 
-use crate::authz::{Authorizers, RouteAuthorizer};
+use crate::authz::{Authorizers, ResourcePolicies, RouteAuthorizer, RoutePolicy};
 use crate::integration::{Integration, StageVariables};
 use crate::model::{ApiKind, Feature, MethodMatch, Operation, Protections, RouteKey, RoutePath};
 use crate::throttle::{RouteThrottle, ThrottleSettings};
@@ -14,6 +14,7 @@ pub(crate) struct Route {
     pub(crate) integration: Integration,
     pub(crate) protections: Protections,
     pub(crate) authorizer: RouteAuthorizer,
+    pub(crate) policy: RoutePolicy,
     pub(crate) unenforced: Vec<Feature>,
     pub(crate) throttle: Option<RouteThrottle>,
 }
@@ -24,6 +25,7 @@ impl Route {
         kind: ApiKind,
         variables: &StageVariables,
         authorizers: &Authorizers,
+        policies: &ResourcePolicies,
         throttling: &ThrottleSettings,
     ) -> Self {
         Self {
@@ -33,6 +35,7 @@ impl Route {
             integration: Integration::compile(operation.integration.as_ref(), kind, variables),
             protections: operation.protections.clone(),
             authorizer: authorizers.for_route(operation),
+            policy: policies.for_route(operation),
             unenforced: operation.unenforced(),
             throttle: throttling.for_route(&operation.method, &operation.path),
         }
