@@ -444,6 +444,26 @@ impl Parser {
         }))
     }
 
+    /// Whether the `(` under the cursor is followed by a directive without arguments and then by
+    /// something other than a space, `.`, or `:`. Velocity looks three tokens ahead to tell a
+    /// method call from a property, and a directive cannot start an argument, so the `(` is then
+    /// plain text; the text after the directive decides whether the rest still lexes.
+    fn directive_after_paren(&mut self) -> bool {
+        if self.peek_at(1) != Some('#') {
+            return false;
+        }
+        let saved = self.pos;
+        self.advance();
+        let token = self.directive_at(false);
+        self.pos = saved;
+        token.is_some_and(|token| {
+            matches!(
+                token.directive,
+                Directive::End | Directive::Else | Directive::Break | Directive::Stop
+            ) && !matches!(self.chars.get(token.end), Some(' ' | '\t' | '.' | ':'))
+        })
+    }
+
     /// Parses `.name`, `.name(args)`, and `[index]` steps.
     fn parse_chain(&mut self) -> Result<Vec<Step>, ParseError> {
         let mut steps = Vec::new();
@@ -454,6 +474,10 @@ impl Parser {
                     let Some(name) = self.parse_identifier() else {
                         break;
                     };
+                    if self.peek() == Some('(') && self.directive_after_paren() {
+                        steps.push(Step::Property(name.into()));
+                        break;
+                    }
                     if self.peek() == Some('(') {
                         let before = self.pos;
                         match self.parse_arguments() {

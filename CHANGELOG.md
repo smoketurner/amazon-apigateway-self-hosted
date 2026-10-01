@@ -16,6 +16,12 @@ All notable changes to this project are documented here. The format follows
   provided, with Jayway JsonPath semantics for paths. Output size, evaluation steps, and nesting
   are bounded and reported as typed errors. Its tests replay about 960 templates rendered by
   Apache Velocity 1.7 and Jayway JsonPath 2.9, and a cargo-fuzz target lives in `fuzz/`.
+- `tools/vtl-oracle`: a Docker-run Java oracle (Apache Velocity 1.7, Jayway JsonPath 2.9, pinned
+  by digest and checksum) with a committed corpus of about 9,500 templates and their expected
+  output. `apigw-vtl`'s `oracle` test replays it, and `.github/workflows/vtl-oracle.yml` re-renders
+  it weekly, replays fresh random templates, and fuzzes the template, JSON path, and regex
+  parsers.
+
 - Resource policies are evaluated as API Gateway evaluates them: an explicit `Deny` ends the request
   before authentication, then the policy is combined with the authorizer's decision per the
   authorization-flow tables (no authorizer, Lambda authorizer, Cognito user pool). `aws:SourceIp`
