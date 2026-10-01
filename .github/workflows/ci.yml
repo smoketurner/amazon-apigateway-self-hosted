@@ -95,6 +95,7 @@ jobs:
       - name: Run tests
         run: cargo test --locked --workspace
       - name: Run Valkey integration tests
+        if: matrix.name == 'linux'
         run: cargo test --locked -p apigw valkey -- --ignored
 
   parity-replay:
