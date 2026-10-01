@@ -492,10 +492,36 @@ mod tests {
     use serde_json::json;
 
     use super::super::{
-        ConnectionType, ContentHandling, Feature, IntegrationType, ParameterLocation,
-        PassthroughBehavior, PayloadVersion, ResponseTransferMode,
+        ConnectionType, ContentHandling, IntegrationType, ParameterLocation, PassthroughBehavior,
+        PayloadVersion, ResponseTransferMode,
     };
     use super::*;
+
+    #[test]
+    fn content_handling_is_reported_only_for_integrations_that_convert() {
+        use super::super::Feature;
+
+        for (integration_type, reported) in [
+            ("http", true),
+            ("aws", true),
+            ("mock", true),
+            ("http_proxy", false),
+            ("aws_proxy", false),
+        ] {
+            let doc = json!({"paths": {"/x": {"get": {"x-amazon-apigateway-integration": {
+                "type": integration_type,
+                "uri": "http://example.com/",
+                "contentHandling": "CONVERT_TO_BINARY"
+            }}}}});
+            let model = import(&doc, ApiKind::Rest);
+            let operation = by_path(&model)["/x"];
+            assert_eq!(
+                operation.unenforced() == vec![Feature::ContentHandling],
+                reported,
+                "{integration_type}"
+            );
+        }
+    }
 
     fn import(doc: &Value, kind: ApiKind) -> ApiModel {
         ApiModel::import(
@@ -540,10 +566,7 @@ mod tests {
         );
         assert!(model.models.contains_key("Pet"));
         assert_eq!(model.authorizers.len(), 2);
-        assert_eq!(
-            model.unenforced(),
-            vec![Feature::BinaryMediaTypes, Feature::Compression]
-        );
+        assert!(model.unenforced().is_empty());
 
         let ops = by_path(&model);
         let pets = ops["/pets"];

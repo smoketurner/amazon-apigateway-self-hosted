@@ -20,6 +20,7 @@ use tokio::time::Instant;
 use crate::aws::{InvokeError, ResponseStream};
 use crate::gateway::HeaderNameExt as _;
 use crate::model::PayloadVersion;
+use crate::payload::ResponseNegotiation;
 
 /// The streamed response's metadata must end with this delimiter.
 const PRELUDE_DELIMITER: [u8; 8] = [0; 8];
@@ -108,13 +109,18 @@ pub(crate) struct ProxyResponse {
 impl ProxyResponse {
     /// Turns a function's payload into the HTTP response API Gateway would
     /// send. Payload format 2.0 treats JSON without `statusCode` as a 200 JSON
-    /// body.
+    /// body. A base64 body is decoded unless `negotiation` says the client does
+    /// not accept binary, in which case the base64 text is the body.
     ///
     /// # Errors
     ///
     /// Describes why the payload is not a valid proxy response, which API
     /// Gateway answers with a `502`.
-    pub(crate) fn into_http(payload: &[u8], version: PayloadVersion) -> Result<Response, String> {
+    pub(crate) fn into_http(
+        payload: &[u8],
+        version: PayloadVersion,
+        negotiation: Option<&ResponseNegotiation<'_>>,
+    ) -> Result<Response, String> {
         let value: Value = serde_json::from_slice(payload).map_err(|e| format!("not JSON: {e}"))?;
         if version == PayloadVersion::V2 && value.get("statusCode").is_none() {
             let mut response = Response::new(Body::from(value.to_string()));
@@ -126,18 +132,25 @@ impl ProxyResponse {
         }
         let parsed = Self::deserialize(&value).map_err(|e| e.to_string())?;
         let status = StatusCode::from_u16(parsed.status_code).map_err(|e| e.to_string())?;
-        let body = match (parsed.body, parsed.is_base64_encoded.unwrap_or(false)) {
-            (Some(body), true) => BASE64
+        let mut headers = HeaderMap::new();
+        parsed
+            .fields
+            .apply_to(&mut headers, LengthHeader::Recompute)?;
+        let content_type = headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok());
+        let decode = parsed.is_base64_encoded.unwrap_or(false)
+            && negotiation.is_none_or(|negotiation| negotiation.wants_binary(content_type));
+        let body = match parsed.body {
+            Some(body) if decode => BASE64
                 .decode(body)
                 .map_err(|e| format!("body is not base64: {e}"))?,
-            (Some(body), false) => body.into_bytes(),
-            (None, _) => Vec::new(),
+            Some(body) => body.into_bytes(),
+            None => Vec::new(),
         };
         let mut response = Response::new(Body::from(body));
         *response.status_mut() = status;
-        parsed
-            .fields
-            .apply_to(response.headers_mut(), LengthHeader::Recompute)?;
+        *response.headers_mut() = headers;
         Ok(response)
     }
 }
@@ -316,12 +329,57 @@ mod tests {
             "isBase64Encoded": true
         });
         let response =
-            ProxyResponse::into_http(payload.to_string().as_bytes(), PayloadVersion::V2).unwrap();
+            ProxyResponse::into_http(payload.to_string().as_bytes(), PayloadVersion::V2, None)
+                .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
         assert_eq!(response.headers()["x-num"], "2");
         assert_eq!(response.headers().get_all("x-many").iter().count(), 2);
         assert_eq!(response.headers()["set-cookie"], "c=1");
         assert_eq!(&*body_of(response).await, b"hi");
+    }
+
+    #[tokio::test]
+    async fn base64_bodies_are_decoded_only_for_clients_that_accept_binary() {
+        use crate::payload::PayloadSettings;
+
+        let settings = PayloadSettings::new(&["image/*".to_owned()], None);
+        let payload = json!({
+            "statusCode": 200,
+            "headers": {"content-type": "image/png"},
+            "body": "aGk=",
+            "isBase64Encoded": true
+        });
+        let payload = payload.to_string();
+        let respond = |accept: Option<&'static str>| {
+            let mut request = HeaderMap::new();
+            if let Some(accept) = accept {
+                request.insert(header::ACCEPT, HeaderValue::from_static(accept));
+            }
+            let negotiation = settings.negotiate(&request);
+            ProxyResponse::into_http(payload.as_bytes(), PayloadVersion::V1, Some(&negotiation))
+                .unwrap()
+        };
+        assert_eq!(&*body_of(respond(Some("image/png"))).await, b"hi");
+        assert_eq!(
+            &*body_of(respond(Some("text/html,image/png"))).await,
+            b"aGk=",
+            "only the first Accept value counts"
+        );
+        assert_eq!(&*body_of(respond(Some("image/*"))).await, b"hi");
+        assert_eq!(
+            &*body_of(respond(None)).await,
+            b"hi",
+            "without Accept the response Content-Type decides"
+        );
+        let always =
+            ProxyResponse::into_http(payload.as_bytes(), PayloadVersion::V1, None).unwrap();
+        assert_eq!(&*body_of(always).await, b"hi");
+        let unconfigured = PayloadSettings::default();
+        let negotiation = unconfigured.negotiate(&HeaderMap::new());
+        let response =
+            ProxyResponse::into_http(payload.as_bytes(), PayloadVersion::V1, Some(&negotiation))
+                .unwrap();
+        assert_eq!(&*body_of(response).await, b"aGk=");
     }
 
     #[tokio::test]
@@ -332,7 +390,8 @@ mod tests {
             "multiValueHeaders": {"x-a": ["1", "3"], "x-c": ["1", "1"]}
         });
         let response =
-            ProxyResponse::into_http(payload.to_string().as_bytes(), PayloadVersion::V1).unwrap();
+            ProxyResponse::into_http(payload.to_string().as_bytes(), PayloadVersion::V1, None)
+                .unwrap();
         let values = |name: &str| -> Vec<String> {
             response
                 .headers()
@@ -350,7 +409,7 @@ mod tests {
     async fn null_fields_and_missing_bodies_are_tolerated() {
         let payload = br#"{"statusCode": 204, "headers": null, "multiValueHeaders": null,
             "cookies": null, "body": null, "isBase64Encoded": null}"#;
-        let response = ProxyResponse::into_http(payload, PayloadVersion::V1).unwrap();
+        let response = ProxyResponse::into_http(payload, PayloadVersion::V1, None).unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert!(body_of(response).await.is_empty());
     }
@@ -359,7 +418,7 @@ mod tests {
     async fn framing_headers_from_the_function_are_not_forwarded() {
         let payload = br#"{"statusCode": 200, "body": "hello",
             "headers": {"Content-Length": "999", "Transfer-Encoding": "chunked", "Connection": "close", "X-Keep": "1"}}"#;
-        let response = ProxyResponse::into_http(payload, PayloadVersion::V1).unwrap();
+        let response = ProxyResponse::into_http(payload, PayloadVersion::V1, None).unwrap();
         assert!(response.headers().get("content-length").is_none());
         assert!(response.headers().get("transfer-encoding").is_none());
         assert!(response.headers().get("connection").is_none());
@@ -375,7 +434,7 @@ mod tests {
             ("[1,2]", "[1,2]"),
         ] {
             let response =
-                ProxyResponse::into_http(payload.as_bytes(), PayloadVersion::V2).unwrap();
+                ProxyResponse::into_http(payload.as_bytes(), PayloadVersion::V2, None).unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(response.headers()["content-type"], "application/json");
             assert_eq!(&*body_of(response).await, expected.as_bytes());
@@ -400,7 +459,7 @@ mod tests {
         ];
         for payload in cases {
             assert!(
-                ProxyResponse::into_http(payload, PayloadVersion::V1).is_err(),
+                ProxyResponse::into_http(payload, PayloadVersion::V1, None).is_err(),
                 "{}",
                 String::from_utf8_lossy(payload)
             );

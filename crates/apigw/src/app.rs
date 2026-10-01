@@ -31,6 +31,7 @@ use crate::integration_tls;
 use crate::listener::{self, ConnLimits, Edge, Tls};
 use crate::model::{ApiModel, Feature, IntegrationOverrides, StageSettings};
 use crate::observability::{Observability, StageObserver};
+use crate::payload::PayloadSettings;
 use crate::router::{self, BasePath, LoadSummary, Loaded, RouteSummary};
 use crate::source::{Fetch, Fetcher, Snapshot, Source, SourceError};
 use crate::state::StateBackend;
@@ -149,6 +150,10 @@ impl Builder {
                 release,
             ),
             release,
+            payload: Arc::new(PayloadSettings::new(
+                &model.settings.binary_media_types,
+                model.settings.minimum_compression_size,
+            )),
         });
         let (router, routes) = router::build(&model, &ctx, &self.base_path);
         Ok(BuiltRelease {
@@ -783,8 +788,7 @@ mod tests {
     #[tokio::test]
     async fn unenforced_features_are_summarized() {
         let mut snapshot = snapshot();
-        snapshot.openapi =
-            json!({"x-amazon-apigateway-binary-media-types": ["image/png"], "paths": {}});
+        snapshot.openapi = json!({"paths": {}});
         snapshot.stage_settings.cache_cluster_enabled = true;
         let inputs = Inputs {
             snapshot,
@@ -792,10 +796,7 @@ mod tests {
         };
         let loaded = builder(None).build(&inputs).unwrap();
         let rendered = serde_json::to_value(&loaded.summary).unwrap();
-        assert_eq!(
-            rendered["unenforced"],
-            json!(["binary_media_types", "response_caching"])
-        );
+        assert_eq!(rendered["unenforced"], json!(["response_caching"]));
     }
 
     #[tokio::test]

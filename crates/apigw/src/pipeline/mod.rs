@@ -24,8 +24,9 @@ use crate::cors::Cors;
 use crate::gateway::{ApiContext, GatewayError, MAX_BODY_BYTES};
 use crate::gateway_response::Failure;
 use crate::integration::{Integration, MockResponse};
-use crate::model::{Protection, ResponseType};
+use crate::model::{ApiKind, Protection, ResponseTransferMode, ResponseType};
 use crate::observability::IntegrationTiming;
+use crate::payload::PayloadSettings;
 use crate::route::Route;
 use crate::state::Admission;
 
@@ -102,15 +103,52 @@ impl<'a> Pipeline<'a> {
             Ok(body) => ctx.body = body,
             Err(error) => return self.fail(ctx, &error.failure(self.api.kind)),
         }
+        if let Err(error) = self.decode_request(ctx) {
+            return self.fail(ctx, &error.failure(self.api.kind));
+        }
         let started = Instant::now();
         let result = self.integrate(ctx).await;
         let timing = IntegrationTiming(started.elapsed());
+        let result = match result {
+            Ok(response) => self.encode_response(ctx, response).await,
+            Err(error) => Err(error),
+        };
         let mut response = match result {
             Ok(response) => response,
             Err(error) => self.fail(ctx, &error.failure(self.api.kind)),
         };
         response.extensions_mut().insert(timing);
         response
+    }
+
+    /// REST APIs decompress `gzip` and `deflate` request bodies before the
+    /// integration sees them.
+    fn decode_request(&self, ctx: &mut RequestContext) -> Result<(), GatewayError> {
+        if self.api.kind != ApiKind::Rest {
+            return Ok(());
+        }
+        let body = std::mem::take(&mut ctx.body);
+        ctx.body = PayloadSettings::decompress_request(&mut ctx.headers, body)?;
+        Ok(())
+    }
+
+    /// REST APIs with a `minimumCompressionSize` compress buffered integration
+    /// responses for clients that accept a coding. Streamed responses are never
+    /// compressed.
+    async fn encode_response(
+        &self,
+        ctx: &RequestContext,
+        response: Response,
+    ) -> Result<Response, GatewayError> {
+        if self.api.kind != ApiKind::Rest
+            || ctx.integration.transfer_mode == Some(ResponseTransferMode::Stream)
+        {
+            return Ok(response);
+        }
+        self.api
+            .payload
+            .compress_response(&ctx.headers, response)
+            .await
     }
 
     /// The failure for a request over the route's throttle limit. Runs before

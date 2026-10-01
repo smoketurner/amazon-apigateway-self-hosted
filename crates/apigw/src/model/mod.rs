@@ -336,7 +336,13 @@ pub(crate) struct IntegrationSpec {
 impl IntegrationSpec {
     fn unenforced(&self) -> Vec<Feature> {
         let mut features = Vec::new();
-        if self.content_handling.is_some() {
+        // Proxy integrations never convert content, so `contentHandling` on them
+        // is as inert in API Gateway as it is here.
+        let converts = matches!(
+            self.integration_type,
+            IntegrationType::Http | IntegrationType::Aws | IntegrationType::Mock
+        );
+        if self.content_handling.is_some() && converts {
             features.push(Feature::ContentHandling);
         }
         if !self.cache_key_parameters.is_empty() {
@@ -527,15 +533,7 @@ pub(crate) struct ApiModel {
 impl ApiModel {
     /// API- and stage-level settings imported but not enforced yet.
     pub(crate) fn unenforced(&self) -> Vec<Feature> {
-        let mut features = Vec::new();
-        if !self.settings.binary_media_types.is_empty() {
-            features.push(Feature::BinaryMediaTypes);
-        }
-        if self.settings.minimum_compression_size.is_some() {
-            features.push(Feature::Compression);
-        }
-        features.extend(self.stage.unenforced());
-        features
+        self.stage.unenforced()
     }
 }
 
@@ -544,8 +542,6 @@ impl ApiModel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Feature {
-    BinaryMediaTypes,
-    Compression,
     ContentHandling,
     ResponseCaching,
 }
@@ -553,8 +549,6 @@ pub(crate) enum Feature {
 impl fmt::Display for Feature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
-            Self::BinaryMediaTypes => "binary media types",
-            Self::Compression => "compression",
             Self::ContentHandling => "content handling",
             Self::ResponseCaching => "response caching",
         };

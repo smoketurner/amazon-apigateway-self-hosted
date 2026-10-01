@@ -26,6 +26,7 @@ mod listener;
 mod mapping;
 mod model;
 mod observability;
+mod payload;
 mod pipeline;
 mod proxy;
 mod route;

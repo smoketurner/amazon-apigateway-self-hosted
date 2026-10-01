@@ -235,6 +235,7 @@ impl Harness {
             vpc_links: VpcLinks::default(),
             observer: StageObserver::disabled(),
             release: None,
+            payload: Arc::default(),
             http: reqwest::Client::new(),
             aws,
             keys: Arc::new(keys),
