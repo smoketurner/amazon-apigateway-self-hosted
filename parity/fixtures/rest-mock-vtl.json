@@ -1,0 +1,12 @@
+{
+  "name": "rest-mock-vtl",
+  "source": "hand_written",
+  "api": "rest",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": "{\"hello\":\"world\",\"stage\":\"ref\",\"method\":\"GET\"}"
+  }
+}

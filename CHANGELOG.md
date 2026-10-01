@@ -43,9 +43,9 @@ All notable changes to this project are documented here. The format follows
 - `X-Forwarded-For` sent by a client that is not a trusted proxy is no longer forwarded to
   `HTTP_PROXY` integrations: it is replaced by the client's address. `X-Forwarded-Client-Cert` is
   removed from such requests. Set `--trusted-proxies` to keep forwarding a proxy's headers.
-- `reference/terraform/`: a Terraform stack that deploys REGIONAL REST and HTTP reference APIs
+- `terraform/`: Terraform modules and a `dev` environment that deploy REGIONAL REST and HTTP reference APIs
   (plus an echo Lambda, authorizers, Cognito, service targets, and a GitHub OIDC role) to measure
-  parity against real API Gateway. See `reference/README.md`.
+  parity against real API Gateway. See `terraform/README.md`.
 - `ApiModel`: the export and `GetStage` are imported into one typed model covering
   integrations (all fields, `$ref` resolution), request parameters and bodies, validators,
   authorizers, models, gateway responses, binary media types, compression, API key source,
@@ -53,6 +53,10 @@ All notable changes to this project are documented here. The format follows
   canary, caching). `/routes` lists every imported feature that is not enforced yet.
 - Refresh calls `GetStage` first and re-downloads the export only when the deployment changed;
   failed refreshes back off exponentially with jitter.
+- `crates/apigw-parity`, a dev tool with `record` (capture the reference APIs' behavior as
+  normalized, redacted fixtures) and `replay` (serve the recorded export with `apigw` and diff
+  its answers). Seed cases and hand-written fixtures live in `parity/`; CI runs `replay`, and
+  `.github/workflows/parity.yml` re-records nightly and opens an issue on drift.
 
 ### Fixed
 

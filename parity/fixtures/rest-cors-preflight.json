@@ -1,0 +1,13 @@
+{
+  "name": "rest-cors-preflight",
+  "source": "hand_written",
+  "api": "rest",
+  "response": {
+    "status": 200,
+    "headers": {
+      "access-control-allow-headers": "content-type,x-api-key",
+      "access-control-allow-methods": "GET,OPTIONS",
+      "access-control-allow-origin": "https://example.com"
+    }
+  }
+}

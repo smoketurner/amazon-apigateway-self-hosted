@@ -1,0 +1,9 @@
+{
+  "name": "policy-ip-denied",
+  "source": "hand_written",
+  "api": "rest_policy",
+  "response": {
+    "status": 403,
+    "headers": {}
+  }
+}
