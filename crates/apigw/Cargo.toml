@@ -25,6 +25,7 @@ ipnet                = { workspace = true, features = ["std"] }
 jiff                 = { workspace = true, features = ["std"] }
 matchit              = { workspace = true }
 proxy-header         = { workspace = true, features = ["tokio"] }
+regex                = { workspace = true, features = ["std", "perf"] }
 reqwest              = { workspace = true, features = ["rustls", "http2", "stream"] }
 rustls               = { workspace = true, features = ["aws-lc-rs", "std", "tls12", "prefer-post-quantum"] }
 serde                = { workspace = true, features = ["std", "derive"] }
@@ -39,5 +40,6 @@ tracing-subscriber   = { workspace = true, features = ["std", "fmt", "env-filter
 uuid                 = { workspace = true, features = ["std", "v7"] }
 
 [dev-dependencies]
+tokio                = { workspace = true, features = ["test-util"] }
 rcgen                = { workspace = true, features = ["aws_lc_rs", "pem"] }
 proptest             = { workspace = true, features = ["std"] }

@@ -16,9 +16,10 @@ use axum::http::header;
 use axum::response::{IntoResponse as _, Response};
 use uuid::Uuid;
 
-pub(crate) use context::{ApiInfo, IntegrationOutcome, QueryString, RequestContext};
+pub(crate) use context::{ApiInfo, AuthorizerContext, IntegrationOutcome, QueryString, RequestContext};
 
-use crate::gateway::{ApiContext, GatewayError, MAX_BODY_BYTES, RequestId};
+use crate::authz::{AuthRequest, Denial, RouteAuthorizer};
+use crate::gateway::{ApiContext, AuthorizationMode, GatewayError, MAX_BODY_BYTES, RequestId};
 use crate::identity::ClientIdentity;
 use crate::integration::{Integration, MockResponse};
 use crate::model::Protection;
@@ -39,10 +40,13 @@ impl<'a> Pipeline<'a> {
         if let Some(protection) = self.refusal() {
             return protection.refusal_response(self.api.kind);
         }
-        let ctx = match self.receive(request).await {
+        let mut ctx = match self.receive(request).await {
             Ok(ctx) => ctx,
             Err(error) => return error.response(self.api.kind),
         };
+        if let Err(denial) = self.authorize(&mut ctx).await {
+            return denial.response(self.api.kind);
+        }
         self.integrate(ctx).await
     }
 
@@ -94,9 +98,27 @@ impl<'a> Pipeline<'a> {
             path_params,
             identity,
             body,
-            authorizer: serde_json::Map::new(),
+            authorizer: AuthorizerContext::default(),
             integration: IntegrationOutcome::default(),
         })
+    }
+
+    /// Runs the route's authorizer and records what it contributes to
+    /// `$context.authorizer`. `--insecure-skip-authorization` skips it.
+    async fn authorize(&self, ctx: &mut RequestContext) -> Result<(), Denial> {
+        let RouteAuthorizer::Evaluated(ref authorizer) = self.route.authorizer else {
+            return Ok(());
+        };
+        if self.api.enforcement.authorization == AuthorizationMode::Skip {
+            return Ok(());
+        }
+        let request = AuthRequest {
+            aws: &self.api.aws,
+            ctx,
+            stage_variables: &self.api.stage_variables,
+        };
+        ctx.authorizer = authorizer.authorize(&request).await?;
+        Ok(())
     }
 
     async fn integrate(&self, ctx: RequestContext) -> Response {

@@ -14,6 +14,7 @@ use serde_json::{Map, Value, json};
 use crate::aws::AwsClients;
 use crate::gateway::GatewayError;
 use crate::integration::{LambdaProxy, StageVariables};
+use crate::authz::MethodArn;
 use crate::model::PayloadVersion;
 use crate::pipeline::RequestContext;
 use crate::route::Route;
@@ -27,11 +28,7 @@ impl LambdaProxy {
         stage_variables: &StageVariables,
     ) -> Response {
         let kind = ctx.api.kind;
-        let event = ProxyEvent {
-            ctx,
-            stage_variables,
-        }
-        .render(self.payload);
+        let event = ProxyEvent::new(ctx, stage_variables).render(self.payload);
         let call = aws.invoke_lambda(
             &self.function,
             self.credentials.as_ref(),
@@ -151,13 +148,60 @@ impl MultiValues {
 }
 
 /// An API Gateway proxy event built from a request.
-struct ProxyEvent<'a> {
+pub(crate) struct ProxyEvent<'a> {
     ctx: &'a RequestContext,
     stage_variables: &'a StageVariables,
 }
 
-impl ProxyEvent<'_> {
-    fn render(&self, version: PayloadVersion) -> Value {
+impl<'a> ProxyEvent<'a> {
+    pub(crate) fn new(ctx: &'a RequestContext, stage_variables: &'a StageVariables) -> Self {
+        Self {
+            ctx,
+            stage_variables,
+        }
+    }
+
+    /// The event for a `REQUEST` Lambda authorizer: the proxy event without the
+    /// body (and without an authorizer, since none has run), tagged with the
+    /// method ARN. HTTP APIs also send the identity source values; payload 1.0
+    /// joins them with commas and repeats the first as `authorizationToken`.
+    pub(crate) fn authorizer_request(
+        &self,
+        version: PayloadVersion,
+        arn: &MethodArn,
+        identity: Option<&[String]>,
+    ) -> Value {
+        let mut event = self.render(version);
+        if let Value::Object(ref mut fields) = event {
+            fields.remove("body");
+            fields.remove("isBase64Encoded");
+            if let Some(Value::Object(request_context)) = fields.get_mut("requestContext") {
+                request_context.remove("authorizer");
+            }
+            fields.insert("type".to_owned(), json!("REQUEST"));
+            let arn_key = match version {
+                PayloadVersion::V1 => "methodArn",
+                PayloadVersion::V2 => "routeArn",
+            };
+            fields.insert(arn_key.to_owned(), json!(arn.as_str()));
+            if let Some(identity) = identity {
+                match version {
+                    PayloadVersion::V1 => {
+                        let joined = identity.join(",");
+                        fields.insert("authorizationToken".to_owned(), json!(joined));
+                        fields.insert("identitySource".to_owned(), json!(joined));
+                        fields.insert("version".to_owned(), json!("1.0"));
+                    }
+                    PayloadVersion::V2 => {
+                        fields.insert("identitySource".to_owned(), json!(identity));
+                    }
+                }
+            }
+        }
+        event
+    }
+
+    pub(crate) fn render(&self, version: PayloadVersion) -> Value {
         match version {
             PayloadVersion::V1 => self.v1(),
             PayloadVersion::V2 => self.v2(),
@@ -220,7 +264,7 @@ impl ProxyEvent<'_> {
                     "sourceIp": ctx.source_ip(),
                     "userAgent": ctx.header_str("user-agent"),
                 },
-                "authorizer": (!ctx.authorizer.is_empty()).then(|| Value::Object(ctx.authorizer.clone())),
+                "authorizer": ctx.authorizer.event_value(PayloadVersion::V1),
             },
             "body": body.body,
             "isBase64Encoded": body.is_base64,
@@ -285,6 +329,11 @@ impl ProxyEvent<'_> {
             if !self.stage_variables.is_empty() {
                 let variables: StringFields = self.stage_variables.into_iter().collect();
                 fields.insert("stageVariables".to_owned(), Value::Object(variables.0));
+            }
+            if let Some(authorizer) = ctx.authorizer.event_value(PayloadVersion::V2)
+                && let Some(Value::Object(request_context)) = fields.get_mut("requestContext")
+            {
+                request_context.insert("authorizer".to_owned(), authorizer);
             }
             if !body.body.is_null() {
                 fields.insert("body".to_owned(), body.body);
@@ -375,7 +424,7 @@ mod tests {
 
     use super::*;
     use crate::model::ApiKind;
-    use crate::pipeline::QueryString;
+    use crate::pipeline::{AuthorizerContext, QueryString};
     use crate::pipeline::context::tests::request;
 
     fn variables() -> StageVariables {
@@ -478,8 +527,10 @@ mod tests {
     #[test]
     fn authorizer_context_is_included_when_present() {
         let mut ctx = incoming(b"");
-        ctx.authorizer
-            .insert("principalId".to_owned(), json!("user-1"));
+        ctx.authorizer = AuthorizerContext::lambda(Map::from_iter([(
+            "principalId".to_owned(),
+            json!("user-1"),
+        )]));
         assert_eq!(
             event(&ctx, PayloadVersion::V1)["requestContext"]["authorizer"]["principalId"],
             "user-1"
