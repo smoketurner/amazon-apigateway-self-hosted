@@ -69,6 +69,12 @@ own principal does the calling, so:
   role when the authorizer has one (same trust policy requirement as above), otherwise as the
   gateway's principal. An authorizer that cannot be invoked or answers in an invalid format
   answers `500`, as API Gateway does; check the gateway's logs.
+- **Cognito and JWT authorizers** call no AWS API. The gateway fetches the issuer's signing keys over
+  HTTPS (`https://cognito-idp.<region>.amazonaws.com/<pool>/.well-known/jwks.json` for Cognito,
+  the issuer's `/.well-known/openid-configuration` and the key set it names for JWT authorizers), so
+  egress to the identity provider must be allowed. Keys are cached for two hours and a fetch is
+  abandoned after 1.5 seconds or 150 KB. To reach the provider through a mirror, pass
+  `--issuer-endpoint <issuer>=<url>`.
 - **Lambda functions without a role**: grant the gateway's principal `lambda:InvokeFunction`
   (identity policy, or the function's resource policy for cross-account functions).
 - **Caller passthrough** (`arn:aws:iam::*:user/*`) needs IAM-authenticated callers and cannot
@@ -229,7 +235,7 @@ Gateway answers a caller who fails that check, and lists each one per route on `
 |---|---|---|
 | Resource policy (any statement) | `403 Forbidden` | `--unsupported-resource-policy=ignore` |
 | IAM (`AWS_IAM`) | REST `403 Missing Authentication Token`, HTTP `403 Forbidden` | `--insecure-skip-authorization` |
-| Cognito or JWT authorizer, or a Lambda authorizer that cannot be evaluated (see `/routes`) | `401 Unauthorized` | `--insecure-skip-authorization` |
+| An authorizer that cannot be evaluated (see `/routes`) | `401 Unauthorized` | `--insecure-skip-authorization` |
 | API key | `403 Forbidden` | `--insecure-skip-authorization` |
 | Request validator | `501` | `--unsupported-validation=ignore` |
 

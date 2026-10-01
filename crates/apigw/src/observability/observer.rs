@@ -436,6 +436,7 @@ mod tests {
     use tower::ServiceExt as _;
 
     use super::*;
+    use crate::authz::KeyStore;
     use crate::aws::{AwsClients, CredentialsMode, LambdaEndpoints};
     use crate::gateway::{ApiContext, AuthorizationMode, Enforcement, RequestId, Unsupported};
     use crate::gateway_response::GatewayResponses;
@@ -550,6 +551,7 @@ mod tests {
             },
             http: reqwest::Client::new(),
             aws: clients,
+            keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
             observer: StageObserver::new(&observability, &model, "abc", Some("prod"), None),
             release: None,
         });

@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use clap::{ArgGroup, Parser, ValueEnum};
 
+use crate::authz::IssuerEndpoint;
 use crate::aws::{CredentialsMode, LambdaEndpoint, LambdaEndpoints};
 use crate::gateway::{AuthorizationMode, Enforcement, Unsupported};
 use crate::identity::{TrustedProxies, TrustedProxy};
@@ -97,6 +98,19 @@ pub(crate) struct Config {
         value_delimiter = ','
     )]
     pub(crate) lambda_endpoints: Vec<LambdaEndpoint>,
+
+    /// Fetch the signing keys of a token issuer from URL instead of from the
+    /// issuer (repeatable; `ISSUER` is the issuer string tokens carry as `iss`).
+    /// For an in-cluster mirror of an identity provider; the keys are read from
+    /// `URL/.well-known/openid-configuration` (JWT authorizers) or
+    /// `URL/.well-known/jwks.json` (Cognito user pools). Use `https` URLs.
+    #[arg(
+        long = "issuer-endpoint",
+        value_name = "ISSUER=URL",
+        env = "APIGW_ISSUER_ENDPOINTS",
+        value_delimiter = ','
+    )]
+    pub(crate) issuer_endpoints: Vec<IssuerEndpoint>,
 
     /// What to do with routes under a resource policy, which this gateway does
     /// not evaluate yet: `reject` answers 403, `ignore` serves them unrestricted.
