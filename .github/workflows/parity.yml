@@ -1,0 +1,121 @@
+name: Parity
+
+# Nightly: re-record the reference APIs and open (or update) an issue when API Gateway's
+# behavior no longer matches the committed fixtures. Drift never fails the run; a run
+# fails only when recording itself fails.
+#
+# This only works once terraform/environments/dev is deployed and the repository variables and
+# secrets listed in terraform/README.md are set. Until PARITY_AWS_ROLE_ARN is set the job
+# is skipped.
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_WARNINGS: deny
+
+jobs:
+  record:
+    name: Record and compare
+    if: ${{ vars.PARITY_AWS_ROLE_ARN != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+    env:
+      PARITY_DIR: ${{ github.workspace }}/parity
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set the work directory
+        run: echo "WORK_DIR=$RUNNER_TEMP/parity" >> "$GITHUB_ENV"
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake clang
+      - name: Setup Rust toolchain
+        run: rustup show
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: "v1"
+          shared-key: "debug-${{ runner.os }}"
+          save-if: "false"
+          cache-on-failure: true
+      - name: Assume the parity role
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.PARITY_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.PARITY_AWS_REGION }}
+      - name: Download the deployed exports
+        env:
+          PARITY_OUTPUTS: ${{ vars.PARITY_OUTPUTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$WORK_DIR/exports"
+          printf '%s' "$PARITY_OUTPUTS" > "$WORK_DIR/outputs.json"
+          stage=$(jq -r .stage "$WORK_DIR/outputs.json")
+          aws apigateway get-export --rest-api-id "$(jq -r .rest.api_id "$WORK_DIR/outputs.json")" \
+            --stage-name "$stage" --export-type oas30 \
+            --parameters extensions=apigateway,authorizers \
+            "$WORK_DIR/exports/rest.openapi.json"
+          aws apigateway get-export --rest-api-id "$(jq -r .rest_policy.api_id "$WORK_DIR/outputs.json")" \
+            --stage-name "$stage" --export-type oas30 \
+            --parameters extensions=apigateway,authorizers \
+            "$WORK_DIR/exports/rest_policy.openapi.json"
+          aws apigatewayv2 export-api --api-id "$(jq -r .http.api_id "$WORK_DIR/outputs.json")" \
+            --stage-name "$stage" --specification OAS30 --output-type JSON \
+            "$WORK_DIR/exports/http.openapi.json"
+      - name: Record
+        env:
+          PARITY_API_KEY: ${{ secrets.PARITY_API_KEY }}
+          PARITY_COGNITO_PASSWORD: ${{ secrets.PARITY_COGNITO_PASSWORD }}
+        run: |
+          cargo run --locked -p apigw-parity -- record \
+            --outputs "$WORK_DIR/outputs.json" \
+            --cases "$PARITY_DIR/cases" \
+            --out "$WORK_DIR/recorded" \
+            --export-dir "$WORK_DIR/exports" \
+            --baseline "$PARITY_DIR" \
+            --drift-report "$WORK_DIR/drift.md" \
+            --secret-env PARITY_API_KEY \
+            --secret-env PARITY_COGNITO_PASSWORD
+      - name: Upload the recording
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: parity-recording
+          path: ${{ runner.temp }}/parity/recorded
+          retention-days: 14
+      - name: Open or update the drift issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ ! -s "$WORK_DIR/drift.md" ]; then
+            echo "No drift from the committed fixtures."
+            exit 0
+          fi
+          {
+            cat "$WORK_DIR/drift.md"
+            printf '\nRecorded fixtures and exports are attached to %s as the parity-recording artifact. Commit them over the parity directory once the change is understood.\n' "$RUN_URL"
+          } > "$WORK_DIR/issue.md"
+          gh label create parity-drift --color D93F0B \
+            --description "API Gateway behavior no longer matches the parity fixtures" --force
+          existing=$(gh issue list --label parity-drift --state open --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body-file "$WORK_DIR/issue.md"
+          else
+            gh issue create --title "API Gateway behavior drifted from the parity fixtures" \
+              --label parity-drift --body-file "$WORK_DIR/issue.md"
+          fi

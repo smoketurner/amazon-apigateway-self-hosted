@@ -3,14 +3,21 @@
 //! gateway responses, and access logs all read `$context` from here.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use axum::body::Bytes;
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
+use crate::gateway::{ApiContext, RequestId};
 use crate::identity::ClientIdentity;
+use crate::integration::StageVariables;
 use crate::model::{ApiKind, PayloadVersion, RouteKey};
+use crate::route::Route;
 
 /// The API and stage a request was received on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,10 +170,111 @@ pub(crate) struct RequestContext {
     pub(crate) identity: ClientIdentity,
     pub(crate) body: Bytes,
     pub(crate) authorizer: AuthorizerContext,
+    pub(crate) stage_variables: Arc<StageVariables>,
     pub(crate) integration: IntegrationOutcome,
 }
 
+/// A `$context` document, addressable by dotted path (`identity.sourceIp`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ContextVariables(Value);
+
+impl ContextVariables {
+    pub(crate) fn new(value: Value) -> Self {
+        Self(value)
+    }
+
+    /// The variable at `path` as text: strings as they are, numbers and
+    /// booleans as written, structures as compact JSON. Missing and `null`
+    /// variables have no value.
+    pub(crate) fn lookup(&self, path: &str) -> Option<String> {
+        let mut value = &self.0;
+        for segment in path.split('.') {
+            value = value.get(segment)?;
+        }
+        match value {
+            Value::Null => None,
+            Value::String(text) => Some(text.clone()),
+            Value::Bool(_) | Value::Number(_) | Value::Array(_) | Value::Object(_) => {
+                Some(value.to_string())
+            }
+        }
+    }
+
+    pub(crate) fn set(&mut self, name: &str, value: Value) {
+        if let Value::Object(ref mut fields) = self.0 {
+            fields.insert(name.to_owned(), value);
+        }
+    }
+}
+
 impl RequestContext {
+    /// Captures a request before its body is read. `route` is `None` for
+    /// requests that matched no route.
+    pub(crate) fn new(
+        api: &ApiContext,
+        route: Option<&Route>,
+        parts: Parts,
+        path_params: Vec<(String, String)>,
+    ) -> Self {
+        let Parts {
+            method,
+            uri,
+            headers,
+            mut extensions,
+            ..
+        } = parts;
+        let request_id = extensions
+            .get::<RequestId>()
+            .map_or_else(Uuid::now_v7, |id| id.0);
+        let identity = extensions.remove::<ClientIdentity>().unwrap_or_else(|| {
+            tracing::warn!("request reached the pipeline without a client identity");
+            ClientIdentity::unknown()
+        });
+        let (route_key, resource_path) = match route {
+            Some(route) => (route.key.clone(), route.path.to_string()),
+            None => (RouteKey::from(""), uri.path().to_owned()),
+        };
+        Self {
+            api: ApiInfo {
+                kind: api.kind,
+                api_id: api.api_id.clone(),
+                stage: api.stage.clone(),
+            },
+            route_key,
+            resource_path,
+            request_id,
+            received: jiff::Timestamp::now(),
+            method,
+            path: uri.path().to_owned(),
+            query: QueryString::new(uri.query()),
+            headers,
+            path_params,
+            identity,
+            body: Bytes::new(),
+            authorizer: AuthorizerContext::default(),
+            stage_variables: Arc::clone(&api.stage_variables),
+            integration: IntegrationOutcome::default(),
+        }
+    }
+
+    /// `$context.extendedRequestId`: API Gateway's is an opaque 12-character
+    /// base64 token; this one is derived from the random half of the request
+    /// ID so the header and the context variable agree.
+    pub(crate) fn extended_request_id(&self) -> String {
+        BASE64.encode(
+            self.request_id
+                .as_bytes()
+                .iter()
+                .skip(8)
+                .copied()
+                .collect::<Vec<u8>>(),
+        )
+    }
+
+    pub(crate) fn context_value(&self, path: &str) -> Option<String> {
+        ContextVariables::new(self.variables()).lookup(path)
+    }
+
     pub(crate) fn path_param(&self, name: &str) -> Option<&str> {
         self.path_params
             .iter()
@@ -207,7 +315,7 @@ impl RequestContext {
             "apiId": self.api.api_id,
             "domainName": self.domain_name(),
             "domainPrefix": self.domain_prefix(),
-            "extendedRequestId": self.request_id.to_string(),
+            "extendedRequestId": self.extended_request_id(),
             "httpMethod": self.method.as_str(),
             "identity": {
                 "sourceIp": self.source_ip(),
@@ -276,6 +384,7 @@ pub(crate) mod tests {
             identity,
             body: Bytes::new(),
             authorizer: AuthorizerContext::default(),
+            stage_variables: Arc::default(),
             integration: IntegrationOutcome::default(),
         }
     }
@@ -346,8 +455,14 @@ pub(crate) mod tests {
             context.event_value(PayloadVersion::V2),
             Some(json!({"lambda": {"tenant": "acme"}}))
         );
-        assert_eq!(AuthorizerContext::default().event_value(PayloadVersion::V1), None);
-        assert_eq!(AuthorizerContext::default().event_value(PayloadVersion::V2), None);
+        assert_eq!(
+            AuthorizerContext::default().event_value(PayloadVersion::V1),
+            None
+        );
+        assert_eq!(
+            AuthorizerContext::default().event_value(PayloadVersion::V2),
+            None
+        );
     }
 
     #[test]

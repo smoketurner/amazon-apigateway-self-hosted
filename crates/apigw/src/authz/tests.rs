@@ -2,6 +2,9 @@
 //! function and a fake backend, both reached through Lambda endpoint
 //! overrides. The authorizer's verdict is chosen by the token the test sends.
 
+#![expect(clippy::unwrap_used, reason = "tests assert on known-good fixtures")]
+#![expect(clippy::indexing_slicing, reason = "tests index known JSON fields")]
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -15,6 +18,7 @@ use tower::ServiceExt as _;
 
 use crate::aws::{AwsClients, CredentialsMode, LambdaEndpoints};
 use crate::gateway::{ApiContext, AuthorizationMode, Enforcement, Unsupported};
+use crate::gateway_response::GatewayResponses;
 use crate::integration::StageVariables;
 use crate::model::{ApiKind, ApiModel, IntegrationOverrides, StageSettings};
 use crate::router::{RouteSummary, build};
@@ -89,7 +93,6 @@ fn verdict(event: &Value) -> (Option<&'static str>, String) {
             "Allow",
             "arn:aws:execute-api:us-east-1:123456789012:abc/prod/GET/pets/1",
         )),
-        "deny" => ok(policy("Deny", arn)),
         "allow-then-deny" => ok(json!({"principalId": "u", "policyDocument": {"Statement": [
             {"Action": "execute-api:Invoke", "Effect": "Allow", "Resource": "*"},
             {"Action": "execute-api:Invoke", "Effect": "Deny", "Resource": arn}]}})),
@@ -115,10 +118,17 @@ fn verdict(event: &Value) -> (Option<&'static str>, String) {
         "no-principal" => ok(json!({"policyDocument": {"Statement": []}})),
         "bad-policy" => ok(json!({"principalId": "u", "policyDocument": {"Statement": [
             {"Effect": "Allow", "Resource": "*"}]}})),
-        "unauthorized" => (Some("Handled"), json!({"errorMessage": "Unauthorized"}).to_string()),
-        "boom" => (Some("Unhandled"), json!({"errorMessage": "kaput"}).to_string()),
+        "unauthorized" => (
+            Some("Handled"),
+            json!({"errorMessage": "Unauthorized"}).to_string(),
+        ),
+        "boom" => (
+            Some("Unhandled"),
+            json!({"errorMessage": "kaput"}).to_string(),
+        ),
         "garbage" => (None, "not json".to_owned()),
         "not-an-object" => (None, "[]".to_owned()),
+        // "deny", and anything unrecognised.
         _ => ok(policy("Deny", arn)),
     }
 }
@@ -164,7 +174,7 @@ impl Harness {
                     }
                 }),
             )
-            .route("/hang", post(|| std::future::pending::<String>()));
+            .route("/hang", post(std::future::pending::<String>));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -194,12 +204,15 @@ impl Harness {
             kind,
             api_id: "abc".to_owned(),
             stage: Some("prod".to_owned()),
-            stage_variables: StageVariables::new([("fn".to_owned(), "auth".to_owned())].into()),
+            stage_variables: Arc::new(StageVariables::new(
+                [("fn".to_owned(), "auth".to_owned())].into(),
+            )),
             enforcement: Enforcement {
                 authorization: mode,
                 resource_policy: Unsupported::Reject,
                 request_validation: Unsupported::Reject,
             },
+            responses: GatewayResponses::default(),
             http: reqwest::Client::new(),
             aws,
         });
@@ -212,7 +225,12 @@ impl Harness {
         }
     }
 
-    async fn call(&self, method: Method, uri: &str, headers: &[(&str, &str)]) -> (StatusCode, Value) {
+    async fn call(
+        &self,
+        method: Method,
+        uri: &str,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, Value) {
         let mut request = Request::builder().method(method).uri(uri);
         for (name, value) in headers {
             request = request.header(*name, *value);
@@ -233,7 +251,8 @@ impl Harness {
     }
 
     async fn get(&self, uri: &str, token: &str) -> (StatusCode, Value) {
-        self.call(Method::GET, uri, &[("authorization", token)]).await
+        self.call(Method::GET, uri, &[("authorization", token)])
+            .await
     }
 
     /// The `requestContext.authorizer` the backend received on its last call.
@@ -245,10 +264,9 @@ impl Harness {
 fn rest_token_doc(authorizer: Value) -> Value {
     let mut config = json!({"type": "token", "authorizerUri": lambda_uri(AUTH_FUNCTION),
         "authorizerResultTtlInSeconds": 300});
-    config
-        .as_object_mut()
-        .unwrap()
-        .extend(authorizer.as_object().cloned().unwrap_or_default());
+    if let (Some(config), Value::Object(extra)) = (config.as_object_mut(), authorizer) {
+        config.extend(extra);
+    }
     json!({
         "components": {"securitySchemes": {"auth": {
             "type": "apiKey", "name": "Authorization", "in": "header",
@@ -263,7 +281,12 @@ fn rest_token_doc(authorizer: Value) -> Value {
 }
 
 async fn rest_token(authorizer: Value) -> Harness {
-    Harness::start(&rest_token_doc(authorizer), ApiKind::Rest, AuthorizationMode::Enforce).await
+    Harness::start(
+        &rest_token_doc(authorizer),
+        ApiKind::Rest,
+        AuthorizationMode::Enforce,
+    )
+    .await
 }
 
 fn message(body: &Value) -> &Value {
@@ -304,7 +327,9 @@ async fn a_missing_or_empty_token_is_401_without_invoking_the_authorizer() {
     let (status, body) = h.call(Method::GET, "/pets/7", &[]).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body, json!({"message": "Unauthorized"}));
-    let (status, _) = h.call(Method::GET, "/pets/7", &[("authorization", "")]).await;
+    let (status, _) = h
+        .call(Method::GET, "/pets/7", &[("authorization", "")])
+        .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(h.auth_calls.count(), 0);
     assert_eq!(h.backend_calls.count(), 0);
@@ -313,8 +338,18 @@ async fn a_missing_or_empty_token_is_401_without_invoking_the_authorizer() {
 #[tokio::test]
 async fn a_token_failing_the_validation_expression_is_401_without_invoking() {
     let h = rest_token(json!({"identityValidationExpression": "^Bearer [-0-9a-zA-Z._]+$"})).await;
-    for token in ["allow", "Bearer", "Bearer a b", "xBearer a", "Bearer \u{e9}"] {
-        assert_eq!(h.get("/pets/7", token).await.0, StatusCode::UNAUTHORIZED, "{token:?}");
+    for token in [
+        "allow",
+        "Bearer",
+        "Bearer a b",
+        "xBearer a",
+        "Bearer \u{e9}",
+    ] {
+        assert_eq!(
+            h.get("/pets/7", token).await.0,
+            StatusCode::UNAUTHORIZED,
+            "{token:?}"
+        );
     }
     assert_eq!(h.auth_calls.count(), 0);
 }
@@ -323,7 +358,10 @@ async fn a_token_failing_the_validation_expression_is_401_without_invoking() {
 async fn the_validation_expression_must_match_the_whole_token() {
     let h = rest_token(json!({"identityValidationExpression": "allow"})).await;
     assert_eq!(h.get("/pets/7", "allow").await.0, StatusCode::OK);
-    assert_eq!(h.get("/pets/7", "allowed").await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        h.get("/pets/7", "allowed").await.0,
+        StatusCode::UNAUTHORIZED
+    );
     assert_eq!(h.get("/pets/7", "xallow").await.0, StatusCode::UNAUTHORIZED);
     let h = rest_token(json!({"identityValidationExpression": "allow|deny"})).await;
     assert_eq!(h.get("/pets/7", "denyx").await.0, StatusCode::UNAUTHORIZED);
@@ -347,7 +385,10 @@ async fn explicit_and_implicit_denials_are_403_with_api_gateways_messages() {
     );
     let (status, body) = h.get("/pets/2", "allow-pet-1").await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(message(&body), "User is not authorized to access this resource");
+    assert_eq!(
+        message(&body),
+        "User is not authorized to access this resource"
+    );
     assert_eq!(h.backend_calls.count(), 0);
 }
 
@@ -355,7 +396,10 @@ async fn explicit_and_implicit_denials_are_403_with_api_gateways_messages() {
 async fn authorizer_failures_map_to_401_and_500() {
     let h = rest_token(json!({"authorizerResultTtlInSeconds": 0})).await;
     let (status, body) = h.get("/pets/7", "unauthorized").await;
-    assert_eq!((status, body), (StatusCode::UNAUTHORIZED, json!({"message": "Unauthorized"})));
+    assert_eq!(
+        (status, body),
+        (StatusCode::UNAUTHORIZED, json!({"message": "Unauthorized"}))
+    );
     for token in [
         "boom",
         "garbage",
@@ -366,7 +410,7 @@ async fn authorizer_failures_map_to_401_and_500() {
     ] {
         let (status, body) = h.get("/pets/7", token).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{token}");
-        assert_eq!(body, json!({"message": null}), "{token}");
+        assert_eq!(body, json!({"message": "Internal server error"}), "{token}");
     }
     assert_eq!(h.backend_calls.count(), 0, "no failure reaches the backend");
 }
@@ -390,7 +434,7 @@ async fn an_authorizer_that_does_not_answer_in_10_seconds_is_500() {
     let h = Harness::start(&doc, ApiKind::Rest, AuthorizationMode::Enforce).await;
     let (status, body) = h.get("/pets/7", "allow").await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(body, json!({"message": null}));
+    assert_eq!(body, json!({"message": "Internal server error"}));
     assert_eq!(h.backend_calls.count(), 0);
 }
 
@@ -399,12 +443,19 @@ async fn results_are_cached_by_token_and_the_policy_is_checked_per_method() {
     let h = rest_token(json!({})).await;
     assert_eq!(h.get("/pets/1", "allow-pet-1").await.0, StatusCode::OK);
     assert_eq!(h.get("/pets/1", "allow-pet-1").await.0, StatusCode::OK);
-    assert_eq!(h.auth_calls.count(), 1, "the second request is served from the cache");
+    assert_eq!(
+        h.auth_calls.count(),
+        1,
+        "the second request is served from the cache"
+    );
     // The cached policy only allows pets/1: another method is denied without
     // asking the function again.
     let (status, body) = h.get("/pets/2", "allow-pet-1").await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(message(&body), "User is not authorized to access this resource");
+    assert_eq!(
+        message(&body),
+        "User is not authorized to access this resource"
+    );
     assert_eq!(h.auth_calls.count(), 1);
     // A different token is a different cache entry.
     assert_eq!(h.get("/pets/1", "allow-all").await.0, StatusCode::OK);
@@ -417,11 +468,23 @@ async fn denials_are_cached_too_and_failures_are_not() {
     assert_eq!(h.get("/pets/1", "deny").await.0, StatusCode::FORBIDDEN);
     assert_eq!(h.get("/pets/1", "deny").await.0, StatusCode::FORBIDDEN);
     assert_eq!(h.auth_calls.count(), 1);
-    assert_eq!(h.get("/pets/1", "boom").await.0, StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(h.get("/pets/1", "boom").await.0, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        h.get("/pets/1", "boom").await.0,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(
+        h.get("/pets/1", "boom").await.0,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
     assert_eq!(h.auth_calls.count(), 3);
-    assert_eq!(h.get("/pets/1", "unauthorized").await.0, StatusCode::UNAUTHORIZED);
-    assert_eq!(h.get("/pets/1", "unauthorized").await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        h.get("/pets/1", "unauthorized").await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        h.get("/pets/1", "unauthorized").await.0,
+        StatusCode::UNAUTHORIZED
+    );
     assert_eq!(h.auth_calls.count(), 5);
 }
 
@@ -509,12 +572,17 @@ async fn an_authorizer_that_is_not_defined_fails_closed() {
     let doc = json!({"paths": {"/x": {"get": {"security": [{"missing": []}],
         "x-amazon-apigateway-integration": echo_integration()}}}});
     let h = Harness::start(&doc, ApiKind::Rest, AuthorizationMode::Enforce).await;
-    assert_eq!(h.call(Method::GET, "/x", &[]).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        h.call(Method::GET, "/x", &[]).await.0,
+        StatusCode::UNAUTHORIZED
+    );
 }
 
 #[tokio::test]
 async fn stage_variables_can_name_the_authorizer_function() {
-    let doc = rest_token_doc(json!({"authorizerUri": lambda_uri("arn:aws:lambda:us-east-1:123456789012:function:${stageVariables.fn}")}));
+    let doc = rest_token_doc(
+        json!({"authorizerUri": lambda_uri("arn:aws:lambda:us-east-1:123456789012:function:${stageVariables.fn}")}),
+    );
     let h = Harness::start(&doc, ApiKind::Rest, AuthorizationMode::Enforce).await;
     assert_eq!(h.get("/pets/7", "allow").await.0, StatusCode::OK);
 }
@@ -538,7 +606,10 @@ async fn request_authorizers_get_the_request_and_need_every_identity_source() {
     let doc = rest_request_doc("method.request.header.X-Token, method.request.querystring.tenant");
     let h = Harness::start(&doc, ApiKind::Rest, AuthorizationMode::Enforce).await;
     let headers = [("x-token", "allow"), ("host", "api.example.com")];
-    assert_eq!(h.call(Method::GET, "/pets/7?tenant=a", &headers).await.0, StatusCode::OK);
+    assert_eq!(
+        h.call(Method::GET, "/pets/7?tenant=a", &headers).await.0,
+        StatusCode::OK
+    );
     let event = h.auth_calls.last();
     assert_eq!(event["type"], "REQUEST");
     assert_eq!(event["httpMethod"], "GET");
@@ -609,10 +680,9 @@ fn http_doc(authorizer: Value) -> Value {
     let mut config = json!({"type": "request", "authorizerUri": lambda_uri(AUTH_FUNCTION),
         "identitySource": ["$request.header.X-Token"],
         "authorizerPayloadFormatVersion": "2.0", "enableSimpleResponses": true});
-    config
-        .as_object_mut()
-        .unwrap()
-        .extend(authorizer.as_object().cloned().unwrap_or_default());
+    if let (Some(config), Value::Object(extra)) = (config.as_object_mut(), authorizer) {
+        config.extend(extra);
+    }
     json!({
         "components": {"securitySchemes": {"auth": {"type": "apiKey", "name": "Authorization",
             "in": "header", "x-amazon-apigateway-authorizer": config}}},
@@ -623,11 +693,21 @@ fn http_doc(authorizer: Value) -> Value {
 }
 
 async fn http(authorizer: Value) -> Harness {
-    Harness::start(&http_doc(authorizer), ApiKind::Http, AuthorizationMode::Enforce).await
+    Harness::start(
+        &http_doc(authorizer),
+        ApiKind::Http,
+        AuthorizationMode::Enforce,
+    )
+    .await
 }
 
 async fn http_get(h: &Harness, token: &str) -> (StatusCode, Value) {
-    h.call(Method::GET, "/pets/7?a=1&a=2", &[("x-token", token), ("cookie", "k=v")]).await
+    h.call(
+        Method::GET,
+        "/pets/7?a=1&a=2",
+        &[("x-token", token), ("cookie", "k=v")],
+    )
+    .await
 }
 
 #[tokio::test]
@@ -656,16 +736,31 @@ async fn http_payload_2_simple_responses_allow_and_deny() {
     );
 
     let (status, body) = http_get(&h, "simple-false").await;
-    assert_eq!((status, body), (StatusCode::FORBIDDEN, json!({"message": "Forbidden"})));
-    for token in ["simple-missing", "simple-string", "allow", "boom", "garbage"] {
+    assert_eq!(
+        (status, body),
+        (StatusCode::FORBIDDEN, json!({"message": "Forbidden"}))
+    );
+    for token in [
+        "simple-missing",
+        "simple-string",
+        "allow",
+        "boom",
+        "garbage",
+    ] {
         let (status, body) = http_get(&h, token).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{token}");
         assert_eq!(body, json!({"message": "Internal Server Error"}), "{token}");
     }
     let (status, body) = http_get(&h, "unauthorized").await;
-    assert_eq!((status, body), (StatusCode::UNAUTHORIZED, json!({"message": "Unauthorized"})));
+    assert_eq!(
+        (status, body),
+        (StatusCode::UNAUTHORIZED, json!({"message": "Unauthorized"}))
+    );
     let (status, body) = h.call(Method::GET, "/pets/7", &[]).await;
-    assert_eq!((status, body), (StatusCode::UNAUTHORIZED, json!({"message": "Unauthorized"})));
+    assert_eq!(
+        (status, body),
+        (StatusCode::UNAUTHORIZED, json!({"message": "Unauthorized"}))
+    );
 }
 
 #[tokio::test]
@@ -684,21 +779,35 @@ async fn http_policy_responses_are_evaluated_against_the_route_arn() {
     let h = http(json!({"enableSimpleResponses": false})).await;
     assert_eq!(http_get(&h, "allow").await.0, StatusCode::OK);
     let (status, body) = http_get(&h, "deny").await;
-    assert_eq!((status, body), (StatusCode::FORBIDDEN, json!({"message": "Forbidden"})));
+    assert_eq!(
+        (status, body),
+        (StatusCode::FORBIDDEN, json!({"message": "Forbidden"}))
+    );
     let (status, body) = http_get(&h, "allow-pet-1").await;
-    assert_eq!((status, body), (StatusCode::FORBIDDEN, json!({"message": "Forbidden"})));
+    assert_eq!(
+        (status, body),
+        (StatusCode::FORBIDDEN, json!({"message": "Forbidden"}))
+    );
     let (status, _) = http_get(&h, "simple-true").await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "a simple response needs enableSimpleResponses");
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a simple response needs enableSimpleResponses"
+    );
 }
 
 #[tokio::test]
 async fn http_payload_1_matches_the_rest_request_event() {
-    let h = http(json!({"authorizerPayloadFormatVersion": "1.0", "enableSimpleResponses": false})).await;
+    let h = http(json!({"authorizerPayloadFormatVersion": "1.0", "enableSimpleResponses": false}))
+        .await;
     assert_eq!(http_get(&h, "allow").await.0, StatusCode::OK);
     let event = h.auth_calls.last();
     assert_eq!(event["version"], "1.0");
     assert_eq!(event["type"], "REQUEST");
-    assert_eq!(event["methodArn"], "arn:aws:execute-api:us-east-1:123456789012:abc/prod/GET/pets/7");
+    assert_eq!(
+        event["methodArn"],
+        "arn:aws:execute-api:us-east-1:123456789012:abc/prod/GET/pets/7"
+    );
     assert_eq!(event["identitySource"], "allow");
     assert_eq!(event["authorizationToken"], "allow");
     assert_eq!(event["httpMethod"], "GET");
@@ -721,8 +830,10 @@ async fn http_authorizers_cache_only_with_a_ttl_and_identity_sources() {
     assert_eq!(h.auth_calls.count(), 2);
 
     let h = http(json!({"authorizerResultTtlInSeconds": 300, "identitySource": []})).await;
-    h.call(Method::GET, "/pets/7", &[("x-token", "simple-true")]).await;
-    h.call(Method::GET, "/pets/7", &[("x-token", "simple-true")]).await;
+    h.call(Method::GET, "/pets/7", &[("x-token", "simple-true")])
+        .await;
+    h.call(Method::GET, "/pets/7", &[("x-token", "simple-true")])
+        .await;
     assert_eq!(h.auth_calls.count(), 2, "no identity sources, no caching");
 }
 
@@ -743,6 +854,9 @@ async fn including_the_route_key_in_the_identity_sources_caches_per_route() {
 #[tokio::test]
 async fn http_token_authorizers_do_not_exist() {
     let h = http(json!({"type": "token"})).await;
-    assert_eq!(http_get(&h, "simple-true").await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        http_get(&h, "simple-true").await.0,
+        StatusCode::UNAUTHORIZED
+    );
     assert_eq!(h.auth_calls.count(), 0);
 }

@@ -26,13 +26,16 @@ Management's
 | `AWS_PROXY` (Lambda) integrations | Invoked with the API Gateway proxy event, payload format 1.0 or 2.0 |
 | `MOCK` integrations | Status, literal response headers, and response template returned (templates are not evaluated as VTL) |
 | Stage variables | Read from the stage and substituted into integration URIs; overridable locally |
-| Lambda/Cognito/JWT authorizers | **Not evaluated yet.** Answer `401` unless `--insecure-skip-authorization` is set |
+| Lambda authorizers | `TOKEN` and `REQUEST` (REST), `REQUEST` with payload 1.0/2.0 and simple responses (HTTP): invoked, cached by identity source, and the returned policy evaluated per method; `--insecure-skip-authorization` skips them |
+| Cognito/JWT authorizers | **Not evaluated yet.** Answer `401` unless `--insecure-skip-authorization` is set |
 | API keys | **Not checked yet.** Answer `403 Forbidden` unless `--insecure-skip-authorization` is set |
 | IAM (`AWS_IAM`) auth | Cannot be verified outside AWS. REST answers `403 Missing Authentication Token`, HTTP `403 Forbidden`, unless `--insecure-skip-authorization` is set |
 | Resource policies | **Not evaluated yet.** Every route of an API with a policy answers `403` unless `--unsupported-resource-policy=ignore` (not affected by `--insecure-skip-authorization`) |
 | Request validators | **Not run yet.** Validated routes answer `501` unless `--unsupported-validation=ignore` |
 | `AWS`/`HTTP` (non-proxy, VTL mapping templates), VPC links | Answer `501`; listed with the reason on `/routes` |
 | Unknown route | REST: `403 {"message":"Missing Authentication Token"}`; HTTP: `404 {"message":"Not Found"}` |
+
+The full feature matrix, with an issue link for every gap, is in [docs/parity.md](docs/parity.md).
 
 `/routes` on the admin listener lists, per route, its protections, any problems, and any
 imported settings not enforced yet, plus the API-wide settings not enforced yet.
@@ -120,18 +123,20 @@ previous routes keep serving), so a typo never goes unnoticed.
 |---|---|---|
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/restapis/<id>/stages/<stage>/exports/oas30`, `.../restapis/<id>/stages/<stage>` | REST APIs |
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/apis/<id>/exports/OAS30`, `.../apis/<id>/stages/<stage>` | HTTP APIs |
-| `lambda:InvokeFunction` | each integrated function | `AWS_PROXY` routes |
-| `sts:AssumeRole` | each integration `credentials` role | integrations with a role, unless `--integration-credentials=gateway` |
+| `lambda:InvokeFunction` | each integrated function and each Lambda authorizer function | `AWS_PROXY` routes and Lambda authorizers |
+| `sts:AssumeRole` | each integration `credentials` and each `authorizerCredentials` role | integrations and authorizers with a role, unless `--integration-credentials=gateway` |
 
 ## Documentation
 
 | Doc | Covers |
 |---|---|
 | [docs/deployment.md](docs/deployment.md) | Container image, Kubernetes, Istio, certificates, credentials outside AWS |
+| [docs/parity.md](docs/parity.md) | Feature matrix: what is supported, partial, planned, or not possible, for REST and HTTP APIs |
 | [docs/architecture.md](docs/architecture.md) | Modules, request flow, the accept loop, router swapping |
 | [docs/crypto.md](docs/crypto.md) | aws-lc-rs as the only crypto provider |
 | [docs/ci-cd.md](docs/ci-cd.md) | CI jobs |
-| [reference/README.md](reference/README.md) | Terraform stack that deploys the reference APIs parity is measured against |
+| [terraform/README.md](terraform/README.md) | Terraform modules and the `dev` environment that deploys the reference APIs parity is measured against |
+| [parity/README.md](parity/README.md) | The parity runner: request cases, fixtures, `record` and `replay` |
 
 ## Development
 
@@ -139,6 +144,7 @@ previous routes keep serving), so a typo never goes unnoticed.
 make lint   # cargo clippy --workspace --all-targets --all-features -- -D warnings
 make test   # cargo test --workspace --all-features
 make deny   # cargo deny check
+make parity # replay the recorded API Gateway fixtures against a local build
 make image  # docker build -t apigw:local .
 ```
 

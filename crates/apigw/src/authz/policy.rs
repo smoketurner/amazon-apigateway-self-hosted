@@ -336,9 +336,15 @@ mod tests {
     #[test]
     fn allow_for_the_exact_arn_or_a_wildcard() {
         let target = arn(&Method::GET, "/pets/7");
-        assert_eq!(decide(&statement("Allow", &target.to_string()), &target), Decision::Allow);
         assert_eq!(
-            decide(&statement("Allow", "arn:aws:execute-api:*:*:abc/*/*/*"), &target),
+            decide(&statement("Allow", &target.to_string()), &target),
+            Decision::Allow
+        );
+        assert_eq!(
+            decide(
+                &statement("Allow", "arn:aws:execute-api:*:*:abc/*/*/*"),
+                &target
+            ),
             Decision::Allow
         );
         assert_eq!(decide(&statement("Allow", "*"), &target), Decision::Allow);
@@ -347,7 +353,10 @@ mod tests {
     #[test]
     fn a_cached_policy_is_checked_against_each_method_arn() {
         let policy = statement("Allow", "arn:aws:execute-api:*:*:abc/prod/GET/pets/7");
-        assert_eq!(decide(&policy, &arn(&Method::GET, "/pets/7")), Decision::Allow);
+        assert_eq!(
+            decide(&policy, &arn(&Method::GET, "/pets/7")),
+            Decision::Allow
+        );
         assert_eq!(
             decide(&policy, &arn(&Method::GET, "/pets/8")),
             Decision::ImplicitDeny
@@ -366,15 +375,24 @@ mod tests {
             {"Effect": "Deny", "Action": "execute-api:Invoke", "Resource": "arn:*:*:*:*:*/*/DELETE/*"},
         ]});
         assert_eq!(decide(&policy, &target), Decision::ExplicitDeny);
-        assert_eq!(decide(&policy, &arn(&Method::GET, "/pets/7")), Decision::Allow);
+        assert_eq!(
+            decide(&policy, &arn(&Method::GET, "/pets/7")),
+            Decision::Allow
+        );
     }
 
     #[test]
     fn no_statement_means_implicit_deny() {
         let target = arn(&Method::GET, "/");
-        assert_eq!(decide(&json!({"Statement": []}), &target), Decision::ImplicitDeny);
         assert_eq!(
-            decide(&statement("Allow", "arn:aws:execute-api:*:*:other/*"), &target),
+            decide(&json!({"Statement": []}), &target),
+            Decision::ImplicitDeny
+        );
+        assert_eq!(
+            decide(
+                &statement("Allow", "arn:aws:execute-api:*:*:other/*"),
+                &target
+            ),
             Decision::ImplicitDeny
         );
     }
@@ -394,8 +412,12 @@ mod tests {
         let policy = json!({"Statement": {"Effect": "Allow", "Action": "execute-api:Invoke",
             "NotResource": "arn:*:*:*:*:*/*/*/admin/*"}});
         assert_eq!(decide(&policy, &target), Decision::Allow);
-        assert_eq!(decide(&policy, &arn(&Method::GET, "/admin/x")), Decision::ImplicitDeny);
-        let policy = json!({"Statement": {"Effect": "Allow", "NotAction": "s3:*", "Resource": "*"}});
+        assert_eq!(
+            decide(&policy, &arn(&Method::GET, "/admin/x")),
+            Decision::ImplicitDeny
+        );
+        let policy =
+            json!({"Statement": {"Effect": "Allow", "NotAction": "s3:*", "Resource": "*"}});
         assert_eq!(decide(&policy, &target), Decision::Allow);
     }
 
@@ -406,8 +428,14 @@ mod tests {
             json!({"Statement": {"Effect": effect, "Action": "execute-api:Invoke", "Resource": "*",
                 "Condition": {"IpAddress": {"aws:SourceIp": "192.0.2.0/24"}}}})
         };
-        assert_eq!(decide(&conditional("Allow"), &target), Decision::ImplicitDeny);
-        assert_eq!(decide(&conditional("Deny"), &target), Decision::ExplicitDeny);
+        assert_eq!(
+            decide(&conditional("Allow"), &target),
+            Decision::ImplicitDeny
+        );
+        assert_eq!(
+            decide(&conditional("Deny"), &target),
+            Decision::ExplicitDeny
+        );
         let variable = |effect: &str| statement(effect, "arn:*:*:*:*:*/${aws:username}/*");
         assert_eq!(decide(&variable("Allow"), &target), Decision::ImplicitDeny);
         assert_eq!(decide(&variable("Deny"), &target), Decision::ExplicitDeny);

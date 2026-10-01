@@ -1,0 +1,9 @@
+{
+  "name": "rest-validated-missing-parameters",
+  "source": "hand_written",
+  "api": "rest",
+  "response": {
+    "status": 400,
+    "headers": {}
+  }
+}

@@ -61,9 +61,14 @@ impl TokenPattern {
 
 #[derive(Debug)]
 enum Flavor {
-    RestToken { validation: Option<TokenPattern> },
+    RestToken {
+        validation: Option<TokenPattern>,
+    },
     RestRequest,
-    Http { payload: PayloadVersion, simple_responses: bool },
+    Http {
+        payload: PayloadVersion,
+        simple_responses: bool,
+    },
 }
 
 #[derive(Deserialize)]
@@ -215,12 +220,14 @@ impl LambdaAuthorizer {
         let ctx = request.ctx;
         let identity = self
             .sources
-            .extract(ctx, request.stage_variables)
+            .extract(ctx, &ctx.stage_variables)
             .ok_or(Denial::Unauthorized)?;
         if let Flavor::RestToken {
             validation: Some(ref pattern),
         } = self.flavor
-            && !identity.first().is_some_and(|token| pattern.is_match(token))
+            && !identity
+                .first()
+                .is_some_and(|token| pattern.is_match(token))
         {
             return Err(Denial::Unauthorized);
         }
@@ -247,7 +254,7 @@ impl LambdaAuthorizer {
     }
 
     fn event(&self, request: &AuthRequest<'_>, identity: &[String], arn: &MethodArn) -> Value {
-        let proxy = ProxyEvent::new(request.ctx, request.stage_variables);
+        let proxy = ProxyEvent::new(request.ctx, &request.ctx.stage_variables);
         match self.flavor {
             Flavor::RestToken { .. } => json!({
                 "type": "TOKEN",
@@ -296,7 +303,12 @@ impl LambdaAuthorizer {
     fn function_error_denial(payload: &[u8]) -> Denial {
         let message = serde_json::from_slice::<Value>(payload)
             .ok()
-            .and_then(|error| error.get("errorMessage").and_then(Value::as_str).map(str::to_owned));
+            .and_then(|error| {
+                error
+                    .get("errorMessage")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            });
         if message.as_deref() == Some("Unauthorized") {
             Denial::Unauthorized
         } else {
@@ -330,7 +342,10 @@ impl AuthorizerResponse {
             let Some(Value::Bool(authorized)) = fields.remove("isAuthorized") else {
                 return Err(Denial::AuthorizerConfiguration);
             };
-            return Ok(Self::Simple { authorized, context });
+            return Ok(Self::Simple {
+                authorized,
+                context,
+            });
         }
         let Some(Value::String(principal_id)) = fields.remove("principalId") else {
             return Err(Denial::AuthorizerConfiguration);
@@ -374,7 +389,10 @@ impl AuthorizerResponse {
             } => match policy.evaluate(&AccessRequest::invoke(arn)) {
                 Decision::Allow => {
                     let mut values = context.clone();
-                    values.insert("principalId".to_owned(), Value::String(principal_id.clone()));
+                    values.insert(
+                        "principalId".to_owned(),
+                        Value::String(principal_id.clone()),
+                    );
                     Ok(AuthorizerContext::lambda(values))
                 }
                 Decision::ExplicitDeny => Err(Denial::ExplicitDeny),

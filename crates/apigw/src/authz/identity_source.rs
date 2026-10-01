@@ -183,11 +183,26 @@ mod tests {
                 "method.request.querystring.token",
                 IdentitySource::Query("token".to_owned()),
             ),
-            ("$request.querystring.t", IdentitySource::Query("t".to_owned())),
-            ("context.identity.sourceIp", IdentitySource::Context("identity.sourceIp".to_owned())),
-            ("$context.routeKey", IdentitySource::Context("routeKey".to_owned())),
-            ("stageVariables.env", IdentitySource::StageVariable("env".to_owned())),
-            ("$stageVariables.env", IdentitySource::StageVariable("env".to_owned())),
+            (
+                "$request.querystring.t",
+                IdentitySource::Query("t".to_owned()),
+            ),
+            (
+                "context.identity.sourceIp",
+                IdentitySource::Context("identity.sourceIp".to_owned()),
+            ),
+            (
+                "$context.routeKey",
+                IdentitySource::Context("routeKey".to_owned()),
+            ),
+            (
+                "stageVariables.env",
+                IdentitySource::StageVariable("env".to_owned()),
+            ),
+            (
+                "$stageVariables.env",
+                IdentitySource::StageVariable("env".to_owned()),
+            ),
         ] {
             assert_eq!(raw.parse::<IdentitySource>().unwrap(), expected, "{raw}");
         }
@@ -213,13 +228,21 @@ mod tests {
         assert!(from(None).unwrap().is_empty());
         assert!(from(Some(json!(""))).unwrap().is_empty());
         assert_eq!(
-            from(Some(json!("method.request.header.A, method.request.querystring.b")))
+            from(Some(json!(
+                "method.request.header.A, method.request.querystring.b"
+            )))
+            .unwrap()
+            .0
+            .len(),
+            2
+        );
+        assert_eq!(
+            from(Some(json!(["$request.header.A", "$context.routeKey"])))
                 .unwrap()
                 .0
                 .len(),
             2
         );
-        assert_eq!(from(Some(json!(["$request.header.A", "$context.routeKey"]))).unwrap().0.len(), 2);
         assert!(from(Some(json!(["$request.header.A", 7]))).is_err());
         assert!(from(Some(json!(7))).is_err());
         assert!(from(Some(json!("bogus"))).is_err());

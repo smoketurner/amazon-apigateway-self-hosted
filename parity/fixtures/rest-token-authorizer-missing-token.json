@@ -1,0 +1,12 @@
+{
+  "name": "rest-token-authorizer-missing-token",
+  "source": "hand_written",
+  "api": "rest",
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": "{\"message\":\"Unauthorized\"}"
+  }
+}

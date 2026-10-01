@@ -1,0 +1,12 @@
+{
+  "name": "rest-unknown-route",
+  "source": "hand_written",
+  "api": "rest",
+  "response": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": "{\"message\":\"Missing Authentication Token\"}"
+  }
+}

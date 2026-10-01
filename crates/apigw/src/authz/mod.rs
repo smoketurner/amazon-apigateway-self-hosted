@@ -17,14 +17,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
-use axum::response::{IntoResponse as _, Response};
 
 pub(crate) use policy::MethodArn;
 
 use crate::aws::AwsClients;
-use crate::gateway::ErrorBody;
+use crate::gateway_response::Failure;
 use crate::integration::StageVariables;
-use crate::model::{ApiKind, ApiModel, AuthorizerSpec, Operation, Protection};
+use crate::model::{ApiKind, ApiModel, AuthorizerSpec, Operation, Protection, ResponseType};
 use crate::pipeline::RequestContext;
 use crate::pipeline::context::AuthorizerContext;
 
@@ -50,31 +49,35 @@ pub(crate) enum Denial {
 }
 
 impl Denial {
-    pub(crate) fn response(self, kind: ApiKind) -> Response {
-        let body = match (self, kind) {
-            (Self::Unauthorized, _) => ErrorBody::new(StatusCode::UNAUTHORIZED, "Unauthorized"),
-            (Self::ExplicitDeny, ApiKind::Rest) => ErrorBody::new(
-                StatusCode::FORBIDDEN,
-                "User is not authorized to access this resource with an explicit deny in an identity-based policy",
-            ),
-            (Self::ImplicitDeny, ApiKind::Rest) => ErrorBody::new(
-                StatusCode::FORBIDDEN,
-                "User is not authorized to access this resource",
-            ),
+    /// The gateway response that answers the request.
+    pub(crate) fn failure(self, kind: ApiKind) -> Failure {
+        match (self, kind) {
+            (Self::Unauthorized, _) => Failure::new(ResponseType::Unauthorized),
+            (Self::ExplicitDeny, ApiKind::Rest) => Failure::new(ResponseType::AccessDenied)
+                .with_message(
+                    "User is not authorized to access this resource with an explicit deny in an identity-based policy",
+                ),
+            (Self::ImplicitDeny, ApiKind::Rest) => Failure::new(ResponseType::AccessDenied)
+                .with_message("User is not authorized to access this resource"),
             (Self::ExplicitDeny | Self::ImplicitDeny, ApiKind::Http) => {
-                ErrorBody::new(StatusCode::FORBIDDEN, "Forbidden")
+                Failure::new(ResponseType::AccessDenied).with_message("Forbidden")
             }
-            (Self::AuthorizerFailure | Self::AuthorizerConfiguration, ApiKind::Rest) => {
-                ErrorBody::without_message(StatusCode::INTERNAL_SERVER_ERROR)
+            (Self::AuthorizerFailure, ApiKind::Rest) => {
+                Failure::new(ResponseType::AuthorizerFailure)
             }
-            (Self::AuthorizerFailure | Self::AuthorizerConfiguration, ApiKind::Http) => {
-                ErrorBody::new(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
+            (Self::AuthorizerConfiguration, ApiKind::Rest) => {
+                Failure::new(ResponseType::AuthorizerConfigurationError)
+            }
+            (Self::AuthorizerFailure, ApiKind::Http) => Failure::new(ResponseType::AuthorizerFailure)
+                .with_message("Internal Server Error"),
+            (Self::AuthorizerConfiguration, ApiKind::Http) => {
+                Failure::new(ResponseType::AuthorizerConfigurationError)
+                    .with_message("Internal Server Error")
             }
             (Self::UriTooLong, _) => {
-                ErrorBody::new(StatusCode::URI_TOO_LONG, "Request URI too long")
+                Failure::gateway(StatusCode::URI_TOO_LONG, "Request URI too long")
             }
-        };
-        body.into_response()
+        }
     }
 }
 
@@ -82,7 +85,6 @@ impl Denial {
 pub(crate) struct AuthRequest<'a> {
     pub(crate) aws: &'a AwsClients,
     pub(crate) ctx: &'a RequestContext,
-    pub(crate) stage_variables: &'a StageVariables,
 }
 
 /// A compiled authorizer definition.
@@ -173,7 +175,11 @@ impl Authorizers {
                     let compiled = Authorizer::compile(spec, model.kind, variables)
                         .map(Arc::new)
                         .inspect_err(|reason| {
-                            tracing::warn!(authorizer = name, reason, "authorizer cannot be evaluated");
+                            tracing::warn!(
+                                authorizer = name,
+                                reason,
+                                "authorizer cannot be evaluated"
+                            );
                         });
                     (name.clone(), compiled)
                 })
@@ -197,10 +203,9 @@ impl Authorizers {
         };
         match self.0.get(&reference.name) {
             Some(Ok(authorizer)) => RouteAuthorizer::Evaluated(Arc::clone(authorizer)),
-            Some(Err(reason)) => RouteAuthorizer::Unevaluable(format!(
-                "authorizer {:?}: {reason}",
-                reference.name
-            )),
+            Some(Err(reason)) => {
+                RouteAuthorizer::Unevaluable(format!("authorizer {:?}: {reason}", reference.name))
+            }
             None => RouteAuthorizer::Unevaluable(format!(
                 "authorizer {:?} is not defined",
                 reference.name

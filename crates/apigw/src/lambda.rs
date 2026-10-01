@@ -11,10 +11,10 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+use crate::authz::MethodArn;
 use crate::aws::AwsClients;
 use crate::gateway::GatewayError;
 use crate::integration::{LambdaProxy, StageVariables};
-use crate::authz::MethodArn;
 use crate::model::PayloadVersion;
 use crate::pipeline::RequestContext;
 use crate::route::Route;
@@ -26,8 +26,7 @@ impl LambdaProxy {
         route: &Route,
         ctx: &RequestContext,
         stage_variables: &StageVariables,
-    ) -> Response {
-        let kind = ctx.api.kind;
+    ) -> Result<Response, GatewayError> {
         let event = ProxyEvent::new(ctx, stage_variables).render(self.payload);
         let call = aws.invoke_lambda(
             &self.function,
@@ -38,25 +37,22 @@ impl LambdaProxy {
         let invocation = match tokio::time::timeout(self.timeout, call).await {
             Err(_) => {
                 tracing::warn!(route = %route.key, function = %self.function, "Lambda invocation timed out");
-                return GatewayError::IntegrationTimeout.response(kind);
+                return Err(GatewayError::IntegrationTimeout);
             }
             Ok(Err(err)) => {
                 tracing::error!(route = %route.key, function = %self.function, %err, "Lambda invocation failed");
-                return GatewayError::IntegrationFailure.response(kind);
+                return Err(GatewayError::IntegrationFailure);
             }
             Ok(Ok(invocation)) => invocation,
         };
         if let Some(function_error) = invocation.function_error {
             tracing::warn!(route = %route.key, function = %self.function, function_error, "Lambda function returned an error");
-            return GatewayError::IntegrationFailure.response(kind);
+            return Err(GatewayError::IntegrationFailure);
         }
-        match ProxyResponse::into_http(&invocation.payload, self.payload) {
-            Ok(response) => response,
-            Err(reason) => {
-                tracing::error!(route = %route.key, function = %self.function, reason, "malformed Lambda proxy response");
-                GatewayError::IntegrationFailure.response(kind)
-            }
-        }
+        ProxyResponse::into_http(&invocation.payload, self.payload).map_err(|reason| {
+            tracing::error!(route = %route.key, function = %self.function, reason, "malformed Lambda proxy response");
+            GatewayError::IntegrationFailure
+        })
     }
 }
 
@@ -424,8 +420,8 @@ mod tests {
 
     use super::*;
     use crate::model::ApiKind;
-    use crate::pipeline::{AuthorizerContext, QueryString};
     use crate::pipeline::context::tests::request;
+    use crate::pipeline::context::{AuthorizerContext, QueryString};
 
     fn variables() -> StageVariables {
         StageVariables::new(BTreeMap::from([("env".to_owned(), "local".to_owned())]))
