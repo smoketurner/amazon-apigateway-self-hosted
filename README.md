@@ -64,6 +64,9 @@ Every flag has an environment variable (`apigw --help` lists them). The main one
 | `--insecure-skip-authorization` | `APIGW_INSECURE_SKIP_AUTHORIZATION` | off | Serve authorizer, API key, and IAM routes without checking credentials |
 | `--unsupported-resource-policy` | `APIGW_UNSUPPORTED_RESOURCE_POLICY` | `reject` | `ignore` serves APIs with resource policies unrestricted |
 | `--unsupported-validation` | `APIGW_UNSUPPORTED_VALIDATION` | `reject` | `ignore` forwards requests without running request validators |
+| `--trusted-proxies` | `APIGW_TRUSTED_PROXIES` | none | Comma-separated CIDRs or addresses of proxies whose `X-Forwarded-For` and `X-Forwarded-Client-Cert` are believed ([Client IP](docs/deployment.md#client-ip)) |
+| `--trusted-proxy-hops` | `APIGW_TRUSTED_PROXY_HOPS` | `1` | Proxies between the client and `apigw`, counting the one that connects to it |
+| `--proxy-protocol` | `APIGW_PROXY_PROTOCOL` | off | Require a PROXY protocol v2 header on `--listen`, from `--trusted-proxies` only |
 
 Logs are JSON on stdout by default (`--log-format text` for humans); filter with `RUST_LOG`.
 

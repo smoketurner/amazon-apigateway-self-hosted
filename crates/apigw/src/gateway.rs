@@ -2,14 +2,14 @@
 //! shapes errors the way API Gateway does.
 
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
 
 use axum::body::{Body, Bytes};
-use axum::extract::{ConnectInfo, FromRequestParts, RawPathParams};
+use axum::extract::{FromRequestParts, RawPathParams};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use uuid::Uuid;
 
+use crate::identity::ClientIdentity;
 use crate::spec::{ApiKind, Integration, MockResponse, Protection, Route};
 use crate::{lambda, proxy};
 
@@ -229,8 +229,9 @@ pub(crate) async fn handle(
         .map_or_else(Uuid::now_v7, |id| id.0);
     let source_ip = parts
         .extensions
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|info| info.0.ip().to_string());
+        .get::<ClientIdentity>()
+        .and_then(|identity| identity.source_ip().ip())
+        .map(|ip| ip.to_string());
     let incoming = Incoming {
         request_id,
         received: jiff::Timestamp::now(),

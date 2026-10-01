@@ -4,6 +4,7 @@
 mod app;
 mod config;
 mod gateway;
+mod identity;
 mod lambda;
 mod listener;
 mod proxy;

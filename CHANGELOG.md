@@ -5,6 +5,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `--trusted-proxies` / `--trusted-proxy-hops` (`APIGW_TRUSTED_PROXIES`,
+  `APIGW_TRUSTED_PROXY_HOPS`): the client address behind Istio or a load balancer is read from
+  `X-Forwarded-For`, walking from the right, but only when the TCP peer is a trusted proxy.
+  `sourceIp` in Lambda events reports it.
+- `--proxy-protocol` (`APIGW_PROXY_PROTOCOL`): require a PROXY protocol v2 header on the API
+  listener from trusted proxies, with a 5 second header timeout.
+- Istio `X-Forwarded-Client-Cert` is parsed (Subject, Hash, URI/DNS SANs, `Cert`) from trusted
+  proxies and kept with the client identity for upcoming mTLS support.
+
+### Changed
+
+- `X-Forwarded-For` sent by a client that is not a trusted proxy is no longer forwarded to
+  `HTTP_PROXY` integrations: it is replaced by the client's address. `X-Forwarded-Client-Cert` is
+  removed from such requests. Set `--trusted-proxies` to keep forwarding a proxy's headers.
+
 ### Fixed
 
 - Resource policies and request validators were silently ignored because the REST export did

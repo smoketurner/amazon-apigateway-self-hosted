@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
 use crate::gateway::{ApiContext, Enforcement};
-use crate::listener::{self, ConnLimits, Tls};
+use crate::listener::{self, ConnLimits, Edge, Tls};
 use crate::router::{self, BasePath, LoadSummary, Loaded};
 use crate::source::{self, Fetcher, Snapshot};
 use crate::spec::{ApiDefinition, IntegrationOverrides};
@@ -263,6 +263,7 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         router::dispatcher(routes.clone()),
         ConnLimits::DEFAULT,
         config.max_connections,
+        config.api_edge(),
         shutdown.clone(),
     ));
     if let Some(addr) = config.admin_listen {
@@ -276,6 +277,7 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
             router::admin(routes),
             ConnLimits::DEFAULT,
             config.max_connections,
+            Edge::direct(),
             shutdown.clone(),
         ));
     }
