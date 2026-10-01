@@ -1,5 +1,5 @@
 //! What the gateway records about each request of one loaded API stage:
-//! access log lines, metrics, and execution logs.
+//! access log lines, metrics, execution logs, and X-Ray segments.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::HttpBody as _;
 use axum::extract::Request;
-use axum::http::{Method, header};
+use axum::http::{HeaderName, HeaderValue, Method, header};
 use axum::response::Response;
 use serde_json::{Value, json};
 
@@ -16,8 +16,10 @@ use super::exec::Outcome;
 use super::format::AccessLogFormat;
 use super::metrics::{MetricKey, MetricsAggregator, RequestMetrics, RouteDimensions};
 use super::queue::{LogEvent, LogQueue};
+use super::trace::{Sampler, SegmentOutcome, Trace};
+use crate::canary::Release;
 use crate::gateway::ApiContext;
-use crate::model::{ApiKind, ApiModel, ExecutionLogging, RouteKey};
+use crate::model::{ApiKind, ApiModel, ExecutionLogging, MethodMatch, RouteKey};
 use crate::pipeline::RequestContext;
 use crate::pipeline::context::{ApiInfo, IntegrationOutcome};
 use crate::route::Route;
@@ -35,13 +37,51 @@ const STANDARD_METHODS: [&str; 7] = ["GET", "PUT", "POST", "DELETE", "PATCH", "H
 #[derive(Debug)]
 struct AccessLog {
     format: AccessLogFormat,
-    queue: LogQueue,
+    /// Every queue a line goes to: the stage's destination, plus the canary
+    /// destination for canary requests.
+    queues: Vec<LogQueue>,
 }
 
 #[derive(Debug)]
 struct Metrics {
     aggregator: Arc<MetricsAggregator>,
     api: String,
+}
+
+/// X-Ray tracing for the stage.
+#[derive(Debug)]
+struct Tracing {
+    sampler: Arc<Sampler>,
+    queue: LogQueue,
+    /// The segment name, `{api name}/{stage}`.
+    segment_name: String,
+}
+
+impl Tracing {
+    const TRACE_HEADER: HeaderName = HeaderName::from_static("x-amzn-trace-id");
+    const TRACEPARENT: HeaderName = HeaderName::from_static("traceparent");
+
+    /// Continues or starts the request's trace and stamps the request with it:
+    /// `X-Amzn-Trace-Id` names this gateway's segment as the parent, so
+    /// integrations and Lambda attach their segments beneath it. Requests with
+    /// an unusable header get a new trace.
+    fn start(&self, request: &mut Request) -> Option<Trace> {
+        let header = |name: &HeaderName| request.headers().get(name).and_then(|v| v.to_str().ok());
+        let trace = Trace::start(
+            header(&Self::TRACE_HEADER),
+            header(&Self::TRACEPARENT),
+            &self.sampler,
+            jiff::Timestamp::now(),
+        )?;
+        match HeaderValue::try_from(trace.header().to_string()) {
+            Ok(value) => {
+                request.headers_mut().insert(Self::TRACE_HEADER, value);
+            }
+            Err(err) => tracing::warn!(%err, "could not set the trace header"),
+        }
+        request.extensions_mut().insert(trace);
+        Some(trace)
+    }
 }
 
 /// How a route is observed beyond the stage-wide settings.
@@ -57,8 +97,9 @@ struct RouteSettings {
 struct Inner {
     api: ApiInfo,
     access_log: Option<AccessLog>,
-    execution_queue: Option<LogQueue>,
+    execution_queues: Vec<LogQueue>,
     metrics: Option<Metrics>,
+    tracing: Option<Tracing>,
     routes: BTreeMap<RouteKey, RouteSettings>,
 }
 
@@ -70,6 +111,8 @@ pub(crate) struct StageObserver(Option<Arc<Inner>>);
 /// A request that has been started and not finished.
 pub(crate) struct Pending {
     started: Instant,
+    started_at: jiff::Timestamp,
+    trace: Option<Trace>,
     method: Method,
     route: Option<RouteKey>,
     context: Option<RequestContext>,
@@ -87,18 +130,21 @@ impl StageObserver {
         model: &ApiModel,
         api_id: &str,
         stage: Option<&str>,
+        release: Option<Release>,
     ) -> Self {
         let api = ApiInfo {
             kind: model.kind,
             api_id: api_id.to_owned(),
             stage: stage.map(str::to_owned),
+            release,
         };
         let access_log = model.stage.access_log.as_ref().and_then(|settings| {
             let format = settings.format.as_deref().filter(|f| !f.is_empty())?;
-            let queue = observability.access_log_queue(settings.destination_arn.as_deref())?;
-            Some(AccessLog {
+            let queues =
+                observability.access_log_queues(settings.destination_arn.as_deref(), release);
+            (!queues.is_empty()).then(|| AccessLog {
                 format: AccessLogFormat::from(format),
-                queue,
+                queues,
             })
         });
 
@@ -112,8 +158,8 @@ impl StageObserver {
                 .flatten();
             let detailed = settings.detailed_metrics().then(|| {
                 let method = match operation.method {
-                    crate::model::MethodMatch::Any => None,
-                    crate::model::MethodMatch::Exact(ref method) => Some(method.to_string()),
+                    MethodMatch::Any => None,
+                    MethodMatch::Exact(ref method) => Some(method.to_string()),
                 };
                 (method, operation.path.to_string())
             });
@@ -125,24 +171,44 @@ impl StageObserver {
                 },
             );
         }
-        let execution_queue = routes
-            .values()
-            .any(|r| r.execution_logging.is_some())
-            .then(|| observability.execution_queue(api_id, api.stage_name()))
-            .flatten();
+        let execution_queues = if routes.values().any(|r| r.execution_logging.is_some()) {
+            observability.execution_queues(api_id, api.stage_name(), release)
+        } else {
+            Vec::new()
+        };
         let metrics = observability.metrics().map(|aggregator| Metrics {
             aggregator,
             api: Self::api_dimension(model, api_id),
         });
 
-        if access_log.is_none() && execution_queue.is_none() && metrics.is_none() {
+        let tracing = model
+            .stage
+            .tracing_enabled
+            .then(|| observability.trace_queue())
+            .flatten()
+            .map(|queue| Tracing {
+                sampler: observability.sampler(),
+                queue,
+                segment_name: format!(
+                    "{}/{}",
+                    Self::api_dimension(model, api_id),
+                    api.stage_name()
+                ),
+            });
+
+        if access_log.is_none()
+            && execution_queues.is_empty()
+            && metrics.is_none()
+            && tracing.is_none()
+        {
             return Self::disabled();
         }
         Self(Some(Arc::new(Inner {
             api,
             access_log,
-            execution_queue,
+            execution_queues,
             metrics,
+            tracing,
             routes,
         })))
     }
@@ -175,16 +241,21 @@ impl StageObserver {
     pub(crate) fn begin(
         &self,
         api: &ApiContext,
-        request: &Request,
+        request: &mut Request,
         route: Option<&Route>,
     ) -> Option<Pending> {
         let inner = self.0.as_ref()?;
+        let started_at = jiff::Timestamp::now();
+        let trace = inner.tracing.as_ref().and_then(|t| t.start(request));
         let route_key = route.map(|r| r.key.clone());
         let settings = route_key.as_ref().and_then(|key| inner.routes.get(key));
-        let wants_context =
-            inner.access_log.is_some() || settings.is_some_and(|s| s.execution_logging.is_some());
+        let wants_context = inner.access_log.is_some()
+            || settings.is_some_and(|s| s.execution_logging.is_some())
+            || trace.is_some_and(|t| t.is_sampled());
         Some(Pending {
             started: Instant::now(),
+            started_at,
+            trace,
             method: request.method().clone(),
             route: route_key,
             context: wants_context.then(|| RequestContext::observed(api, route, request)),
@@ -203,14 +274,14 @@ impl StageObserver {
         let settings = pending.route.as_ref().and_then(|key| inner.routes.get(key));
 
         if let Some(ref metrics) = inner.metrics {
-            metrics.aggregator.record(
-                &inner.metric_key(metrics, settings, &pending.method),
-                RequestMetrics {
-                    status,
-                    latency_ms,
-                    integration_latency_ms: integration_ms,
-                },
-            );
+            let request = RequestMetrics {
+                status,
+                latency_ms,
+                integration_latency_ms: integration_ms,
+            };
+            for key in inner.metric_keys(metrics, settings, &pending.method) {
+                metrics.aggregator.record(&key, request);
+            }
         }
         let Some(mut context) = pending.context else {
             return response;
@@ -219,18 +290,38 @@ impl StageObserver {
             status: integration_ms.map(|_| status),
             latency_ms: integration_ms,
             error: None,
+            ..IntegrationOutcome::default()
         };
-        if let (Some(settings), Some(queue)) = (
-            settings.and_then(|s| s.execution_logging),
-            inner.execution_queue.as_ref(),
-        ) {
+        if let Some(logging) = settings
+            .and_then(|s| s.execution_logging)
+            .filter(|_| !inner.execution_queues.is_empty())
+        {
             let outcome = Outcome {
                 status,
                 integration: integration_ms.map(|ms| (status, ms)),
             };
-            for line in settings.lines(&context, outcome) {
-                queue.push(LogEvent::now(line));
+            for line in logging.lines(&context, outcome) {
+                let event = LogEvent::now(line);
+                for queue in &inner.execution_queues {
+                    queue.push(event.clone());
+                }
             }
+        }
+        if let (Some(trace), Some(tracing)) = (
+            pending.trace.filter(Trace::is_sampled),
+            inner.tracing.as_ref(),
+        ) {
+            let segment = trace.segment(
+                &tracing.segment_name,
+                &context,
+                SegmentOutcome {
+                    started: pending.started_at,
+                    ended: jiff::Timestamp::now(),
+                    status,
+                    content_length: Self::response_length(&response),
+                },
+            );
+            tracing.queue.push(LogEvent::now(segment));
         }
         if let Some(ref access_log) = inner.access_log {
             let variables = Self::access_log_variables(
@@ -239,9 +330,10 @@ impl StageObserver {
                 Self::response_length(&response),
                 latency_ms,
             );
-            access_log
-                .queue
-                .push(LogEvent::now(access_log.format.render(&variables)));
+            let event = LogEvent::now(access_log.format.render(&variables));
+            for queue in &access_log.queues {
+                queue.push(event.clone());
+            }
         }
         response
     }
@@ -287,6 +379,27 @@ impl StageObserver {
 }
 
 impl Inner {
+    /// The series a request counts toward: its stage's, and for canary
+    /// requests also the canary's own, whose `Stage` is `{stage}/Canary`.
+    fn metric_keys(
+        &self,
+        metrics: &Metrics,
+        settings: Option<&RouteSettings>,
+        method: &Method,
+    ) -> Vec<MetricKey> {
+        let stage = self.metric_key(metrics, settings, method);
+        match self.api.release {
+            Some(Release::Canary) => {
+                let canary = MetricKey {
+                    stage: format!("{}/Canary", stage.stage),
+                    ..stage.clone()
+                };
+                vec![stage, canary]
+            }
+            Some(Release::Production) | None => vec![stage],
+        }
+    }
+
     fn metric_key(
         &self,
         metrics: &Metrics,
@@ -323,13 +436,20 @@ mod tests {
     use tower::ServiceExt as _;
 
     use super::*;
+    use crate::authz::KeyStore;
     use crate::aws::{AwsClients, CredentialsMode, LambdaEndpoints};
     use crate::gateway::{ApiContext, AuthorizationMode, Enforcement, RequestId, Unsupported};
     use crate::gateway_response::GatewayResponses;
-    use crate::model::{IntegrationOverrides, MethodSettings, SettingsScope, StageSettings};
+    use crate::model::{
+        AccessLogSettings, IntegrationOverrides, MethodSettings, SettingsScope, StageSettings,
+    };
     use crate::observability::testing::MockAws;
-    use crate::observability::{Delivery, LogGroup, MetricsNamespace, MetricsSettings, Settings};
+    use crate::observability::{
+        Delivery, LogGroup, MetricsNamespace, MetricsSettings, Settings, StreamName, TraceDelivery,
+    };
     use crate::router::{BasePath, build};
+    use crate::state::{InMemory, InMemoryLimits, StateBackend};
+    use std::num::NonZeroU32;
 
     const ACCESS_GROUP: &str = "/aws/apigw/access";
     const EXECUTION_GROUP: &str = "API-Gateway-Execution-Logs_abc/prod";
@@ -349,7 +469,7 @@ mod tests {
 
     fn stage_settings(detailed: bool, logging: Option<&str>) -> StageSettings {
         let mut stage = StageSettings {
-            access_log: Some(crate::model::AccessLogSettings {
+            access_log: Some(AccessLogSettings {
                 destination_arn: Some(format!("arn:aws:logs:us-east-1:1:log-group:{ACCESS_GROUP}")),
                 format: Some(
                     r#"{"id":"$context.requestId","m":"$context.httpMethod","p":"$context.resourcePath","s":"$context.status","l":"$context.integrationLatency","ip":"$context.identity.sourceIp"}"#
@@ -374,11 +494,13 @@ mod tests {
         Settings {
             access_logs: access,
             execution_logs: execution,
+            tracing: TraceDelivery::Aws,
+            sampling_percent: 100,
             metrics: metrics.then(|| MetricsSettings {
                 group: LogGroup::new("metrics-group"),
                 namespace: MetricsNamespace::default(),
             }),
-            stream: crate::observability::StreamName::for_pod(
+            stream: StreamName::for_pod(
                 Some("pod-1"),
                 None,
                 jiff::Timestamp::UNIX_EPOCH,
@@ -393,9 +515,18 @@ mod tests {
         stage: StageSettings,
         settings: Settings,
     ) -> (axum::Router, Arc<Observability>) {
+        serve_doc(aws, &doc(), kind, stage, settings)
+    }
+
+    fn serve_doc(
+        aws: &MockAws,
+        doc: &Value,
+        kind: ApiKind,
+        stage: StageSettings,
+        settings: Settings,
+    ) -> (axum::Router, Arc<Observability>) {
         let observability = Observability::start(aws.sdk_config(), settings);
-        let model =
-            ApiModel::import(&doc(), kind, stage, &IntegrationOverrides::default()).unwrap();
+        let model = ApiModel::import(doc, kind, stage, &IntegrationOverrides::default()).unwrap();
         let clients = Arc::new(AwsClients::new(
             aws.sdk_config(),
             CredentialsMode::Assume,
@@ -408,6 +539,10 @@ mod tests {
             stage: Some("prod".to_owned()),
             stage_variables: Arc::default(),
             responses: GatewayResponses::default(),
+            state: Arc::new(StateBackend::InMemory(InMemory::new(
+                InMemoryLimits::default(),
+            ))),
+            replicas: NonZeroU32::MIN,
             enforcement: Enforcement {
                 authorization: AuthorizationMode::Enforce,
                 resource_policy: Unsupported::Reject,
@@ -415,8 +550,9 @@ mod tests {
             },
             http: reqwest::Client::new(),
             aws: clients,
-            keys: Arc::new(crate::authz::KeyStore::new(reqwest::Client::new(), [])),
-            observer: StageObserver::new(&observability, &model, "abc", Some("prod")),
+            keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
+            observer: StageObserver::new(&observability, &model, "abc", Some("prod"), None),
+            release: None,
         });
         let (router, _) = build(&model, &ctx, &BasePath::default());
         (router, observability)
@@ -613,10 +749,12 @@ mod tests {
                 kind: ApiKind::Rest,
                 api_id: "abc".to_owned(),
                 stage: Some("prod".to_owned()),
+                release: None,
             },
             access_log: None,
-            execution_queue: None,
+            execution_queues: Vec::new(),
             metrics: None,
+            tracing: None,
             routes: BTreeMap::new(),
         };
         let metrics = Metrics {
@@ -640,5 +778,258 @@ mod tests {
         };
         assert_eq!(method_of("PATCH"), "PATCH");
         assert_eq!(method_of("PROPFIND"), "OTHER");
+    }
+
+    async fn upstream() -> std::net::SocketAddr {
+        let app = axum::Router::new().fallback(|headers: axum::http::HeaderMap| async move {
+            let seen: serde_json::Map<String, Value> = ["x-amzn-trace-id", "traceparent"]
+                .into_iter()
+                .filter_map(|name| {
+                    let value = headers.get(name)?.to_str().ok()?;
+                    Some((name.to_owned(), json!(value)))
+                })
+                .collect();
+            axum::Json(Value::Object(seen))
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
+    fn proxy_doc(addr: std::net::SocketAddr) -> Value {
+        json!({
+            "info": {"title": "Traced"},
+            "paths": {"/echo": {"get": {"x-amazon-apigateway-integration": {
+                "type": "http_proxy", "httpMethod": "GET", "uri": format!("http://{addr}/")}}}}
+        })
+    }
+
+    async fn traced_get(router: &axum::Router, headers: &[(&str, &str)]) -> (StatusCode, Value) {
+        let mut request = Request::builder()
+            .uri("/echo")
+            .header("host", "abc.example.com");
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let mut request = request.body(Body::empty()).unwrap();
+        request
+            .extensions_mut()
+            .insert(RequestId(uuid::Uuid::nil()));
+        let response = router.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+    }
+
+    fn segments(aws: &MockAws) -> Vec<Value> {
+        aws.calls()
+            .into_iter()
+            .filter(|c| c.target == "/TraceSegments")
+            .flat_map(|c| {
+                c.body["TraceSegmentDocuments"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .map(|d| serde_json::from_str(d.as_str().unwrap()).unwrap())
+            .collect()
+    }
+
+    fn tracing_stage() -> StageSettings {
+        StageSettings {
+            tracing_enabled: true,
+            ..StageSettings::default()
+        }
+    }
+
+    const ROOT: &str = "1-5759e988-bd862e3fe1be46a994272793";
+    const PARENT: &str = "53995c3f42cd8ad8";
+
+    #[tokio::test]
+    async fn traced_requests_reach_backends_with_trace_headers_and_send_a_segment() {
+        let aws = MockAws::start().await;
+        let addr = upstream().await;
+        let (router, observability) = serve_doc(
+            &aws,
+            &proxy_doc(addr),
+            ApiKind::Rest,
+            tracing_stage(),
+            settings(Delivery::Off, Delivery::Off, false),
+        );
+        let (status, seen) = traced_get(&router, &[("user-agent", "curl/8")]).await;
+        assert_eq!(status, StatusCode::OK);
+        observability.close().await;
+
+        let segments = segments(&aws);
+        assert_eq!(segments.len(), 1);
+        let segment = &segments[0];
+        assert_eq!(segment["name"], "Traced/prod");
+        assert_eq!(segment["origin"], "AWS::ApiGateway::Stage");
+        assert_eq!(segment["http"]["response"]["status"], 200);
+        assert_eq!(segment["http"]["request"]["user_agent"], "curl/8");
+        assert!(segment.get("parent_id").is_none());
+        let trace_id = segment["trace_id"].as_str().unwrap();
+        let segment_id = segment["id"].as_str().unwrap();
+        assert_eq!(
+            seen["x-amzn-trace-id"],
+            format!("Root={trace_id};Parent={segment_id};Sampled=1")
+        );
+        let traceparent = seen["traceparent"].as_str().unwrap();
+        assert_eq!(
+            traceparent,
+            format!(
+                "00-{}-{segment_id}-01",
+                trace_id.strip_prefix("1-").unwrap().replace('-', "")
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn an_incoming_trace_is_continued_beneath_its_parent() {
+        let aws = MockAws::start().await;
+        let addr = upstream().await;
+        let (router, observability) = serve_doc(
+            &aws,
+            &proxy_doc(addr),
+            ApiKind::Rest,
+            tracing_stage(),
+            settings(Delivery::Off, Delivery::Off, false),
+        );
+        let incoming = format!("Root={ROOT};Parent={PARENT};Sampled=1");
+        let (_, seen) = traced_get(&router, &[("x-amzn-trace-id", &incoming)]).await;
+        observability.close().await;
+        let segments = segments(&aws);
+        assert_eq!(segments[0]["trace_id"], ROOT);
+        assert_eq!(segments[0]["parent_id"], PARENT);
+        let forwarded = seen["x-amzn-trace-id"].as_str().unwrap();
+        assert!(forwarded.starts_with(&format!("Root={ROOT};Parent=")));
+        assert!(
+            !forwarded.contains(PARENT),
+            "the gateway's segment replaces the caller's as the parent"
+        );
+    }
+
+    #[tokio::test]
+    async fn w3c_clients_are_traced_too() {
+        let aws = MockAws::start().await;
+        let addr = upstream().await;
+        let (router, observability) = serve_doc(
+            &aws,
+            &proxy_doc(addr),
+            ApiKind::Rest,
+            tracing_stage(),
+            settings(Delivery::Off, Delivery::Off, false),
+        );
+        let (_, seen) = traced_get(
+            &router,
+            &[(
+                "traceparent",
+                "00-4efaaf4d1e8720b39541901950019ee5-00f067aa0ba902b7-01",
+            )],
+        )
+        .await;
+        observability.close().await;
+        let segments = segments(&aws);
+        assert_eq!(
+            segments[0]["trace_id"],
+            "1-4efaaf4d-1e8720b39541901950019ee5"
+        );
+        assert_eq!(segments[0]["parent_id"], "00f067aa0ba902b7");
+        assert!(
+            seen["traceparent"]
+                .as_str()
+                .unwrap()
+                .starts_with("00-4efaaf4d1e8720b39541901950019ee5-")
+        );
+        assert!(
+            seen["x-amzn-trace-id"]
+                .as_str()
+                .unwrap()
+                .starts_with("Root=1-4efaaf4d-1e8720b39541901950019ee5;Parent=")
+        );
+    }
+
+    #[tokio::test]
+    async fn unsampled_requests_send_no_segment_but_keep_the_decision_downstream() {
+        let aws = MockAws::start().await;
+        let addr = upstream().await;
+        let (router, observability) = serve_doc(
+            &aws,
+            &proxy_doc(addr),
+            ApiKind::Rest,
+            tracing_stage(),
+            settings(Delivery::Off, Delivery::Off, false),
+        );
+        let incoming = format!("Root={ROOT};Sampled=0");
+        let (_, seen) = traced_get(&router, &[("x-amzn-trace-id", &incoming)]).await;
+        observability.close().await;
+        assert!(segments(&aws).is_empty());
+        assert!(
+            seen["x-amzn-trace-id"]
+                .as_str()
+                .unwrap()
+                .ends_with("Sampled=0")
+        );
+        assert!(seen["traceparent"].as_str().unwrap().ends_with("-00"));
+    }
+
+    #[tokio::test]
+    async fn stages_without_tracing_leave_trace_headers_alone() {
+        let aws = MockAws::start().await;
+        let addr = upstream().await;
+        let (router, observability) = serve_doc(
+            &aws,
+            &proxy_doc(addr),
+            ApiKind::Rest,
+            StageSettings::default(),
+            settings(Delivery::Off, Delivery::Off, false),
+        );
+        let (_, none) = traced_get(&router, &[]).await;
+        assert!(none.get("x-amzn-trace-id").is_none());
+        assert!(none.get("traceparent").is_none());
+        let incoming = format!("Root={ROOT};Parent={PARENT};Sampled=1");
+        let (_, passed) = traced_get(&router, &[("x-amzn-trace-id", &incoming)]).await;
+        assert_eq!(passed["x-amzn-trace-id"], incoming);
+        observability.close().await;
+        assert!(segments(&aws).is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_tracing_flag_turns_everything_off() {
+        let aws = MockAws::start().await;
+        let addr = upstream().await;
+        let mut off = settings(Delivery::Off, Delivery::Off, false);
+        off.tracing = TraceDelivery::Off;
+        let (router, observability) =
+            serve_doc(&aws, &proxy_doc(addr), ApiKind::Rest, tracing_stage(), off);
+        let (_, seen) = traced_get(&router, &[]).await;
+        observability.close().await;
+        assert!(seen.get("x-amzn-trace-id").is_none());
+        assert!(segments(&aws).is_empty());
+    }
+
+    #[tokio::test]
+    async fn access_logs_can_log_the_trace_id() {
+        let aws = MockAws::start().await;
+        let addr = upstream().await;
+        let mut stage = tracing_stage();
+        stage.access_log = Some(AccessLogSettings {
+            destination_arn: Some(format!("arn:aws:logs:us-east-1:1:log-group:{ACCESS_GROUP}")),
+            format: Some("$context.xrayTraceId".to_owned()),
+        });
+        let (router, observability) = serve_doc(
+            &aws,
+            &proxy_doc(addr),
+            ApiKind::Rest,
+            stage,
+            settings(Delivery::Aws, Delivery::Off, false),
+        );
+        let incoming = format!("Root={ROOT};Sampled=0");
+        traced_get(&router, &[("x-amzn-trace-id", &incoming)]).await;
+        observability.close().await;
+        assert_eq!(messages(&aws, ACCESS_GROUP), [ROOT]);
     }
 }

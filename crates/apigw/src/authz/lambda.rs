@@ -7,19 +7,22 @@
 
 use std::time::Duration;
 
+use axum::body::Bytes;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use super::cache::TtlCache;
 use super::identity_source::{IdentitySource, IdentitySources};
 use super::pattern::TokenPattern;
 use super::policy::{AccessRequest, Decision, MethodArn, PolicyDocument};
 use super::{AuthRequest, Denial};
 use crate::aws::{ArnScope, FunctionArn, IntegrationCredentials, RoleArn};
-use crate::integration::{LambdaProxy, StageVariables};
+use crate::digest::Sha256Digest;
+use crate::integration::{LambdaTarget, StageVariables};
 use crate::lambda::ProxyEvent;
 use crate::model::{ApiKind, AuthorizerSpec, PayloadVersion};
+use crate::pipeline::RequestContext;
 use crate::pipeline::context::AuthorizerContext;
+use crate::state::{StateBackend, StateKey};
 
 /// How long API Gateway waits for an authorizer function.
 const INVOKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -27,8 +30,6 @@ const INVOKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_TTL: Duration = Duration::from_hours(1);
 /// What a REST authorizer caches for when no TTL is configured.
 const DEFAULT_REST_TTL: Duration = Duration::from_mins(5);
-/// Distinct identities whose results are kept per authorizer.
-const CACHE_CAPACITY: usize = 10_000;
 
 #[derive(Debug)]
 enum Flavor {
@@ -78,11 +79,21 @@ pub(crate) struct LambdaAuthorizer {
     sources: IdentitySources,
     ttl: Duration,
     scope: ArnScope,
-    cache: TtlCache<Vec<String>, AuthorizerResponse>,
+    /// The authorizer's name in the API, which keeps its cache entries apart
+    /// from other authorizers'.
+    name: String,
+}
+
+/// What an authorizer function answered: the parsed response, and the payload it
+/// was parsed from, which is what the cache keeps.
+struct Answer {
+    response: AuthorizerResponse,
+    payload: Vec<u8>,
 }
 
 impl LambdaAuthorizer {
     pub(super) fn compile(
+        name: &str,
         spec: &AuthorizerSpec,
         kind: ApiKind,
         variables: &StageVariables,
@@ -99,8 +110,10 @@ impl LambdaAuthorizer {
                 .as_deref()
                 .ok_or("the authorizer has no authorizerUri")?,
         );
-        let function: FunctionArn = LambdaProxy::function_arn(&uri)
-            .ok_or("authorizerUri is not a Lambda function")?
+        let function: FunctionArn = uri
+            .parse::<LambdaTarget>()
+            .map_err(|_| "authorizerUri is not a Lambda function")?
+            .function
             .parse()?;
         let scope = function
             .scope()
@@ -152,7 +165,7 @@ impl LambdaAuthorizer {
             sources,
             ttl,
             scope,
-            cache: TtlCache::new(CACHE_CAPACITY),
+            name: name.to_owned(),
         })
     }
 
@@ -216,16 +229,51 @@ impl LambdaAuthorizer {
         if arn.is_too_long() {
             return Err(Denial::UriTooLong);
         }
-        let cacheable = !self.ttl.is_zero() && !identity.is_empty();
-        if cacheable && let Some(cached) = self.cache.get(&identity) {
+        let cache_key =
+            (!self.ttl.is_zero() && !identity.is_empty()).then(|| self.cache_key(ctx, &identity));
+        if let Some(ref key) = cache_key
+            && let Some(cached) = self.cached(request.state, key).await
+        {
             return cached.authorize(&arn);
         }
-        let response = self.invoke(request, &identity, &arn).await?;
-        let decision = response.authorize(&arn);
-        if cacheable {
-            self.cache.insert(identity, response, self.ttl);
+        let answer = self.invoke(request, &identity, &arn).await?;
+        let decision = answer.response.authorize(&arn);
+        if let Some(key) = cache_key {
+            self.remember(request.state, key, answer.payload).await;
         }
         decision
+    }
+
+    /// Where this request's identity is cached. The caller's credentials are
+    /// hashed, so a shared cache never holds them.
+    fn cache_key(&self, ctx: &RequestContext, identity: &[String]) -> StateKey {
+        let digest = Sha256Digest::of_parts(identity);
+        StateKey::new(
+            "authorizer",
+            &[
+                &ctx.api.api_id,
+                ctx.api.stage_name(),
+                &self.name,
+                &digest.to_string(),
+            ],
+        )
+    }
+
+    /// The cached response for `key`. A cache that cannot answer, or an entry
+    /// that no longer parses, counts as a miss.
+    async fn cached(&self, state: &StateBackend, key: &StateKey) -> Option<AuthorizerResponse> {
+        let payload = state
+            .cache_get(key)
+            .await
+            .inspect_err(|error| tracing::warn!(%error, "authorizer cache unavailable"))
+            .ok()??;
+        AuthorizerResponse::parse(&payload, &self.flavor).ok()
+    }
+
+    async fn remember(&self, state: &StateBackend, key: StateKey, payload: Vec<u8>) {
+        if let Err(error) = state.cache_put(key, Bytes::from(payload), self.ttl).await {
+            tracing::warn!(%error, "authorizer result could not be cached");
+        }
     }
 
     fn event(&self, request: &AuthRequest<'_>, identity: &[String], arn: &MethodArn) -> Value {
@@ -246,7 +294,7 @@ impl LambdaAuthorizer {
         request: &AuthRequest<'_>,
         identity: &[String],
         arn: &MethodArn,
-    ) -> Result<AuthorizerResponse, Denial> {
+    ) -> Result<Answer, Denial> {
         let event = self.event(request, identity, arn);
         let call = request.aws.invoke_lambda(
             &self.function,
@@ -268,8 +316,14 @@ impl LambdaAuthorizer {
         if invocation.function_error.is_some() {
             return Err(Self::function_error_denial(&invocation.payload));
         }
-        AuthorizerResponse::parse(&invocation.payload, &self.flavor).inspect_err(|_| {
-            tracing::error!(function = %self.function, "authorizer returned an invalid response");
+        let response = AuthorizerResponse::parse(&invocation.payload, &self.flavor).inspect_err(
+            |_| {
+                tracing::error!(function = %self.function, "authorizer returned an invalid response");
+            },
+        )?;
+        Ok(Answer {
+            response,
+            payload: invocation.payload,
         })
     }
 

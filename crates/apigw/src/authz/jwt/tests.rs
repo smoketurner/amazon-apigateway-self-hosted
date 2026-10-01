@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 
 use super::keys::{Issuer, KeyError, KeyLocation};
 use super::{IssuerEndpoint, KeyStore};
-use crate::authz::tests::{Harness, echo_integration};
+use crate::authz::tests::{ECHO_FUNCTION, Harness, echo_integration};
 use crate::gateway::AuthorizationMode;
 use crate::model::ApiKind;
 
@@ -307,7 +307,7 @@ fn http_doc(authorizer: &Value) -> Value {
     let route = |scopes: &[&str]| {
         json!({"get": {"security": [{"jwt": scopes}],
             "x-amazon-apigateway-integration": {"type": "aws_proxy", "httpMethod": "POST",
-                "uri": crate::authz::tests::ECHO_FUNCTION, "payloadFormatVersion": "2.0"}}})
+                "uri": ECHO_FUNCTION, "payloadFormatVersion": "2.0"}}})
     };
     json!({
         "components": {"securitySchemes": {"jwt": {"type": "oauth2", "flows": {},

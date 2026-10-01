@@ -23,11 +23,12 @@ Management's
 |---|---|
 | Resource paths, `{param}`, greedy `{proxy+}`, `ANY`, HTTP API `$default` | Routed exactly as API Gateway routes them |
 | `HTTP_PROXY` integrations | Forwarded, streaming the response; `requestParameters` path/query/header mappings and `timeoutInMillis` honored |
-| `AWS_PROXY` (Lambda) integrations | Invoked with the API Gateway proxy event, payload format 1.0 or 2.0 |
+| `AWS_PROXY` (Lambda) integrations | Invoked with the API Gateway proxy event, payload format 1.0 or 2.0, including qualified ARNs and aliases; REST payload 1.0 keeps the client's header case; 6 MB request/response limit (`502`) |
+| REST response streaming (`responseTransferMode: STREAM`) | Lambda via `InvokeWithResponseStream` (`.../response-streaming-invocations` URIs, metadata + 8 null bytes + payload), and `HTTP_PROXY`; up to 15 minutes, 5 minute idle limit |
 | `MOCK` integrations | Status, literal response headers, and response template returned (templates are not evaluated as VTL) |
 | Stage variables | Read from the stage and substituted into integration URIs; overridable locally |
 | Lambda authorizers | `TOKEN` and `REQUEST` (REST), `REQUEST` with payload 1.0/2.0 and simple responses (HTTP): invoked, cached by identity source, and the returned policy evaluated per method; `--insecure-skip-authorization` skips them |
-| Cognito/JWT authorizers | **Not evaluated yet.** Answer `401` unless `--insecure-skip-authorization` is set |
+| Cognito user pool authorizers (REST), JWT authorizers (HTTP) | Tokens are verified against the issuer's published keys, fetched over HTTPS (the gateway needs outbound access to the identity provider); claims and scopes are checked as API Gateway checks them; `--insecure-skip-authorization` skips them |
 | API keys | **Not checked yet.** Answer `403 Forbidden` unless `--insecure-skip-authorization` is set |
 | IAM (`AWS_IAM`) auth | Cannot be verified outside AWS. REST answers `403 Missing Authentication Token`, HTTP `403 Forbidden`, unless `--insecure-skip-authorization` is set |
 | Resource policies | **Not evaluated yet.** Every route of an API with a policy answers `403` unless `--unsupported-resource-policy=ignore` (not affected by `--insecure-skip-authorization`) |
@@ -69,16 +70,21 @@ Every flag has an environment variable (`apigw --help` lists them). The main one
 | `--integration-overrides` | `APIGW_INTEGRATION_OVERRIDES` | none | Re-point individual routes (below) |
 | `--insecure-skip-authorization` | `APIGW_INSECURE_SKIP_AUTHORIZATION` | off | Serve authorizer, API key, and IAM routes without checking credentials |
 | `--integration-credentials` | `APIGW_INTEGRATION_CREDENTIALS` | `assume` | `assume` runs integrations as their `credentials` role; `gateway` uses the gateway's own credentials |
+| `--issuer-endpoint ISSUER=URL` | `APIGW_ISSUER_ENDPOINTS` | none | Fetch a token issuer's signing keys from URL instead of from the issuer (an in-cluster mirror of the identity provider); plain `http` URLs are allowed and logged as a warning |
 | `--lambda-endpoint FUNCTION=URL` | `APIGW_LAMBDA_ENDPOINTS` | none | Invoke a function at a URL speaking Lambda's Invoke protocol (e.g. the Runtime Interface Emulator in-cluster) |
 | `--unsupported-resource-policy` | `APIGW_UNSUPPORTED_RESOURCE_POLICY` | `reject` | `ignore` serves APIs with resource policies unrestricted |
 | `--unsupported-validation` | `APIGW_UNSUPPORTED_VALIDATION` | `reject` | `ignore` forwards requests without running request validators |
 | `--trusted-proxies` | `APIGW_TRUSTED_PROXIES` | none | Comma-separated CIDRs or addresses of proxies whose `X-Forwarded-For` and `X-Forwarded-Client-Cert` are believed ([Client IP](docs/deployment.md#client-ip)) |
 | `--trusted-proxy-hops` | `APIGW_TRUSTED_PROXY_HOPS` | `1` | Proxies between the client and `apigw`, counting the one that connects to it |
+| `--replicas` | `APIGW_REPLICAS` | `1` | Gateway replicas serving the API; throttle rates and bursts are divided by this because each replica keeps its own buckets ([parity](docs/parity.md#throttling-caching-and-releases)) |
 | `--proxy-protocol` | `APIGW_PROXY_PROTOCOL` | off | Require a PROXY protocol v2 header on `--listen`, from `--trusted-proxies` only |
 | `--access-logs` | `APIGW_ACCESS_LOGS` | `aws` | `aws` writes to the stage's access log destination, `stdout` writes lines to standard output, `off` writes none ([Observability](#observability)) |
 | `--execution-logs` | `APIGW_EXECUTION_LOGS` | `aws` | Same choices, for `loggingLevel`/`dataTraceEnabled` execution logs |
 | `--metrics-log-group` | `APIGW_METRICS_LOG_GROUP` | none | CloudWatch Logs log group (must exist) that receives metrics as embedded metric format events; metrics are off when unset |
 | `--metrics-namespace` | `APIGW_METRICS_NAMESPACE` | `ApiGatewaySelfHosted` | CloudWatch namespace for the metrics (`AWS/` is reserved) |
+| `--tracing` | `APIGW_TRACING` | `aws` | `aws` sends X-Ray segments for stages with tracing enabled and propagates trace headers; `off` does neither |
+| `--xray-sampling-percent` | `APIGW_XRAY_SAMPLING_PERCENT` | `5` | Percentage of requests traced after the first request each second, when the caller made no sampling decision |
+| `--canary-export-stage` | `APIGW_CANARY_EXPORT_STAGE` | none | REST stage that holds the canary deployment of `--stage`, exported to build the canary release ([Canary releases](#canary-releases)) |
 | `--log-stream` | `APIGW_LOG_STREAM` | `{HOSTNAME}/{start time}/{suffix}` | Log stream this process writes to in every log group |
 
 Logs are JSON on stdout by default (`--log-format text` for humans); filter with `RUST_LOG`.
@@ -110,6 +116,26 @@ HTTP route:
 
 The file is re-read on every refresh. A key that names no route rejects the whole update (the
 previous routes keep serving), so a typo never goes unnoticed.
+
+## Canary releases
+
+A REST stage with canary settings serves two releases. Each request goes to the canary with
+probability `percentTraffic` (chosen with aws-lc-rs randomness; if randomness is unavailable the
+request goes to production), and the canary's `stageVariableOverrides` apply to its routes on top of
+the stage's variables. `--stage-variable` overrides apply to both releases and win over the
+canary's, so a variable you override locally is the same in both. `$context.isCanaryRequest` is
+`true` or `false` on stages that have a canary. Canary requests are also logged to the
+`{access log group}/Canary` and `API-Gateway-Execution-Logs_{apiId}/{stage}/Canary` log groups
+(created if missing) and counted in a second metric series whose `Stage` is `{stage}/Canary`.
+A canary at 0 percent builds no second release.
+
+API Gateway cannot export a canary deployment, so by default the canary release has the stage's
+routes and differs only in stage variables. To serve the canary deployment's routes, deploy it to
+a second stage of the same API (for example with `create-deployment --stage-name canary-shadow`)
+and pass `--canary-export-stage canary-shadow`: that stage's export builds the canary release
+whenever either stage's deployment changes, and its own stage variables and settings are ignored.
+`/routes` reports the canary release, its routes, and where its structure came from. `useStageCache`
+is recorded and applied when response caching lands ([#38](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/38)).
 
 ## Observability
 
@@ -149,6 +175,17 @@ query string and request headers (`Authorization`, `X-Api-Key`, and `Cookie` val
 redacted). Request and response bodies are not logged, and events are cut at 1 KB as in API
 Gateway. HTTP APIs have no execution logs.
 
+**X-Ray.** REST stages with tracing enabled send one segment per sampled request (named
+`{API name}/{stage}`, origin `AWS::ApiGateway::Stage`, with the request, the response status, and
+`error`/`throttle`/`fault` flags) with `PutTraceSegments`. The trace comes from the caller's
+`X-Amzn-Trace-Id` or W3C `traceparent` when present, including its sampling decision, and is
+otherwise started here and sampled by X-Ray's default rule (the first request each second, then
+`--xray-sampling-percent`); X-Ray's sampling rules are not fetched. Integrations receive
+`X-Amzn-Trace-Id: Root=...;Parent={this gateway's segment};Sampled=...` (HTTP backends and
+Lambda, per call) and, for HTTP backends, `traceparent`. The segment has no subsegment for the
+integration call, and API Gateway's passive mode (segments only when a caller traced) is not
+reproduced. A stage without tracing leaves trace headers untouched.
+
 **Delivery.** Each destination has a bounded queue (10,000 events). When it is full the newest
 events are dropped and counted in a warning, so a slow destination never slows requests. Queues
 are flushed every 5 seconds, when a batch is full, and at shutdown.
@@ -169,11 +206,13 @@ are flushed every 5 seconds, when a batch is full, and at shutdown.
 | Action | Resource | For |
 |---|---|---|
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/restapis/<id>/stages/<stage>/exports/oas30`, `.../restapis/<id>/stages/<stage>` | REST APIs |
+| `apigateway:GET` | the same two resources for the stage named by `--canary-export-stage` | canary releases from a shadow stage |
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/apis/<id>/exports/OAS30`, `.../apis/<id>/stages/<stage>` | HTTP APIs |
-| `lambda:InvokeFunction` | each integrated function and each Lambda authorizer function | `AWS_PROXY` routes and Lambda authorizers |
+| `lambda:InvokeFunction` | each integrated function (and its aliases) and each Lambda authorizer function | `AWS_PROXY` routes and Lambda authorizers; the same action covers `InvokeWithResponseStream` for streaming routes |
 | `sts:AssumeRole` | each integration `credentials` and each `authorizerCredentials` role | integrations and authorizers with a role, unless `--integration-credentials=gateway` |
 | `logs:CreateLogStream`, `logs:PutLogEvents` | each access log group, the metrics log group, and `arn:aws:logs:<region>:<account>:log-group:API-Gateway-Execution-Logs_<id>/<stage>:*` | access logs, metrics, execution logs |
-| `logs:CreateLogGroup` | `arn:aws:logs:<region>:<account>:log-group:API-Gateway-Execution-Logs_*` | execution logs (the only log group the gateway creates) |
+| `logs:CreateLogGroup` | `arn:aws:logs:<region>:<account>:log-group:API-Gateway-Execution-Logs_*`, and each access log group with `/Canary` appended | execution logs, and canary access logs (the only log groups the gateway creates) |
+| `xray:PutTraceSegments` | `*` | stages with tracing enabled |
 | `firehose:PutRecordBatch` | each access log delivery stream | access logs to Firehose |
 
 ## Documentation

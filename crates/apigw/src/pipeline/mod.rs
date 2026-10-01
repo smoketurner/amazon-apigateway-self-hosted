@@ -23,9 +23,10 @@ use crate::authz::{AuthRequest, Denial, RouteAuthorizer};
 use crate::gateway::{ApiContext, AuthorizationMode, GatewayError, MAX_BODY_BYTES};
 use crate::gateway_response::Failure;
 use crate::integration::{Integration, MockResponse};
-use crate::model::Protection;
+use crate::model::{Protection, ResponseType};
 use crate::observability::IntegrationTiming;
 use crate::route::Route;
+use crate::state::Admission;
 
 /// One route's handling of one request.
 pub(crate) struct Pipeline<'a> {
@@ -58,6 +59,9 @@ impl<'a> Pipeline<'a> {
         if let Some(protection) = self.refusal() {
             return self.fail(&ctx, &protection.refusal(self.api.kind));
         }
+        if let Some(failure) = self.throttled().await {
+            return self.fail(&ctx, &failure);
+        }
         if !readable {
             return self.fail(&ctx, &GatewayError::InvalidRequest.failure(self.api.kind));
         }
@@ -77,6 +81,16 @@ impl<'a> Pipeline<'a> {
         };
         response.extensions_mut().insert(timing);
         response
+    }
+
+    /// The failure for a request over the route's throttle limit. Runs before
+    /// the body is read, so a throttled request costs no buffering.
+    async fn throttled(&self) -> Option<Failure> {
+        let throttle = self.route.throttle.as_ref()?;
+        match throttle.admit(&self.api.state).await {
+            Admission::Admitted => None,
+            Admission::Throttled => Some(Failure::new(ResponseType::Throttled)),
+        }
     }
 
     fn fail(&self, ctx: &RequestContext, failure: &Failure) -> Response {
@@ -115,6 +129,7 @@ impl<'a> Pipeline<'a> {
         let request = AuthRequest {
             aws: &self.api.aws,
             keys: &self.api.keys,
+            state: &self.api.state,
             ctx,
         };
         ctx.authorizer = authorizer.authorize(&request, scopes).await?;

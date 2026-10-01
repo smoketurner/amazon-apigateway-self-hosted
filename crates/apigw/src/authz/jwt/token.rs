@@ -325,7 +325,7 @@ mod tests {
         #[test]
         fn scope_extraction_never_panics(scope in ".{0,40}", scp in ".{0,40}") {
             let token = claims(&json!({"scope": scope, "scp": scp}));
-            let _ = token.scopes();
+            prop_assert!(token.scopes().iter().all(|scope| !scope.is_empty()));
         }
     }
 }

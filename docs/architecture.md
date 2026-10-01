@@ -15,10 +15,13 @@ Java regex syntax to `fancy-regex` and provides Java's matching, replacement, an
 | `pipeline` | Per-request execution in API Gateway's stage order (`Pipeline`), and `RequestContext`, the single owner of `$context` variables |
 | `gateway` | What every route of an API shares (`ApiContext`), enforcement of unevaluated protections, and API Gateway-shaped errors (`GatewayError`) |
 | `gateway_response` | Every error the gateway answers with (`Failure`), rendered through the API's customized REST gateway responses (status, `gatewayresponse.header.*`, `$context` templates, `DEFAULT_4XX`/`DEFAULT_5XX` fallback) or HTTP APIs' fixed messages |
-| `authz` | Compiles the API's authorizers (`Authorizers`, per route `RouteAuthorizer`) and evaluates them before the integration: Lambda authorizers with identity sources, a bounded TTL cache, and IAM policy evaluation (`PolicyDocument`, `MethodArn`, wildcard `Glob`); `Denial` maps each refusal to its gateway response |
+| `authz` | Compiles the API's authorizers (`Authorizers`, per route `RouteAuthorizer`) and evaluates them before the integration: Lambda authorizers with identity sources, a bounded TTL cache, and IAM policy evaluation (`PolicyDocument`, `MethodArn`, wildcard `Glob`); token authorizers (`authz::jwt`): Cognito and HTTP API JWT verification against an issuer's cached public keys (`KeyStore`); `Denial` maps each refusal to its gateway response |
+| `state`, `throttle` | `StateBackend` (token buckets, period quota counters, TTL cache; in-memory today, shaped for a shared Valkey backend) and the stage throttle settings that become one bucket per route |
+| `digest` | SHA-256 digests, so credentials never appear in cache keys |
 | `aws` | `AwsClients`: per-region Lambda clients, assumed integration-role credentials, Lambda endpoint overrides, trace header propagation |
 | `proxy` | `HTTP_PROXY` forwarding |
-| `lambda` | `AWS_PROXY` event construction (payload 1.0 and 2.0) and response mapping |
+| `lambda`, `lambda_response` | `AWS_PROXY` event construction (payload 1.0 and 2.0), invocation (buffered `Invoke` or streamed `InvokeWithResponseStream`), and response mapping |
+| `header_case` | Recovers the client's HTTP/1 header name spelling (hyper keeps it private) by watching request heads on the connection |
 | `listener` | TLS accept loop, PROXY protocol v2, certificate reload |
 | `identity` | Client address and forwarded client certificate, from the peer and trusted proxies' headers |
 | `app` | Startup, refresh loop, shutdown |

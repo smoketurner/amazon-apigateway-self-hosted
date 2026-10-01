@@ -3,6 +3,8 @@
 
 use std::sync::Arc;
 
+use std::num::NonZeroU32;
+
 use axum::extract::Request;
 use axum::http::{HeaderName, StatusCode};
 use axum::response::Response;
@@ -10,12 +12,14 @@ use uuid::Uuid;
 
 use crate::authz::KeyStore;
 use crate::aws::AwsClients;
+use crate::canary::Release;
 use crate::gateway_response::{Failure, GatewayResponses};
 use crate::integration::StageVariables;
 use crate::model::{ApiKind, Protection, ResponseType};
 use crate::observability::StageObserver;
 use crate::pipeline::RequestContext;
 use crate::route::Route;
+use crate::state::StateBackend;
 
 /// API Gateway's maximum payload size.
 pub(crate) const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
@@ -144,10 +148,15 @@ pub(crate) struct ApiContext {
     pub(crate) stage_variables: Arc<StageVariables>,
     pub(crate) enforcement: Enforcement,
     pub(crate) responses: GatewayResponses,
+    pub(crate) state: Arc<StateBackend>,
+    pub(crate) replicas: NonZeroU32,
     pub(crate) http: reqwest::Client,
     pub(crate) aws: Arc<AwsClients>,
     pub(crate) keys: Arc<KeyStore>,
     pub(crate) observer: StageObserver,
+    /// Which release of a canary stage this context serves; `None` when the
+    /// stage has no canary.
+    pub(crate) release: Option<Release>,
 }
 
 impl ApiContext {
@@ -185,6 +194,9 @@ pub(crate) enum GatewayError {
     RequestTooLarge,
     /// An integration this gateway can't execute yet.
     UnsupportedIntegration,
+    /// A streaming integration's output doesn't follow the response streaming
+    /// format; API Gateway answers `500`.
+    MalformedStreamingResponse,
 }
 
 impl GatewayError {
@@ -214,6 +226,7 @@ impl GatewayError {
             (Self::RequestTooLarge, ApiKind::Http) => {
                 Failure::new(ResponseType::RequestTooLarge).with_message("Request Entity Too Large")
             }
+            (Self::MalformedStreamingResponse, _) => Failure::new(ResponseType::Default5xx),
             (Self::UnsupportedIntegration, _) => Failure::gateway(
                 StatusCode::NOT_IMPLEMENTED,
                 "Integration not supported by this gateway",

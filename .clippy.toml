@@ -11,7 +11,61 @@ too-many-lines-threshold       = 100
 # Short names that are acceptable below the min-chars threshold.
 allowed-idents-below-min-chars = ["x", "y", "z", "i", "j", "k", "n", "s", "e", "id", "db", "tx", "rx", "ok"]
 
+# Own-crate items are imported with `use`, not spelled as deep paths;
+# `clippy::absolute_paths` (denied in Cargo.toml) flags paths of more than two
+# segments rooted at a crate. External crates are listed so only `crate::` and
+# own-crate paths are reported: a dependency added to
+# `[workspace.dependencies]` belongs here too.
+absolute-paths-max-segments = 2
+absolute-paths-allowed-crates = [
+    "std",
+    "core",
+    "alloc",
+    "proc_macro",
+    "anyhow",
+    "apigw_regex",
+    "aws_config",
+    "aws_lc_rs",
+    "aws_sdk_apigateway",
+    "aws_sdk_apigatewayv2",
+    "aws_sdk_cloudwatchlogs",
+    "aws_sdk_firehose",
+    "aws_sdk_lambda",
+    "aws_sdk_xray",
+    "axum",
+    "base64",
+    "clap",
+    "fancy_regex",
+    "hyper",
+    "hyper_util",
+    "ipnet",
+    "jiff",
+    "jsonwebtoken",
+    "matchit",
+    "proptest",
+    "proxy_header",
+    "rcgen",
+    "reqwest",
+    "rustls",
+    "serde",
+    "serde_json",
+    "serde_saphyr",
+    "thiserror",
+    "tokio",
+    "tokio_rustls",
+    "tokio_util",
+    "tower",
+    "tracing",
+    "tracing_subscriber",
+    "uuid",
+]
+
 # Product names that are not code.
 doc-valid-idents = ["CloudWatch", "X-Ray", ".."]
 
-# MSRV is read automatically from the workspace `rust-version` field.
+# Conventions from CLAUDE.md, enforced; opt out with
+# `#[expect(clippy::disallowed_methods, reason = "...")]`.
+disallowed-methods = [
+    { path = "uuid::Uuid::new_v4", reason = "IDs are UUID v7: use `Uuid::now_v7()`" },
+    { path = "std::time::SystemTime::now", reason = "date/time goes through jiff: use `jiff::Timestamp::now()`" },
+]

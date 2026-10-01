@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::num::NonZeroU8;
+use std::num::{NonZeroU8, NonZeroU32};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -12,7 +12,9 @@ use crate::gateway::{AuthorizationMode, Enforcement, Unsupported};
 use crate::identity::{TrustedProxies, TrustedProxy};
 use crate::listener::{Edge, ProxyProtocol};
 use crate::model::ApiKind;
-use crate::observability::{Delivery, LogGroup, MetricsNamespace, StreamName};
+use crate::observability::{
+    Delivery, LogGroup, MetricsNamespace, MetricsSettings, Settings, StreamName, TraceDelivery,
+};
 use crate::router::BasePath;
 use crate::source::Source;
 
@@ -39,6 +41,12 @@ pub(crate) struct Config {
     /// API Gateway product the --openapi-file was exported from.
     #[arg(long, env = "APIGW_API_TYPE", value_enum, default_value_t = ApiKind::Rest)]
     pub(crate) api_type: ApiKind,
+
+    /// A stage that holds the canary deployment of --stage. API Gateway cannot
+    /// export a canary deployment, so without this the canary release has the
+    /// stage's routes and differs only in stage variables.
+    #[arg(long, env = "APIGW_CANARY_EXPORT_STAGE", requires = "rest_api_id")]
+    pub(crate) canary_export_stage: Option<String>,
 
     /// Stage to export, and to read stage variables from.
     #[arg(long, env = "APIGW_STAGE")]
@@ -140,6 +148,14 @@ pub(crate) struct Config {
     #[arg(long, env = "APIGW_PROXY_PROTOCOL", requires = "trusted_proxies")]
     pub(crate) proxy_protocol: bool,
 
+    /// How many gateway replicas serve this API. Throttle limits are divided by
+    /// this count because each replica keeps its own buckets, so the API-wide rate
+    /// is approximately the configured one. A replica's bucket always holds at
+    /// least one token, so with more replicas than burst tokens the API-wide burst
+    /// is larger than configured.
+    #[arg(long, env = "APIGW_REPLICAS", default_value_t = NonZeroU32::MIN)]
+    pub(crate) replicas: NonZeroU32,
+
     /// Address for `/healthz` and `/routes`. Disabled when unset.
     #[arg(long, env = "APIGW_ADMIN_LISTEN")]
     pub(crate) admin_listen: Option<SocketAddr>,
@@ -180,6 +196,17 @@ pub(crate) struct Config {
     #[arg(long, env = "APIGW_METRICS_NAMESPACE", default_value_t = MetricsNamespace::default(), value_parser = clap::value_parser!(MetricsNamespace))]
     pub(crate) metrics_namespace: MetricsNamespace,
 
+    /// What stage tracing does: `aws` sends X-Ray segments for stages with
+    /// tracing enabled and propagates `X-Amzn-Trace-Id` and `traceparent` to
+    /// integrations; `off` does neither.
+    #[arg(long, env = "APIGW_TRACING", value_enum, default_value_t = TraceDelivery::Aws)]
+    pub(crate) tracing: TraceDelivery,
+
+    /// Percentage of requests X-Ray traces after the first request each second,
+    /// when the caller made no sampling decision (X-Ray's default rule is 5).
+    #[arg(long, env = "APIGW_XRAY_SAMPLING_PERCENT", default_value_t = 5, value_parser = clap::value_parser!(u8).range(..=100))]
+    pub(crate) xray_sampling_percent: u8,
+
     /// Log stream this process writes to in each CloudWatch Logs log group.
     /// Defaults to `{HOSTNAME}/{start time}/{random suffix}`, unique per process.
     #[arg(long, env = "APIGW_LOG_STREAM")]
@@ -205,6 +232,7 @@ impl Config {
             (Some(api_id), _, _) => Source::RestApi {
                 api_id: api_id.clone(),
                 stage: self.stage.clone().unwrap_or_default(),
+                canary_stage: self.canary_export_stage.clone(),
             },
             (None, Some(api_id), _) => Source::HttpApi {
                 api_id: api_id.clone(),
@@ -238,16 +266,19 @@ impl Config {
 
     /// What to deliver to CloudWatch and how. `hostname` names the pod in the
     /// default log stream name.
-    pub(crate) fn observability(&self, hostname: Option<&str>) -> crate::observability::Settings {
-        crate::observability::Settings {
+    pub(crate) fn observability(&self, hostname: Option<&str>) -> Settings {
+        Settings {
             access_logs: self.access_logs,
             execution_logs: self.execution_logs,
-            metrics: self.metrics_log_group.as_deref().map(|group| {
-                crate::observability::MetricsSettings {
+            metrics: self
+                .metrics_log_group
+                .as_deref()
+                .map(|group| MetricsSettings {
                     group: LogGroup::new(group),
                     namespace: self.metrics_namespace.clone(),
-                }
-            }),
+                }),
+            tracing: self.tracing,
+            sampling_percent: self.xray_sampling_percent,
             stream: StreamName::for_pod(
                 self.log_stream.as_deref(),
                 hostname,
@@ -309,7 +340,7 @@ mod tests {
     const TLS: [&str; 4] = ["--tls-cert", "c.pem", "--tls-key", "k.pem"];
 
     fn parse(args: &[&str]) -> Result<Config, clap::Error> {
-        Config::try_parse_from(["apigw"].iter().chain(args).chain(TLS.iter()))
+        Config::try_parse_from(std::iter::once(&"apigw").chain(args).chain(TLS.iter()))
     }
 
     #[test]
@@ -317,7 +348,7 @@ mod tests {
         assert!(parse(&["--rest-api-id", "abc"]).is_err());
         let config = parse(&["--rest-api-id", "abc", "--stage", "prod"]).unwrap();
         assert!(
-            matches!(config.source(), Source::RestApi { ref api_id, ref stage } if api_id == "abc" && stage == "prod")
+            matches!(config.source(), Source::RestApi { ref api_id, ref stage, .. } if api_id == "abc" && stage == "prod")
         );
     }
 
@@ -394,6 +425,15 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn replicas_default_to_one_and_must_be_positive() {
+        let config = parse(&["--http-api-id", "a", "--stage", "s"]).unwrap();
+        assert_eq!(config.replicas.get(), 1);
+        let config = parse(&["--http-api-id", "a", "--stage", "s", "--replicas", "3"]).unwrap();
+        assert_eq!(config.replicas.get(), 3);
+        assert!(parse(&["--http-api-id", "a", "--stage", "s", "--replicas", "0"]).is_err());
     }
 
     #[test]

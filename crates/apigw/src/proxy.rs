@@ -37,6 +37,11 @@ impl HttpProxy {
                 headers.append(name.clone(), value.clone());
             }
         }
+        if let Some(trace) = ctx.trace
+            && let Ok(value) = HeaderValue::try_from(trace.traceparent())
+        {
+            headers.insert(HeaderName::from_static("traceparent"), value);
+        }
         for (name, source) in &self.headers {
             let Some(value) = source.resolve(ctx) else {
                 continue;
@@ -53,6 +58,7 @@ impl HttpProxy {
                 }
             }
         }
+        ctx.integration.transfer_mode = Some(self.transfer);
         let started = Instant::now();
         let result = client
             .request(method, url)
@@ -72,10 +78,13 @@ impl HttpProxy {
                 return Err(GatewayError::IntegrationUnreachable);
             }
         };
+        let headers_after = u64::try_from(started.elapsed().as_millis()).ok();
+        ctx.integration.status = Some(upstream.status().as_u16());
+        ctx.integration.time_to_all_headers_ms = headers_after;
         tracing::debug!(
             route = %route.key,
             status = upstream.status().as_u16(),
-            latency_ms = started.elapsed().as_millis(),
+            latency_ms = headers_after,
             "integration responded"
         );
         let mut response = Response::new(Body::empty());
@@ -230,11 +239,12 @@ mod tests {
     use super::*;
     use crate::authz::RouteAuthorizer;
     use crate::integration::Integration;
-    use crate::model::{ApiKind, MethodMatch, Protections, RouteKey};
+    use crate::model::{ApiKind, MethodMatch, Protections, ResponseTransferMode, RouteKey};
     use crate::pipeline::context::QueryString;
+    use crate::pipeline::context::tests::request;
 
     fn incoming(params: &[(&str, &str)], query: Option<&str>) -> RequestContext {
-        let mut ctx = crate::pipeline::context::tests::request(ApiKind::Rest);
+        let mut ctx = request(ApiKind::Rest);
         ctx.headers
             .insert("x-tenant", HeaderValue::from_static("acme"));
         ctx.method = Method::GET;
@@ -254,6 +264,7 @@ mod tests {
             query_params: BTreeMap::new(),
             headers: BTreeMap::new(),
             timeout: Duration::from_secs(1),
+            transfer: ResponseTransferMode::Buffered,
         }
     }
 
@@ -267,6 +278,7 @@ mod tests {
             protections: Protections::default(),
             authorizer: RouteAuthorizer::None,
             unenforced: Vec::new(),
+            throttle: None,
         }
     }
 

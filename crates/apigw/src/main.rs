@@ -4,12 +4,17 @@
 mod app;
 mod authz;
 mod aws;
+mod canary;
 mod config;
+mod digest;
+mod entropy;
 mod gateway;
 mod gateway_response;
+mod header_case;
 mod identity;
 mod integration;
 mod lambda;
+mod lambda_response;
 mod listener;
 mod model;
 mod observability;
@@ -18,6 +23,8 @@ mod proxy;
 mod route;
 mod router;
 mod source;
+mod state;
+mod throttle;
 
 use clap::Parser as _;
 use tracing_subscriber::EnvFilter;

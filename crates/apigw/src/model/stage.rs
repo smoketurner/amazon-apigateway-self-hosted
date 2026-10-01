@@ -134,16 +134,19 @@ pub(crate) struct MethodSettings {
 }
 
 impl MethodSettings {
-    fn throttles(&self) -> bool {
-        self.throttling_burst_limit.is_some_and(|b| b >= 0)
-            || self.throttling_rate_limit.is_some_and(|r| r >= 0.0)
-    }
-
     /// These settings with every field they leave unset taken from `base`.
+    /// API Gateway reports an unset throttle limit as -1, so a negative limit
+    /// counts as unset.
     fn overlaid_on(&self, base: &Self) -> Self {
         Self {
-            throttling_burst_limit: self.throttling_burst_limit.or(base.throttling_burst_limit),
-            throttling_rate_limit: self.throttling_rate_limit.or(base.throttling_rate_limit),
+            throttling_burst_limit: self
+                .throttling_burst_limit
+                .filter(|limit| *limit >= 0)
+                .or(base.throttling_burst_limit),
+            throttling_rate_limit: self
+                .throttling_rate_limit
+                .filter(|limit| *limit >= 0.0)
+                .or(base.throttling_rate_limit),
             metrics_enabled: self.metrics_enabled.or(base.metrics_enabled),
             logging_level: self
                 .logging_level
@@ -277,23 +280,9 @@ pub(crate) struct StageSettings {
 impl StageSettings {
     /// Stage settings imported but not enforced yet.
     pub(crate) fn unenforced(&self) -> Vec<Feature> {
-        let settings = || self.method_settings.values();
         let mut features = Vec::new();
-        if settings().any(MethodSettings::throttles) {
-            features.push(Feature::Throttling);
-        }
         if self.cache_cluster_enabled {
             features.push(Feature::ResponseCaching);
-        }
-        if self.tracing_enabled {
-            features.push(Feature::Tracing);
-        }
-        if self
-            .canary
-            .as_ref()
-            .is_some_and(|c| c.percent_traffic > 0.0)
-        {
-            features.push(Feature::Canary);
         }
         features
     }
@@ -404,7 +393,7 @@ mod tests {
     use aws_sdk_apigateway::primitives::DateTime;
     use aws_sdk_apigateway::types::{CanarySettings as RestCanary, MethodSetting};
     use aws_sdk_apigatewayv2::operation::get_stage::GetStageOutput as HttpStage;
-    use aws_sdk_apigatewayv2::types::{LoggingLevel, RouteSettings};
+    use aws_sdk_apigatewayv2::types::{LoggingLevel as SdkLoggingLevel, RouteSettings};
 
     use super::*;
 
@@ -514,15 +503,7 @@ mod tests {
                 .map(String::as_str),
             Some("b")
         );
-        assert_eq!(
-            settings.unenforced(),
-            vec![
-                Feature::Throttling,
-                Feature::ResponseCaching,
-                Feature::Tracing,
-                Feature::Canary
-            ]
-        );
+        assert_eq!(settings.unenforced(), vec![Feature::ResponseCaching]);
         assert_eq!(
             DeploymentStamp::from(&stage),
             DeploymentStamp {
@@ -545,14 +526,14 @@ mod tests {
             .route_settings(
                 "GET /pets",
                 RouteSettings::builder()
-                    .logging_level(LoggingLevel::Error)
+                    .logging_level(SdkLoggingLevel::Error)
                     .build(),
             )
             .build();
         let settings = StageSettings::from(&stage);
         assert_eq!(settings.method_settings.len(), 2);
         assert!(settings.method_settings.contains_key(&SettingsScope::All));
-        assert_eq!(settings.unenforced(), vec![Feature::Throttling]);
+        assert!(settings.unenforced().is_empty());
     }
 
     fn scope(path: &str, method: &str) -> SettingsScope {
@@ -645,14 +626,14 @@ mod tests {
         assert_eq!(
             logging(Some("info"), true),
             Some(ExecutionLogging {
-                level: crate::model::LoggingLevel::Info,
+                level: LoggingLevel::Info,
                 data_trace: true
             })
         );
         assert_eq!(
             logging(Some("ERROR"), false),
             Some(ExecutionLogging {
-                level: crate::model::LoggingLevel::Error,
+                level: LoggingLevel::Error,
                 data_trace: false
             })
         );

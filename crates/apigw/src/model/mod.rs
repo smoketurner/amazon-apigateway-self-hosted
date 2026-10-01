@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[cfg(test)]
-pub(crate) use stage::{AccessLogSettings, MethodSettings, SettingsScope};
+pub(crate) use stage::{AccessLogSettings, CanarySettings, MethodSettings, SettingsScope};
 pub(crate) use stage::{DeploymentStamp, ExecutionLogging, LoggingLevel, StageSettings};
 
 /// Which API Gateway product the definition came from. The two differ in Lambda
@@ -562,10 +562,7 @@ pub(crate) enum Feature {
     ContentHandling,
     IntegrationTlsConfig,
     ParameterMapping,
-    Throttling,
     ResponseCaching,
-    Tracing,
-    Canary,
 }
 
 impl fmt::Display for Feature {
@@ -577,10 +574,7 @@ impl fmt::Display for Feature {
             Self::ContentHandling => "content handling",
             Self::IntegrationTlsConfig => "integration TLS config",
             Self::ParameterMapping => "parameter mapping",
-            Self::Throttling => "throttling",
             Self::ResponseCaching => "response caching",
-            Self::Tracing => "tracing",
-            Self::Canary => "canary",
         };
         f.write_str(name)
     }

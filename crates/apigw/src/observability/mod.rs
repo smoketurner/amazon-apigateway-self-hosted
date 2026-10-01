@@ -13,7 +13,8 @@ mod observer;
 mod queue;
 #[cfg(test)]
 #[expect(clippy::panic, reason = "a test helper that fails loudly on timeout")]
-mod testing;
+pub(crate) mod testing;
+mod trace;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -25,10 +26,13 @@ use tokio_util::sync::CancellationToken;
 pub(crate) use destination::{LogGroup, StreamName};
 pub(crate) use metrics::MetricsNamespace;
 pub(crate) use observer::{IntegrationTiming, StageObserver};
+pub(crate) use trace::Trace;
 
+use crate::canary::Release;
 use destination::Destination;
 use metrics::MetricsAggregator;
-use queue::{CloudWatchShipper, FirehoseShipper, LogQueue, Shipper, Worker};
+use queue::{CloudWatchShipper, FirehoseShipper, LogQueue, Shipper, Worker, XRayShipper};
+use trace::Sampler;
 
 /// Where one kind of log goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -40,6 +44,16 @@ pub(crate) enum Delivery {
     /// Standard output, one event per line, without calling AWS.
     Stdout,
     /// Nowhere.
+    Off,
+}
+
+/// Whether stage tracing sends segments to X-Ray.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum TraceDelivery {
+    /// Send segments for stages with tracing enabled to X-Ray, and propagate
+    /// `X-Amzn-Trace-Id` and `traceparent` to integrations.
+    Aws,
+    /// Neither send segments nor touch trace headers.
     Off,
 }
 
@@ -57,6 +71,10 @@ pub(crate) struct Settings {
     pub(crate) execution_logs: Delivery,
     /// Metrics are published only when a log group is configured for them.
     pub(crate) metrics: Option<MetricsSettings>,
+    pub(crate) tracing: TraceDelivery,
+    /// Percentage of requests sampled once the first request of each second
+    /// has been, for requests whose caller made no sampling decision.
+    pub(crate) sampling_percent: u8,
     pub(crate) stream: StreamName,
 }
 
@@ -67,6 +85,7 @@ pub(crate) struct Observability {
     queues: Mutex<HashMap<Destination, LogQueue>>,
     workers: Mutex<JoinSet<()>>,
     aggregator: Option<Arc<MetricsAggregator>>,
+    sampler: Arc<Sampler>,
     aggregator_task: Mutex<Option<JoinHandle<()>>>,
     publishing: CancellationToken,
     closed: CancellationToken,
@@ -80,9 +99,11 @@ impl Observability {
             .metrics
             .as_ref()
             .map(|m| Arc::new(MetricsAggregator::new(m.namespace.clone())));
+        let sampler = Arc::new(Sampler::new(settings.sampling_percent));
         let observability = Arc::new(Self {
             sdk_config,
             settings,
+            sampler,
             queues: Mutex::new(HashMap::new()),
             workers: Mutex::new(JoinSet::new()),
             aggregator,
@@ -106,6 +127,8 @@ impl Observability {
                 access_logs: Delivery::Off,
                 execution_logs: Delivery::Off,
                 metrics: None,
+                tracing: TraceDelivery::Off,
+                sampling_percent: 0,
                 stream: StreamName::for_pod(
                     Some("test"),
                     None,
@@ -115,6 +138,7 @@ impl Observability {
             },
             queues: Mutex::new(HashMap::new()),
             workers: Mutex::new(JoinSet::new()),
+            sampler: Arc::new(Sampler::new(0)),
             aggregator: None,
             aggregator_task: Mutex::new(None),
             publishing: CancellationToken::new(),
@@ -147,36 +171,66 @@ impl Observability {
     }
 
     /// Where a stage's access log lines go, given the destination ARN in its
-    /// access log settings.
-    pub(crate) fn access_log_queue(&self, destination_arn: Option<&str>) -> Option<LogQueue> {
-        match self.settings.access_logs {
-            Delivery::Off => None,
-            Delivery::Stdout => Some(self.queue(Destination::Stdout)),
-            Delivery::Aws => {
-                let destination = match destination_arn.map(str::parse::<Destination>) {
-                    Some(Ok(destination)) => destination,
-                    Some(Err(err)) => {
-                        tracing::warn!(%err, "writing access logs to stdout instead");
-                        Destination::Stdout
-                    }
-                    None => Destination::Stdout,
-                };
-                Some(self.queue(destination))
-            }
-        }
+    /// access log settings: the destination, and for canary requests also its
+    /// canary variant. Empty when access logs are off.
+    pub(crate) fn access_log_queues(
+        &self,
+        destination_arn: Option<&str>,
+        release: Option<Release>,
+    ) -> Vec<LogQueue> {
+        let destination = match self.settings.access_logs {
+            Delivery::Off => return Vec::new(),
+            Delivery::Stdout => Destination::Stdout,
+            Delivery::Aws => match destination_arn.map(str::parse::<Destination>) {
+                Some(Ok(destination)) => destination,
+                Some(Err(err)) => {
+                    tracing::warn!(%err, "writing access logs to stdout instead");
+                    Destination::Stdout
+                }
+                None => Destination::Stdout,
+            },
+        };
+        self.with_canary(destination, release)
     }
 
-    /// Where a stage's execution logs go.
-    pub(crate) fn execution_queue(&self, api_id: &str, stage: &str) -> Option<LogQueue> {
-        match self.settings.execution_logs {
-            Delivery::Off => None,
-            Delivery::Stdout => Some(self.queue(Destination::Stdout)),
-            Delivery::Aws => Some(self.queue(Destination::CloudWatch {
+    /// Where a stage's execution logs go, as for [`Self::access_log_queues`].
+    pub(crate) fn execution_queues(
+        &self,
+        api_id: &str,
+        stage: &str,
+        release: Option<Release>,
+    ) -> Vec<LogQueue> {
+        let destination = match self.settings.execution_logs {
+            Delivery::Off => return Vec::new(),
+            Delivery::Stdout => Destination::Stdout,
+            Delivery::Aws => Destination::CloudWatch {
                 region: None,
                 group: LogGroup::execution_logs(api_id, stage),
                 create_group: true,
-            })),
+            },
+        };
+        self.with_canary(destination, release)
+    }
+
+    fn with_canary(&self, destination: Destination, release: Option<Release>) -> Vec<LogQueue> {
+        let canary = (release == Some(Release::Canary))
+            .then(|| destination.canary())
+            .flatten();
+        let mut queues = vec![self.queue(destination)];
+        queues.extend(canary.map(|destination| self.queue(destination)));
+        queues
+    }
+
+    /// Where trace segments go, when tracing is on.
+    pub(crate) fn trace_queue(&self) -> Option<LogQueue> {
+        match self.settings.tracing {
+            TraceDelivery::Off => None,
+            TraceDelivery::Aws => Some(self.queue(Destination::XRay { region: None })),
         }
+    }
+
+    pub(crate) fn sampler(&self) -> Arc<Sampler> {
+        Arc::clone(&self.sampler)
     }
 
     /// The queue for `destination`, starting its worker on first use.
@@ -224,6 +278,15 @@ impl Observability {
                     aws_sdk_firehose::Client::from_conf(config.build()),
                     stream.clone(),
                 ))
+            }
+            Destination::XRay { ref region } => {
+                let mut config = aws_sdk_xray::config::Builder::from(&self.sdk_config);
+                if let Some(region) = region {
+                    config = config.region(Region::new(region.clone()));
+                }
+                Shipper::XRay(XRayShipper::new(aws_sdk_xray::Client::from_conf(
+                    config.build(),
+                )))
             }
             Destination::Stdout => Shipper::Stdout,
         }

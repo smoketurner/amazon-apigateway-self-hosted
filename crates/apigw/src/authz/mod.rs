@@ -5,7 +5,6 @@
 //! that cannot be evaluated faithfully compiles to
 //! [`RouteAuthorizer::Unevaluable`], and the route then refuses requests.
 
-mod cache;
 mod glob;
 mod identity_source;
 mod jwt;
@@ -29,6 +28,7 @@ use crate::integration::StageVariables;
 use crate::model::{ApiKind, ApiModel, AuthorizerSpec, Operation, Protection, ResponseType};
 use crate::pipeline::RequestContext;
 use crate::pipeline::context::AuthorizerContext;
+use crate::state::StateBackend;
 
 use self::jwt::JwtAuthorizer;
 use self::lambda::LambdaAuthorizer;
@@ -93,6 +93,7 @@ impl Denial {
 pub(crate) struct AuthRequest<'a> {
     pub(crate) aws: &'a AwsClients,
     pub(crate) keys: &'a KeyStore,
+    pub(crate) state: &'a StateBackend,
     pub(crate) ctx: &'a RequestContext,
 }
 
@@ -111,6 +112,7 @@ impl Authorizer {
     /// With the reason, when the definition is of a type this gateway does not
     /// evaluate or is not valid.
     pub(crate) fn compile(
+        name: &str,
         spec: &AuthorizerSpec,
         kind: ApiKind,
         variables: &StageVariables,
@@ -121,9 +123,8 @@ impl Authorizer {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
         match authorizer_type.to_ascii_lowercase().as_str() {
-            "token" | "request" => {
-                LambdaAuthorizer::compile(spec, kind, variables).map(|a| Self::Lambda(Box::new(a)))
-            }
+            "token" | "request" => LambdaAuthorizer::compile(name, spec, kind, variables)
+                .map(|a| Self::Lambda(Box::new(a))),
             "jwt" if kind == ApiKind::Http => JwtAuthorizer::compile_http(spec).map(Self::Jwt),
             "cognito_user_pools" if kind == ApiKind::Rest => {
                 JwtAuthorizer::compile_cognito(spec, variables).map(Self::Jwt)
@@ -192,7 +193,7 @@ impl Authorizers {
                 .authorizers
                 .iter()
                 .map(|(name, spec)| {
-                    let compiled = Authorizer::compile(spec, model.kind, variables)
+                    let compiled = Authorizer::compile(name, spec, model.kind, variables)
                         .map(Arc::new)
                         .inspect_err(|reason| {
                             tracing::warn!(
