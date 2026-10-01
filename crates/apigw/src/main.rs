@@ -6,6 +6,7 @@ mod authz;
 mod aws;
 mod canary;
 mod config;
+mod domain;
 mod entropy;
 mod gateway;
 mod gateway_response;
