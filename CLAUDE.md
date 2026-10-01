@@ -37,6 +37,9 @@ Dockerfile            # static musl build → distroless
   `[workspace.dependencies]`; look up the current version when adding one.
 - The `apigw` binary crate keeps items `pub(crate)`; library crates (`apigw-regex`) expose a
   documented `pub` API.
+- Own-crate items are imported with `use`, not written as deep `crate::` paths
+  (`clippy::absolute_paths`); a new workspace dependency also goes in `.clippy.toml`'s
+  `absolute-paths-allowed-crates`.
 - **Errors:** `thiserror` for module error types, `anyhow` in `app.rs`/`main.rs`.
 - **Logging:** `tracing`, never `println!`. **Time:** `jiff`. **Request IDs:** UUID v7.
 - **Commits:** Conventional Commits (`.claude/rules/commits-and-issues.md`). Never push to

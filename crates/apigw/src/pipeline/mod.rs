@@ -10,6 +10,8 @@
 
 pub(crate) mod context;
 
+use std::time::Instant;
+
 use axum::body::{Body, Bytes};
 use axum::extract::{FromRequestParts as _, RawPathParams, Request};
 use axum::http::header;
@@ -17,33 +19,53 @@ use axum::response::{IntoResponse as _, Response};
 
 pub(crate) use context::RequestContext;
 
-use crate::gateway::{ApiContext, GatewayError, MAX_BODY_BYTES};
+use crate::authz::{AuthRequest, Denial, RouteAuthorizer};
+use crate::cors::Cors;
+use crate::gateway::{ApiContext, AuthorizationMode, GatewayError, MAX_BODY_BYTES};
 use crate::gateway_response::Failure;
 use crate::integration::{Integration, MockResponse};
-use crate::model::Protection;
+use crate::model::{Protection, ResponseType};
+use crate::observability::IntegrationTiming;
 use crate::route::Route;
+use crate::state::Admission;
 
 /// One route's handling of one request.
 pub(crate) struct Pipeline<'a> {
     api: &'a ApiContext,
     route: &'a Route,
+    /// Path parameters the router already matched; when absent they are read
+    /// from the request.
+    path_params: Option<Vec<(String, String)>>,
 }
 
 impl<'a> Pipeline<'a> {
     pub(crate) fn new(api: &'a ApiContext, route: &'a Route) -> Self {
-        Self { api, route }
+        Self {
+            api,
+            route,
+            path_params: None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn with_path_params(mut self, params: Vec<(String, String)>) -> Self {
+        self.path_params = Some(params);
+        self
     }
 
     pub(crate) async fn run(self, request: Request) -> Response {
         let (mut parts, body) = request.into_parts();
-        let path_params = RawPathParams::from_request_parts(&mut parts, &())
-            .await
-            .map(|params| {
-                params
-                    .iter()
-                    .map(|(k, v)| (k.to_owned(), v.to_owned()))
-                    .collect::<Vec<_>>()
-            });
+        let path_params = match self.path_params {
+            Some(ref params) => Ok(params.clone()),
+            None => RawPathParams::from_request_parts(&mut parts, &())
+                .await
+                .map(|params| {
+                    params
+                        .iter()
+                        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                        .collect::<Vec<_>>()
+                }),
+        };
         let readable = path_params.is_ok();
         let mut ctx = RequestContext::new(
             self.api,
@@ -51,19 +73,53 @@ impl<'a> Pipeline<'a> {
             parts,
             path_params.unwrap_or_default(),
         );
+        let mut response = self.process(&mut ctx, body, readable).await;
+        if let Some(ref cors) = self.api.cors {
+            cors.decorate(&ctx, &mut response);
+        }
+        response
+    }
+
+    async fn process(&self, ctx: &mut RequestContext, body: Body, readable: bool) -> Response {
         if let Some(protection) = self.refusal() {
-            return self.fail(&ctx, &protection.refusal(self.api.kind));
+            return self.fail(ctx, &protection.refusal(self.api.kind));
+        }
+        if let Some(failure) = self.throttled().await {
+            return self.fail(ctx, &failure);
         }
         if !readable {
-            return self.fail(&ctx, &GatewayError::InvalidRequest.failure(self.api.kind));
+            return self.fail(ctx, &GatewayError::InvalidRequest.failure(self.api.kind));
+        }
+        if let Err(denial) = self.authorize(ctx).await {
+            return self.fail(ctx, &denial.failure(self.api.kind));
+        }
+        if let Some(ref cors) = self.api.cors
+            && Cors::is_preflight(ctx)
+        {
+            return cors.preflight(ctx);
         }
         match self.receive(body).await {
             Ok(body) => ctx.body = body,
-            Err(error) => return self.fail(&ctx, &error.failure(self.api.kind)),
+            Err(error) => return self.fail(ctx, &error.failure(self.api.kind)),
         }
-        match self.integrate(&mut ctx).await {
+        let started = Instant::now();
+        let result = self.integrate(ctx).await;
+        let timing = IntegrationTiming(started.elapsed());
+        let mut response = match result {
             Ok(response) => response,
-            Err(error) => self.fail(&ctx, &error.failure(self.api.kind)),
+            Err(error) => self.fail(ctx, &error.failure(self.api.kind)),
+        };
+        response.extensions_mut().insert(timing);
+        response
+    }
+
+    /// The failure for a request over the route's throttle limit. Runs before
+    /// the body is read, so a throttled request costs no buffering.
+    async fn throttled(&self) -> Option<Failure> {
+        let throttle = self.route.throttle.as_ref()?;
+        match throttle.admit(&self.api.state).await {
+            Admission::Admitted => None,
+            Admission::Throttled => Some(Failure::new(ResponseType::Throttled)),
         }
     }
 
@@ -83,6 +139,25 @@ impl<'a> Pipeline<'a> {
         axum::body::to_bytes(body, MAX_BODY_BYTES)
             .await
             .map_err(|_| GatewayError::RequestTooLarge)
+    }
+
+    /// Runs the route's authorizer and records what it contributes to
+    /// `$context.authorizer`. Authorization happens before the body is read so
+    /// that a request that is turned away costs no buffering.
+    /// `--insecure-skip-authorization` skips it.
+    async fn authorize(&self, ctx: &mut RequestContext) -> Result<(), Denial> {
+        let RouteAuthorizer::Evaluated(ref authorizer) = self.route.authorizer else {
+            return Ok(());
+        };
+        if self.api.enforcement.authorization == AuthorizationMode::Skip {
+            return Ok(());
+        }
+        let request = AuthRequest {
+            aws: &self.api.aws,
+            ctx,
+        };
+        ctx.authorizer = authorizer.authorize(&request).await?;
+        Ok(())
     }
 
     async fn integrate(&self, ctx: &mut RequestContext) -> Result<Response, GatewayError> {

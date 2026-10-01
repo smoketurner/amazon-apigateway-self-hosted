@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Lambda authorizers are evaluated. REST `TOKEN` (with `identityValidationExpression`) and `REQUEST`
+  authorizers and HTTP API `REQUEST` authorizers (payload 1.0 and 2.0, simple responses) are invoked
+  with the request's identity sources, their results are cached by identity source and TTL, and the
+  returned IAM policy is evaluated against each method ARN, including `*` and `?` wildcards. A
+  missing identity source answers `401`, a denying policy `403`, a failing or invalid authorizer
+  `500`; `principalId` and `context` reach `$context.authorizer` and Lambda events. Cognito and JWT
+  authorizers still answer `401`.
 - `crates/apigw-regex`: a `java.util.regex` translator for `fancy-regex` covering whole-string
   `matches`, ASCII `\w \d \s \b`, Java line terminators for `.` `^` `$`, flags, `\Q..\E`, POSIX
   classes, replacement strings with greedy `$n` and `${name}`, and `split` limits. Constructs
@@ -31,6 +38,33 @@ All notable changes to this project are documented here. The format follows
 - Istio `X-Forwarded-Client-Cert` is parsed (Subject, Hash, URI/DNS SANs, `Cert`) from trusted
   proxies and kept with the client identity for upcoming mTLS support.
 
+- Access logs: the stage's `$context` format (CLF, JSON, XML, CSV, or any template) is
+  rendered for every request, including ones no route matched, and written in batches to the
+  stage's CloudWatch Logs log group (one log stream per process) or Firehose delivery stream,
+  with standard output as the fallback (`--access-logs`).
+- Metrics: `Count`, `4XXError`, `5XXError`, `Latency`, and `IntegrationLatency` (HTTP APIs:
+  `4xx`, `5xx`) are aggregated per minute and published as CloudWatch embedded metric format
+  events to `--metrics-log-group` under `--metrics-namespace` (default `ApiGatewaySelfHosted`),
+  with `ApiName`/`Stage` (HTTP: `ApiId`/`Stage`) dimensions and per-route `Method`/`Resource`
+  dimensions when the stage enables detailed metrics.
+- Execution logs: REST stages with `loggingLevel` `ERROR` or `INFO` (and `dataTraceEnabled`)
+  write a request trace to `API-Gateway-Execution-Logs_{apiId}/{stage}` (`--execution-logs`).
+- X-Ray: REST stages with tracing enabled send one segment per sampled request with
+  `PutTraceSegments`. A caller's `X-Amzn-Trace-Id` (or W3C `traceparent`) is continued and its
+  sampling decision honored; otherwise X-Ray's default rule applies (the first request each
+  second, then `--xray-sampling-percent`, default 5). The trace is passed on per request in
+  `X-Amzn-Trace-Id` (HTTP backends and Lambda) and `traceparent` (HTTP backends), with this
+  gateway's segment as the parent, and `$context.xrayTraceId` is available to access logs.
+  `--tracing off` disables all of it.
+- Canary releases: a REST stage with canary settings serves a second release to
+  `percentTraffic` percent of requests, chosen at random per request, with the canary's stage
+  variable overrides applied (local `--stage-variable` overrides still win). `$context.isCanaryRequest`
+  is `true` or `false` on stages with a canary. Canary requests are also written to the
+  `{log group}/Canary` access and execution log groups and counted under `Stage` `{stage}/Canary`.
+  `--canary-export-stage` names a stage holding the canary deployment, whose export builds the
+  canary's routes; `/routes` reports the canary release.
+- Log delivery uses bounded queues that drop (and count) events instead of slowing requests,
+  and flushes everything on shutdown.
 - REST gateway responses: every error the gateway generates (missing authentication token,
   invalid API key, unauthorized, integration failure and timeout, 413, and the rest) uses API
   Gateway's default status and message and applies the API's customizations from
@@ -39,8 +73,42 @@ All notable changes to this project are documented here. The format follows
   `$context`, `$stageVariables`, and `$method.request.*` substitution (no VTL), with
   `DEFAULT_4XX`/`DEFAULT_5XX` fallback. Error responses carry `x-amzn-ErrorType` and
   `x-amz-apigw-id`. The 413 response is not customizable. HTTP APIs keep fixed messages.
+- Lambda proxy events match API Gateway's `requestContext`: `accountId` (from the function
+  ARN), `extendedRequestId`, `resourceId`, the full `identity` block, and `protocol`
+  (REST reports `HTTP/1.1` as API Gateway documents; HTTP APIs report the client's version).
+  REST payload 1.0 keeps the client's header name case (recovered from the HTTP/1 request
+  head, because hyper keeps it private); HTTP/2 clients and HTTP APIs get lower case.
+- Lambda integrations reject requests and buffered responses over Lambda's 6 MB limit with
+  `502`, merge `headers` and `multiValueHeaders` as API Gateway does, tolerate `null` response
+  fields, and drop `Content-Length`/hop-by-hop headers set by the function.
+- `--lambda-endpoint` accepts `name:alias`, a function ARN with or without its qualifier, or the
+  bare name, most specific first.
+- REST response streaming: `responseTransferMode: STREAM` with Lambda
+  (`InvokeWithResponseStream`, `/response-streaming-invocations` URIs) and `HTTP_PROXY`, with
+  the 15 minute limit, a 5 minute idle limit, and `$context.integration.responseTransferMode`
+  / `timeToAllHeaders`. Output that doesn't follow the streaming format answers `500`.
+
+- Stage throttling: REST `methodSettings` (including the `*/*` default) and HTTP API route
+  settings (including the default route settings) limit each method or route with a token
+  bucket and answer `429` (`THROTTLED` gateway response for REST, `{"message":"Too Many
+  Requests"}` for HTTP). `--replicas` (`APIGW_REPLICAS`) divides the limits per replica.
+- A `StateBackend` (in-memory, bounded, with LRU eviction) holding token buckets, calendar-aligned
+  day/week/month quota counters, and a TTL cache, for usage plans and response caching to use.
+
+- HTTP API CORS: preflight requests are answered with `204` from the configured CORS rules
+  without calling the integration (after the route's own protections), and allowed origins get
+  the CORS response headers; the backend's own CORS headers are dropped.
+- HTTP API parameter mapping for `HTTP_PROXY` integrations: `append:`, `overwrite:`, and
+  `remove:` for headers, query strings, and the path, and per-status response mappings
+  including `overwrite:statuscode`, with `$request.*`, `$response.*`, `$context.*`,
+  `$stageVariables.*`, and static sources.
 
 ### Changed
+
+- HTTP API route selection takes the method into account: a route that matches the path but
+  not the method is skipped for a less specific route that serves it, as in API Gateway's
+  documented priorities. Previously such requests fell through to `$default`.
+- HTTP APIs never run request validation, even if a hand-written definition names a validator.
 
 - An `HTTP_PROXY` backend that cannot be reached now answers REST clients 504 `Network error
   communicating with endpoint` (`INTEGRATION_FAILURE`) instead of 502; an invalid integration URI
@@ -48,6 +116,8 @@ All notable changes to this project are documented here. The format follows
 - `$context.extendedRequestId` is a 12-character token, the same value as the `x-amz-apigw-id`
   response header.
 - `requestParameters` mappings accept `context.*` and `stageVariables.*` sources.
+- Access logs, execution logs, detailed metrics, tracing, and canary settings are no longer
+  listed as unenforced on `/routes`.
 - `X-Forwarded-For` sent by a client that is not a trusted proxy is no longer forwarded to
   `HTTP_PROXY` integrations: it is replaced by the client's address. `X-Forwarded-Client-Cert` is
   removed from such requests. Set `--trusted-proxies` to keep forwarding a proxy's headers.
@@ -64,7 +134,9 @@ All notable changes to this project are documented here. The format follows
 - `crates/apigw-parity`, a dev tool with `record` (capture the reference APIs' behavior as
   normalized, redacted fixtures) and `replay` (serve the recorded export with `apigw` and diff
   its answers). Seed cases and hand-written fixtures live in `parity/`; CI runs `replay`, and
-  `.github/workflows/parity.yml` re-records nightly and opens an issue on drift.
+  `.github/workflows/parity.yml` re-records nightly and opens an issue on drift. Replay serves
+  `AWS_PROXY` routes through an in-process Lambda endpoint (`--lambda-endpoint`), so Lambda event
+  shapes for payload formats 1.0 and 2.0 are covered.
 
 ### Fixed
 

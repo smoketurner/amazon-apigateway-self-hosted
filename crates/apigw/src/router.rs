@@ -15,12 +15,16 @@ use tokio::sync::watch;
 use tower::ServiceExt as _;
 use uuid::Uuid;
 
+use crate::authz::Authorizers;
 use crate::aws::{AwsClients, RoleArn, RoleStatus};
+use crate::canary::{CanaryRelease, CanarySummary};
 use crate::gateway::{ApiContext, Enforcement, RequestId};
+use crate::http_routes::{HttpRoutes, PathPattern};
 use crate::integration::Integration;
 use crate::model::{ApiKind, ApiModel, Feature, MethodMatch, Protections, RouteKey, RoutePath};
 use crate::pipeline::Pipeline;
 use crate::route::Route;
+use crate::throttle::ThrottleSettings;
 
 /// A stage prefix such as `/prod` that every route is served under, as on an
 /// `execute-api` endpoint. Empty serves routes at the root, as on a custom domain.
@@ -32,6 +36,28 @@ pub(crate) struct BasePath(Option<String>);
     "base path {0:?} must start with '/', must not end with '/', and must not contain '{{' or '}}'"
 )]
 pub(crate) struct InvalidBasePath(String);
+
+impl BasePath {
+    /// Serves `router` under this prefix; requests outside it are answered as
+    /// unrouted.
+    fn mount(&self, router: Router, ctx: &Arc<ApiContext>) -> Router {
+        let Some(ref prefix) = self.0 else {
+            return router;
+        };
+        let ctx = Arc::clone(ctx);
+        Router::new()
+            .without_v07_checks()
+            .nest(prefix, router)
+            .fallback(move |mut request: Request| {
+                let ctx = Arc::clone(&ctx);
+                async move {
+                    let pending = ctx.observer.begin(&ctx, &mut request, None);
+                    let response = ctx.reject_unrouted(request);
+                    ctx.observer.finish(pending, response)
+                }
+            })
+    }
+}
 
 impl std::str::FromStr for BasePath {
     type Err = InvalidBasePath;
@@ -50,8 +76,21 @@ impl std::str::FromStr for BasePath {
 /// One loaded API definition, as served and as reported on the admin listener.
 pub(crate) struct Loaded {
     pub(crate) router: Router,
+    /// The canary release of the stage, when it has one that receives traffic.
+    pub(crate) canary: Option<CanaryRelease>,
     pub(crate) kind: ApiKind,
     pub(crate) summary: LoadSummary,
+}
+
+impl Loaded {
+    /// The router for one request: the canary's for the share of requests the
+    /// stage's canary settings send there, the stage's otherwise.
+    fn router_for_request(&self) -> &Router {
+        match self.canary {
+            Some(ref canary) if canary.share.picks_canary() => &canary.router,
+            Some(_) | None => &self.router,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,6 +102,9 @@ pub(crate) struct LoadSummary {
     /// API- and stage-level features imported but not enforced yet.
     pub(crate) unenforced: Vec<Feature>,
     pub(crate) routes: Vec<RouteSummary>,
+    /// The canary release, when the stage has one that receives traffic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) canary: Option<CanarySummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -83,7 +125,7 @@ impl RouteSummary {
     fn new(route: &Route, enforcement: Enforcement) -> Self {
         let mut problems: Vec<String> = enforcement
             .refusals(route)
-            .map(|protection| protection.refusal_reason().to_owned())
+            .map(|protection| protection.refusal_reason(route))
             .collect();
         let target = match route.integration {
             Integration::HttpProxy(ref proxy) => Some(proxy.uri.clone()),
@@ -128,12 +170,41 @@ impl PathRoutes {
             .or(self.default.as_deref())
     }
 
-    async fn handle(&self, request: Request) -> Response {
-        match self.select(request.method()) {
+    async fn handle(&self, mut request: Request) -> Response {
+        let route = self.select(request.method());
+        let pending = self.ctx.observer.begin(&self.ctx, &mut request, route);
+        let response = match route {
             // The pipeline future holds whole SDK calls; box it once here.
             Some(route) => Box::pin(Pipeline::new(&self.ctx, route).run(request)).await,
             None => self.ctx.reject_unrouted(request),
-        }
+        };
+        self.ctx.observer.finish(pending, response)
+    }
+}
+
+/// Serves an HTTP API: route selection is by path and method together, so
+/// the router has no per-path entries ([`HttpRoutes`]).
+struct HttpHandler {
+    ctx: Arc<ApiContext>,
+    routes: HttpRoutes,
+}
+
+impl HttpHandler {
+    async fn handle(&self, mut request: Request) -> Response {
+        let selection = self.routes.select(request.uri().path(), request.method());
+        let pending =
+            self.ctx
+                .observer
+                .begin(&self.ctx, &mut request, selection.as_ref().map(|s| s.route));
+        let response = match selection {
+            Some(selection) => {
+                let pipeline =
+                    Pipeline::new(&self.ctx, selection.route).with_path_params(selection.params);
+                Box::pin(pipeline.run(request)).await
+            }
+            None => self.ctx.reject_unrouted(request),
+        };
+        self.ctx.observer.finish(pending, response)
     }
 }
 
@@ -166,10 +237,25 @@ pub(crate) fn build(
     ctx: &Arc<ApiContext>,
     base: &BasePath,
 ) -> (Router, Vec<RouteSummary>) {
+    let authorizers = Authorizers::compile(model, &ctx.stage_variables);
+    let throttling = ThrottleSettings::new(
+        &ctx.api_id,
+        ctx.stage.as_deref(),
+        model.stage.clone(),
+        ctx.replicas,
+    );
     let routes: Vec<Route> = model
         .operations
         .iter()
-        .map(|operation| Route::compile(operation, model.kind, &ctx.stage_variables))
+        .map(|operation| {
+            Route::compile(
+                operation,
+                model.kind,
+                &ctx.stage_variables,
+                &authorizers,
+                &throttling,
+            )
+        })
         .collect();
     let mut summaries = Vec::with_capacity(routes.len());
     let mut default = None;
@@ -197,6 +283,7 @@ pub(crate) fn build(
     // checks for 0.7-style syntax would reject with a panic.
     let mut matcher = matchit::Router::new();
     let mut router = Router::new().without_v07_checks();
+    let mut http_routes = HttpRoutes::default();
     for (path, methods) in by_path {
         if let Err(err) = matcher.insert(path.as_str(), ()) {
             tracing::error!(path, %err, "route conflicts with another route; skipping it");
@@ -204,6 +291,14 @@ pub(crate) fn build(
                 if methods.values().any(|r| r.key == summary.route_key) {
                     summary.problems.push(format!("not served: {err}"));
                 }
+            }
+            continue;
+        }
+        if model.kind == ApiKind::Http {
+            if let Some(pattern) = PathPattern::parse(&path) {
+                http_routes.insert(pattern, methods);
+            } else {
+                tracing::error!(path, "route path is not a valid pattern; skipping it");
             }
             continue;
         }
@@ -221,29 +316,30 @@ pub(crate) fn build(
         );
     }
 
-    let fallback = Arc::new(PathRoutes {
-        ctx: Arc::clone(ctx),
-        methods: BTreeMap::new(),
-        default,
-    });
-    let router = router.fallback(move |request: Request| {
-        let fallback = Arc::clone(&fallback);
-        async move { fallback.handle(request).await }
-    });
-    let router = match base.0 {
-        Some(ref prefix) => {
-            let ctx = Arc::clone(ctx);
-            Router::new()
-                .without_v07_checks()
-                .nest(prefix, router)
-                .fallback(move |request: Request| {
-                    let ctx = Arc::clone(&ctx);
-                    async move { ctx.reject_unrouted(request) }
-                })
+    let router = if model.kind == ApiKind::Http {
+        if let Some(default) = default {
+            http_routes.set_default(default);
         }
-        None => router,
+        let handler = Arc::new(HttpHandler {
+            ctx: Arc::clone(ctx),
+            routes: http_routes,
+        });
+        router.fallback(move |request: Request| {
+            let handler = Arc::clone(&handler);
+            async move { handler.handle(request).await }
+        })
+    } else {
+        let fallback = Arc::new(PathRoutes {
+            ctx: Arc::clone(ctx),
+            methods: BTreeMap::new(),
+            default,
+        });
+        router.fallback(move |request: Request| {
+            let fallback = Arc::clone(&fallback);
+            async move { fallback.handle(request).await }
+        })
     };
-    (router, summaries)
+    (base.mount(router, ctx), summaries)
 }
 
 /// Serves every request through whichever [`Loaded`] router is current, so a
@@ -258,7 +354,12 @@ pub(crate) fn dispatcher(current: watch::Receiver<Arc<Loaded>>) -> Router {
             request.extensions_mut().insert(RequestId(request_id));
             let method = request.method().clone();
             let path = request.uri().path().to_owned();
-            let mut response = loaded.router.clone().oneshot(request).await.into_response();
+            let mut response = loaded
+                .router_for_request()
+                .clone()
+                .oneshot(request)
+                .await
+                .into_response();
             if let Ok(value) = HeaderValue::try_from(request_id.to_string()) {
                 response
                     .headers_mut()
@@ -312,9 +413,15 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::aws::{CredentialsMode, LambdaEndpoints};
+    use crate::cors::Cors;
     use crate::gateway::{AuthorizationMode, Unsupported};
     use crate::gateway_response::GatewayResponses;
     use crate::model::{IntegrationOverrides, Protection, StageSettings};
+    use crate::model::{MethodSettings, SettingsScope};
+    use crate::observability::StageObserver;
+    use crate::state::{InMemory, InMemoryLimits, StateBackend};
+    use std::num::NonZeroU32;
 
     const STRICT: Enforcement = Enforcement {
         authorization: AuthorizationMode::Enforce,
@@ -322,14 +429,20 @@ mod tests {
         request_validation: Unsupported::Reject,
     };
 
+    fn test_state() -> Arc<StateBackend> {
+        Arc::new(StateBackend::InMemory(InMemory::new(
+            InMemoryLimits::default(),
+        )))
+    }
+
     fn aws() -> Arc<AwsClients> {
         let config = aws_config::SdkConfig::builder()
             .behavior_version(aws_config::BehaviorVersion::latest())
             .build();
         Arc::new(AwsClients::new(
             config,
-            crate::aws::CredentialsMode::Assume,
-            crate::aws::LambdaEndpoints::default(),
+            CredentialsMode::Assume,
+            LambdaEndpoints::default(),
             reqwest::Client::new(),
         ))
     }
@@ -338,6 +451,7 @@ mod tests {
         kind: ApiKind,
         enforcement: Enforcement,
         responses: GatewayResponses,
+        cors: Option<Cors>,
     ) -> Arc<ApiContext> {
         Arc::new(ApiContext {
             kind,
@@ -345,9 +459,14 @@ mod tests {
             stage: None,
             stage_variables: Arc::default(),
             responses,
+            cors,
+            state: test_state(),
+            replicas: NonZeroU32::MIN,
             enforcement,
             http: reqwest::Client::new(),
             aws: aws(),
+            observer: StageObserver::disabled(),
+            release: None,
         })
     }
 
@@ -381,17 +500,22 @@ mod tests {
         enforcement: Enforcement,
         base: &str,
     ) -> (Router, Vec<RouteSummary>) {
-        let model = ApiModel::import(
-            doc,
-            kind,
-            StageSettings::default(),
-            &IntegrationOverrides::default(),
-        )
-        .unwrap();
+        router_for_stage(doc, kind, enforcement, StageSettings::default(), base)
+    }
+
+    fn router_for_stage(
+        doc: &Value,
+        kind: ApiKind,
+        enforcement: Enforcement,
+        stage: StageSettings,
+        base: &str,
+    ) -> (Router, Vec<RouteSummary>) {
+        let model = ApiModel::import(doc, kind, stage, &IntegrationOverrides::default()).unwrap();
         let responses = GatewayResponses::compile(kind, &model.gateway_responses);
+        let cors = model.settings.cors.as_ref().map(Cors::compile);
         build(
             &model,
-            &ctx(kind, enforcement, responses),
+            &ctx(kind, enforcement, responses, cors),
             &base.parse().unwrap(),
         )
     }
@@ -418,6 +542,293 @@ mod tests {
                 "/key-and-validated": {"get": op(json!({"security": [{"api_key": []}], "x-amazon-apigateway-request-validator": "all"}))}
             }
         })
+    }
+
+    fn throttled_stage(entries: &[(SettingsScope, f64, i32)]) -> StageSettings {
+        let mut stage = StageSettings::default();
+        for (scope, rate, burst) in entries {
+            stage.method_settings.insert(
+                scope.clone(),
+                MethodSettings {
+                    throttling_rate_limit: Some(*rate),
+                    throttling_burst_limit: Some(*burst),
+                    ..MethodSettings::default()
+                },
+            );
+        }
+        stage
+    }
+
+    fn route_scope(path: &str, method: &str) -> SettingsScope {
+        SettingsScope::Method {
+            path: path.to_owned(),
+            method: method.to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn rest_method_throttling_answers_429_after_the_burst() {
+        let doc = json!({"paths": {
+            "/a": {"get": {"x-amazon-apigateway-integration": mock(200)}},
+            "/b": {"get": {"x-amazon-apigateway-integration": mock(200)}}
+        }});
+        let stage = throttled_stage(&[
+            (SettingsScope::All, 0.0, 2),
+            (route_scope("/b", "GET"), 0.0, 0),
+        ]);
+        let (rest, summaries) = router_for_stage(&doc, ApiKind::Rest, STRICT, stage, "");
+        assert!(summaries.iter().all(|s| s.problems.is_empty()));
+        for _ in 0..2 {
+            assert_eq!(call(&rest, Method::GET, "/a").await.0, StatusCode::OK);
+        }
+        let response = call_full(&rest, Method::GET, "/a").await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response.headers()["x-amzn-errortype"],
+            "ThrottlingException"
+        );
+        assert_eq!(response.body, r#"{"message":"Too Many Requests"}"#);
+        assert_eq!(
+            call(&rest, Method::GET, "/b").await.0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[tokio::test]
+    async fn http_route_throttling_answers_429_and_ignores_customization() {
+        let doc = json!({"paths": {
+            "/a": {"get": {"x-amazon-apigateway-integration": mock(200)}},
+            "/$default": {"x-amazon-apigateway-any-method": {"x-amazon-apigateway-integration": mock(200)}}
+        }});
+        let stage = throttled_stage(&[
+            (SettingsScope::All, 0.0, 100),
+            (route_scope("/a", "GET"), 0.0, 1),
+            (route_scope("$default", "*"), 0.0, 0),
+        ]);
+        let (http, _) = router_for_stage(&doc, ApiKind::Http, STRICT, stage, "");
+        assert_eq!(call(&http, Method::GET, "/a").await.0, StatusCode::OK);
+        assert_eq!(
+            call(&http, Method::GET, "/a").await,
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                r#"{"message":"Too Many Requests"}"#.to_owned()
+            )
+        );
+        assert_eq!(
+            call(&http, Method::GET, "/other").await.0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[tokio::test]
+    async fn throttled_responses_use_the_customized_gateway_response() {
+        let doc = json!({
+            "x-amazon-apigateway-gateway-responses": {"THROTTLED": {
+                "statusCode": "503",
+                "responseTemplates": {"application/json": "{\"retry\": true}"}
+            }},
+            "paths": {"/a": {"get": {"x-amazon-apigateway-integration": mock(200)}}}
+        });
+        let stage = throttled_stage(&[(SettingsScope::All, 0.0, 0)]);
+        let (rest, _) = router_for_stage(&doc, ApiKind::Rest, STRICT, stage, "");
+        assert_eq!(
+            call(&rest, Method::GET, "/a").await,
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                r#"{"retry": true}"#.to_owned()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn throttling_runs_before_the_body_is_read_and_after_refusals() {
+        let doc = json!({"paths": {"/key": {"get": {
+            "x-amazon-apigateway-integration": mock(200),
+            "security": [{"api_key": []}]
+        }}}, "components": {"securitySchemes": {
+            "api_key": {"type": "apiKey", "name": "x-api-key", "in": "header"}
+        }}});
+        let stage = throttled_stage(&[(SettingsScope::All, 0.0, 0)]);
+        let (rest, _) = router_for_stage(&doc, ApiKind::Rest, STRICT, stage, "");
+        assert_eq!(
+            call(&rest, Method::GET, "/key").await.0,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    fn cors_doc() -> Value {
+        json!({
+            "x-amazon-apigateway-cors": {
+                "allowOrigins": ["https://app.example"],
+                "allowMethods": ["GET", "POST"],
+                "allowHeaders": ["authorization"],
+                "exposeHeaders": ["x-id"],
+                "maxAge": 300
+            },
+            "components": {"securitySchemes": {
+                "sigv4": {"type": "apiKey", "name": "Authorization", "in": "header", "x-amazon-apigateway-authtype": "awsSigv4"}
+            }},
+            "paths": {
+                "/pets": {"get": {"x-amazon-apigateway-integration": mock(200)}},
+                "/iam": {"options": {"security": [{"sigv4": []}], "x-amazon-apigateway-integration": mock(200)}},
+                "/opts": {"options": {"x-amazon-apigateway-integration": mock(418)}}
+            }
+        })
+    }
+
+    async fn call_with(
+        router: &Router,
+        method: Method,
+        uri: &str,
+        headers: &[(&str, &str)],
+    ) -> Reply {
+        let mut builder = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let response = router
+            .clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let (parts, body) = response.into_parts();
+        let body = axum::body::to_bytes(body, 1 << 20).await.unwrap();
+        Reply {
+            status: parts.status,
+            headers: parts.headers,
+            body: String::from_utf8(body.to_vec()).unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn http_api_cors_preflight_is_answered_without_the_integration() {
+        let (http, _) = router_with(&cors_doc(), ApiKind::Http, STRICT, "");
+        let preflight = [
+            ("origin", "https://app.example"),
+            ("access-control-request-method", "GET"),
+        ];
+        // A route with its own OPTIONS integration still gets the gateway's answer.
+        for path in ["/pets", "/opts", "/nowhere"] {
+            let reply = call_with(&http, Method::OPTIONS, path, &preflight).await;
+            assert_eq!(reply.status(), StatusCode::NO_CONTENT, "{path}");
+            assert_eq!(
+                reply.headers()["access-control-allow-origin"],
+                "https://app.example"
+            );
+            assert_eq!(reply.headers()["access-control-allow-methods"], "GET, POST");
+            assert_eq!(reply.headers()["access-control-max-age"], "300");
+        }
+        let blocked = call_with(
+            &http,
+            Method::OPTIONS,
+            "/pets",
+            &[
+                ("origin", "https://evil.example"),
+                ("access-control-request-method", "GET"),
+            ],
+        )
+        .await;
+        assert_eq!(blocked.status(), StatusCode::NO_CONTENT);
+        assert!(
+            blocked
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none()
+        );
+        // Without the preflight headers an OPTIONS request is an ordinary request.
+        let plain = call_with(
+            &http,
+            Method::OPTIONS,
+            "/opts",
+            &[("origin", "https://app.example")],
+        )
+        .await;
+        assert_eq!(plain.status(), StatusCode::IM_A_TEAPOT);
+    }
+
+    #[tokio::test]
+    async fn http_api_cors_preflight_follows_route_protections() {
+        let (http, _) = router_with(&cors_doc(), ApiKind::Http, STRICT, "");
+        let reply = call_with(
+            &http,
+            Method::OPTIONS,
+            "/iam",
+            &[
+                ("origin", "https://app.example"),
+                ("access-control-request-method", "GET"),
+            ],
+        )
+        .await;
+        assert_eq!(reply.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn http_api_cors_headers_are_added_to_responses() {
+        let (http, _) = router_with(&cors_doc(), ApiKind::Http, STRICT, "");
+        let reply = call_with(
+            &http,
+            Method::GET,
+            "/pets",
+            &[("origin", "https://app.example")],
+        )
+        .await;
+        assert_eq!(reply.status(), StatusCode::OK);
+        assert_eq!(
+            reply.headers()["access-control-allow-origin"],
+            "https://app.example"
+        );
+        assert_eq!(reply.headers()["access-control-expose-headers"], "x-id");
+        let other = call_with(
+            &http,
+            Method::GET,
+            "/pets",
+            &[("origin", "https://evil.example")],
+        )
+        .await;
+        assert!(other.headers().get("access-control-allow-origin").is_none());
+        let missing = call_with(
+            &http,
+            Method::GET,
+            "/nope",
+            &[("origin", "https://app.example")],
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            missing.headers()["access-control-allow-origin"],
+            "https://app.example"
+        );
+        let (no_cors, _) = router_with(&sample(), ApiKind::Http, STRICT, "");
+        let reply = call_with(
+            &no_cors,
+            Method::GET,
+            "/pets",
+            &[("origin", "https://app.example")],
+        )
+        .await;
+        assert!(reply.headers().get("access-control-allow-origin").is_none());
+    }
+
+    #[tokio::test]
+    async fn http_routes_fall_back_to_a_less_specific_route_that_serves_the_method() {
+        let doc = json!({"paths": {
+            "/pets/dog/1": {"get": {"x-amazon-apigateway-integration": mock(201)}},
+            "/pets/dog/{id}": {"get": {"x-amazon-apigateway-integration": mock(203)}},
+            "/pets/{proxy+}": {"get": {"x-amazon-apigateway-integration": mock(204)}},
+            "/{proxy+}": {"x-amazon-apigateway-any-method": {"x-amazon-apigateway-integration": mock(202)}},
+            "/$default": {"x-amazon-apigateway-any-method": {"x-amazon-apigateway-integration": mock(418)}}
+        }});
+        let (http, _) = router_with(&doc, ApiKind::Http, STRICT, "");
+        let status = |method, path| {
+            let http = http.clone();
+            async move { call(&http, method, path).await.0.as_u16() }
+        };
+        assert_eq!(status(Method::GET, "/pets/dog/1").await, 201);
+        assert_eq!(status(Method::GET, "/pets/dog/2").await, 203);
+        assert_eq!(status(Method::GET, "/pets/cat/1").await, 204);
+        assert_eq!(status(Method::POST, "/pets/dog/1").await, 202);
+        assert_eq!(status(Method::POST, "/test/5").await, 202);
+        assert_eq!(status(Method::GET, "/").await, 418);
     }
 
     #[tokio::test]
@@ -562,6 +973,38 @@ mod tests {
         };
         let (rest, _) = router_with(&doc, ApiKind::Rest, ignore, "");
         assert_eq!(call(&rest, Method::GET, "/open").await.0, StatusCode::OK);
+    }
+
+    struct Reply {
+        status: StatusCode,
+        headers: axum::http::HeaderMap,
+        body: String,
+    }
+
+    impl Reply {
+        fn status(&self) -> StatusCode {
+            self.status
+        }
+
+        fn headers(&self) -> &axum::http::HeaderMap {
+            &self.headers
+        }
+    }
+
+    async fn call_full(router: &Router, method: Method, uri: &str) -> Reply {
+        let request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        let (parts, body) = response.into_parts();
+        let body = axum::body::to_bytes(body, 1 << 20).await.unwrap();
+        Reply {
+            status: parts.status,
+            headers: parts.headers,
+            body: String::from_utf8(body.to_vec()).unwrap(),
+        }
     }
 
     async fn call(router: &Router, method: Method, uri: &str) -> (StatusCode, String) {
@@ -752,7 +1195,9 @@ mod tests {
                     loaded_at: String::new(),
                     unenforced: Vec::new(),
                     routes: summary,
+                    canary: None,
                 },
+                canary: None,
             })
         };
         let (tx, rx) = watch::channel(loaded(first, summary));
@@ -781,7 +1226,7 @@ mod tests {
 
     #[tokio::test]
     async fn lambda_routes_invoke_through_endpoint_overrides() {
-        let app = axum::Router::new().route(
+        let app = Router::new().route(
             "/invoke",
             axum::routing::post(|headers: axum::http::HeaderMap, body: axum::body::Bytes| async move {
                 let event: Value = serde_json::from_slice(&body).unwrap();
@@ -804,8 +1249,8 @@ mod tests {
         let endpoint = reqwest::Url::parse(&format!("http://{addr}/invoke")).unwrap();
         let aws = Arc::new(AwsClients::new(
             config,
-            crate::aws::CredentialsMode::Assume,
-            crate::aws::LambdaEndpoints::from_iter([("items".to_owned(), endpoint)]),
+            CredentialsMode::Assume,
+            LambdaEndpoints::from_iter([("items".to_owned(), endpoint)]),
             reqwest::Client::new(),
         ));
         let doc = json!({"paths": {"/items/{id}": {"put": {"x-amazon-apigateway-integration": {
@@ -825,9 +1270,14 @@ mod tests {
             stage: Some("prod".to_owned()),
             stage_variables: Arc::default(),
             responses: GatewayResponses::default(),
+            cors: None,
+            state: test_state(),
+            replicas: NonZeroU32::MIN,
             enforcement: STRICT,
             http: reqwest::Client::new(),
             aws,
+            observer: StageObserver::disabled(),
+            release: None,
         });
         let (router, _) = build(&model, &api, &BasePath::default());
         let request = Request::builder()
@@ -842,7 +1292,7 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), 1024)
             .await
             .unwrap();
-        assert_eq!(&body[..], b"PUT 42");
+        assert_eq!(&*body, b"PUT 42");
     }
 
     #[test]

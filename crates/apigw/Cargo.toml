@@ -11,11 +11,15 @@ publish                = false
 workspace = true
 
 [dependencies]
+apigw-regex          = { workspace = true }
 anyhow               = { workspace = true, features = ["std"] }
 aws-config           = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio", "credentials-process", "sso"] }
 aws-sdk-apigateway   = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 aws-sdk-apigatewayv2 = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
+aws-sdk-cloudwatchlogs = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
+aws-sdk-firehose     = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 aws-sdk-lambda       = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
+aws-sdk-xray         = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 axum                 = { workspace = true, features = ["http1", "http2", "tokio", "json"] }
 base64               = { workspace = true, features = ["std"] }
 clap                 = { workspace = true, features = ["std", "derive", "env", "help", "usage", "error-context"] }
@@ -30,7 +34,7 @@ rustls               = { workspace = true, features = ["aws-lc-rs", "std", "tls1
 serde                = { workspace = true, features = ["std", "derive"] }
 serde_json           = { workspace = true, features = ["std"] }
 thiserror            = { workspace = true, features = ["std"] }
-tokio                = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "fs"] }
+tokio                = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "fs", "io-std", "io-util"] }
 tokio-rustls         = { workspace = true, features = ["aws-lc-rs", "tls12"] }
 tokio-util           = { workspace = true }
 tower                = { workspace = true, features = ["util"] }
@@ -39,5 +43,6 @@ tracing-subscriber   = { workspace = true, features = ["std", "fmt", "env-filter
 uuid                 = { workspace = true, features = ["std", "v7"] }
 
 [dev-dependencies]
+tokio                = { workspace = true, features = ["test-util"] }
 rcgen                = { workspace = true, features = ["aws_lc_rs", "pem"] }
 proptest             = { workspace = true, features = ["std"] }

@@ -8,6 +8,32 @@ cases:
       body: ignore
       echo: {}
 
+  - name: http-lambda-v2
+    api: http
+    path: /lambda-v2/x
+    query: {k: v}
+    compare:
+      body: ignore
+      echo: {fields: [method, query, resource, path_parameters]}
+
+  # API Gateway puts the stage name in rawPath; apigw reports the path without it
+  - name: http-lambda-v2-raw-path
+    api: http
+    path: /lambda-v2/x
+    query: {k: v}
+    known_gap: "#13"
+    compare:
+      body: ignore
+      echo: {fields: [path]}
+
+  - name: http-lambda-v1
+    api: http
+    path: /lambda-v1/x
+    query: {k: v}
+    compare:
+      body: ignore
+      echo: {fields: [method, query, resource, path_parameters]}
+
   - name: http-jwt-authorizer-missing-token
     api: http
     path: /authz/jwt
@@ -25,7 +51,6 @@ cases:
     api: http
     path: /mapped/42
     query: {q: "1"}
-    known_gap: "#19"
     compare:
       body: ignore
       echo: {headers: [x-appended]}

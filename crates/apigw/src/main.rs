@@ -2,20 +2,31 @@
 //! definition and serves its routes from a single binary.
 
 mod app;
+mod authz;
 mod aws;
+mod canary;
 mod config;
+mod cors;
+mod entropy;
 mod gateway;
 mod gateway_response;
+mod header_case;
+mod http_routes;
 mod identity;
 mod integration;
 mod lambda;
+mod lambda_response;
 mod listener;
+mod mapping;
 mod model;
+mod observability;
 mod pipeline;
 mod proxy;
 mod route;
 mod router;
 mod source;
+mod state;
+mod throttle;
 
 use clap::Parser as _;
 use tracing_subscriber::EnvFilter;

@@ -130,6 +130,8 @@ pub(crate) enum EchoField {
     Path,
     Query,
     Body,
+    Resource,
+    PathParameters,
 }
 
 /// Which parts of what the echo backend received are compared: the listed
@@ -225,7 +227,7 @@ impl EnvSource for ProcessEnv {
 
 impl EnvSource for BTreeMap<String, String> {
     fn get(&self, name: &str) -> Option<String> {
-        BTreeMap::get(self, name).cloned()
+        Self::get(self, name).cloned()
     }
 }
 

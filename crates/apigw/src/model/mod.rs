@@ -17,11 +17,15 @@ use axum::http::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub(crate) use stage::{DeploymentStamp, StageSettings};
+#[cfg(test)]
+pub(crate) use stage::{AccessLogSettings, CanarySettings, MethodSettings, SettingsScope};
+pub(crate) use stage::{DeploymentStamp, ExecutionLogging, LoggingLevel, StageSettings};
 
 /// Which API Gateway product the definition came from. The two differ in Lambda
 /// payload defaults, error bodies, and response headers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, clap::ValueEnum,
+)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum ApiKind {
     /// API Gateway REST API (v1).
@@ -331,18 +335,13 @@ pub(crate) struct IntegrationSpec {
 }
 
 impl IntegrationSpec {
-    fn unenforced(&self, kind: ApiKind) -> Vec<Feature> {
+    fn unenforced(&self) -> Vec<Feature> {
         let mut features = Vec::new();
         if self.content_handling.is_some() {
             features.push(Feature::ContentHandling);
         }
         if self.tls_config.is_some() {
             features.push(Feature::IntegrationTlsConfig);
-        }
-        if !self.response_parameters.is_empty()
-            || (kind == ApiKind::Http && self.request_parameters.keys().any(|k| k.contains(':')))
-        {
-            features.push(Feature::ParameterMapping);
         }
         if !self.cache_key_parameters.is_empty() {
             features.push(Feature::ResponseCaching);
@@ -481,6 +480,8 @@ pub(crate) struct CorsConfig {
 /// API-wide settings carried in the export.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub(crate) struct ApiSettings {
+    /// The API's name (`info.title` of the export).
+    pub(crate) title: Option<String>,
     pub(crate) binary_media_types: Vec<String>,
     pub(crate) minimum_compression_size: Option<u64>,
     pub(crate) api_key_source: Option<ApiKeySource>,
@@ -507,10 +508,10 @@ pub(crate) struct Operation {
 
 impl Operation {
     /// Imported settings on this operation that the gateway does not enforce yet.
-    pub(crate) fn unenforced(&self, kind: ApiKind) -> Vec<Feature> {
+    pub(crate) fn unenforced(&self) -> Vec<Feature> {
         self.integration
             .as_ref()
-            .map(|integration| integration.unenforced(kind))
+            .map(IntegrationSpec::unenforced)
             .unwrap_or_default()
     }
 }
@@ -537,9 +538,6 @@ impl ApiModel {
         if self.settings.minimum_compression_size.is_some() {
             features.push(Feature::Compression);
         }
-        if self.settings.cors.is_some() {
-            features.push(Feature::Cors);
-        }
         features.extend(self.stage.unenforced());
         features
     }
@@ -552,17 +550,9 @@ impl ApiModel {
 pub(crate) enum Feature {
     BinaryMediaTypes,
     Compression,
-    Cors,
     ContentHandling,
     IntegrationTlsConfig,
-    ParameterMapping,
-    Throttling,
     ResponseCaching,
-    AccessLogs,
-    ExecutionLogs,
-    DetailedMetrics,
-    Tracing,
-    Canary,
 }
 
 impl fmt::Display for Feature {
@@ -570,17 +560,9 @@ impl fmt::Display for Feature {
         let name = match self {
             Self::BinaryMediaTypes => "binary media types",
             Self::Compression => "compression",
-            Self::Cors => "CORS",
             Self::ContentHandling => "content handling",
             Self::IntegrationTlsConfig => "integration TLS config",
-            Self::ParameterMapping => "parameter mapping",
-            Self::Throttling => "throttling",
             Self::ResponseCaching => "response caching",
-            Self::AccessLogs => "access logs",
-            Self::ExecutionLogs => "execution logs",
-            Self::DetailedMetrics => "detailed metrics",
-            Self::Tracing => "tracing",
-            Self::Canary => "canary",
         };
         f.write_str(name)
     }

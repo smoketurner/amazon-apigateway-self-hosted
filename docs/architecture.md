@@ -11,12 +11,17 @@ Java regex syntax to `fancy-regex` and provides Java's matching, replacement, an
 | `model` | `ApiModel`: everything imported from the export and `GetStage` (operations, integrations, protections, authorizers, validators, models, gateway responses, API and stage settings), whether or not it is enforced yet; integration overrides apply here |
 | `integration`, `route` | Compile each model operation into a runtime `Route` with an executable `Integration`, substituting stage variables |
 | `router` | Builds an axum `Router` from the routes; the dispatcher that swaps routers live; admin routes |
+| `observability` | Access logs, per-minute EMF metrics, and execution logs: `StageObserver` records each request of a loaded stage; `Observability` owns the bounded per-destination queues and workers |
 | `pipeline` | Per-request execution in API Gateway's stage order (`Pipeline`), and `RequestContext`, the single owner of `$context` variables |
 | `gateway` | What every route of an API shares (`ApiContext`), enforcement of unevaluated protections, and API Gateway-shaped errors (`GatewayError`) |
 | `gateway_response` | Every error the gateway answers with (`Failure`), rendered through the API's customized REST gateway responses (status, `gatewayresponse.header.*`, `$context` templates, `DEFAULT_4XX`/`DEFAULT_5XX` fallback) or HTTP APIs' fixed messages |
+| `authz` | Compiles the API's authorizers (`Authorizers`, per route `RouteAuthorizer`) and evaluates them before the integration: Lambda authorizers with identity sources, a bounded TTL cache, and IAM policy evaluation (`PolicyDocument`, `MethodArn`, wildcard `Glob`); `Denial` maps each refusal to its gateway response |
+| `state`, `throttle` | `StateBackend` (token buckets, period quota counters, TTL cache; in-memory today, shaped for a shared Valkey backend) and the stage throttle settings that become one bucket per route |
+| `cors`, `http_routes`, `mapping` | HTTP API CORS (preflight answers and response headers), route selection by path and method together for HTTP APIs, and `requestParameters`/`responseParameters` mapping for `HTTP_PROXY` |
 | `aws` | `AwsClients`: per-region Lambda clients, assumed integration-role credentials, Lambda endpoint overrides, trace header propagation |
 | `proxy` | `HTTP_PROXY` forwarding |
-| `lambda` | `AWS_PROXY` event construction (payload 1.0 and 2.0) and response mapping |
+| `lambda`, `lambda_response` | `AWS_PROXY` event construction (payload 1.0 and 2.0), invocation (buffered `Invoke` or streamed `InvokeWithResponseStream`), and response mapping |
+| `header_case` | Recovers the client's HTTP/1 header name spelling (hyper keeps it private) by watching request heads on the connection |
 | `listener` | TLS accept loop, PROXY protocol v2, certificate reload |
 | `identity` | Client address and forwarded client certificate, from the peer and trusted proxies' headers |
 | `app` | Startup, refresh loop, shutdown |
@@ -79,7 +84,8 @@ integrations only ever see the rewritten headers.
 `crates/apigw-parity` is a dev tool, not part of the gateway. `replay` starts the `apigw`
 binary with `--openapi-file` pointing at a recorded export, `--base-path /<stage>`, the
 recorded stage variables, and an `--integration-overrides` file that moves every integration
-built from the `echo_host` stage variable to an in-process echo server over plain HTTP. It
-then sends the case requests over TLS and diffs the responses against fixtures recorded from
-real API Gateway. Everything it needs from `apigw` is public: the flags above and the admin
-`/healthz` endpoint. See [parity/README.md](../parity/README.md).
+built from the `echo_host` stage variable to an in-process echo server over plain HTTP. Every
+Lambda function the export invokes gets a `--lambda-endpoint` pointing at the same server, which
+speaks Lambda's Invoke protocol. It then sends the case requests over TLS and diffs the responses
+against fixtures recorded from real API Gateway. Everything it needs from `apigw` is public: the
+flags above and the admin `/healthz` endpoint. See [parity/README.md](../parity/README.md).

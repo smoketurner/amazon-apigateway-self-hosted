@@ -57,6 +57,34 @@ cases:
       body: ignore
       echo: {headers: [x-mapped-header]}
 
+  # AWS_PROXY (payload 1.0) through apigw's Lambda endpoint override
+  - name: rest-lambda-proxy-greedy
+    api: rest
+    path: /lambda-proxy/a/b
+    query: {x: "1", y: "2"}
+    compare:
+      headers: [content-type]
+      body: ignore
+      echo: {fields: [method, path, query, resource, path_parameters]}
+
+  - name: rest-lambda-proxy-post-body
+    api: rest
+    method: POST
+    path: /lambda-proxy/items
+    headers: {content-type: application/json}
+    body: '{"name":"widget"}'
+    compare:
+      body: ignore
+      echo: {fields: [method, path, query, body], headers: [content-type]}
+
+  - name: rest-lambda-proxy-status
+    api: rest
+    path: /lambda-proxy/x
+    query: {echo_status: "418"}
+    compare:
+      headers: [content-type]
+      body: ignore
+
   # Errors API Gateway answers before any integration runs
   - name: rest-unknown-route
     api: rest

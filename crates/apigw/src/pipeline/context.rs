@@ -6,17 +6,21 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::body::Bytes;
+use axum::extract::Request;
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, Method};
+use axum::http::{HeaderMap, HeaderValue, Method, Version, header};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
+use crate::canary::Release;
 use crate::gateway::{ApiContext, RequestId};
+use crate::header_case::HeaderCase;
 use crate::identity::ClientIdentity;
 use crate::integration::StageVariables;
-use crate::model::{ApiKind, RouteKey};
+use crate::model::{ApiKind, PayloadVersion, ResponseTransferMode, RouteKey};
+use crate::observability::Trace;
 use crate::route::Route;
 
 /// The API and stage a request was received on.
@@ -25,6 +29,8 @@ pub(crate) struct ApiInfo {
     pub(crate) kind: ApiKind,
     pub(crate) api_id: String,
     pub(crate) stage: Option<String>,
+    /// Which release serves the request, for stages that have a canary.
+    pub(crate) release: Option<Release>,
 }
 
 impl ApiInfo {
@@ -98,12 +104,72 @@ impl FormEncoded<'_> {
     }
 }
 
+/// What produced `$context.authorizer`, which decides how Lambda proxy events
+/// of HTTP API payload format 2.0 nest it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum AuthorizerSource {
+    #[default]
+    None,
+    Lambda,
+}
+
+/// `$context.authorizer.*`: what the request's authorizer produced.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct AuthorizerContext {
+    values: Map<String, Value>,
+    source: AuthorizerSource,
+}
+
+impl AuthorizerContext {
+    /// A Lambda authorizer's `principalId` and `context` map.
+    pub(crate) fn lambda(values: Map<String, Value>) -> Self {
+        Self {
+            values,
+            source: AuthorizerSource::Lambda,
+        }
+    }
+
+    pub(crate) fn values(&self) -> &Map<String, Value> {
+        &self.values
+    }
+
+    /// The value of `requestContext.authorizer` in a Lambda proxy event of this
+    /// payload version, if an authorizer ran.
+    pub(crate) fn event_value(&self, version: PayloadVersion) -> Option<Value> {
+        match (self.source, version) {
+            (AuthorizerSource::None, _) => None,
+            (AuthorizerSource::Lambda, PayloadVersion::V1) => {
+                Some(Value::Object(self.values.clone()))
+            }
+            (AuthorizerSource::Lambda, PayloadVersion::V2) => {
+                let mut context = self.values.clone();
+                context.remove("principalId");
+                Some(json!({ "lambda": context }))
+            }
+        }
+    }
+}
+
 /// Outcome of the integration call, for `$context.integration.*`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct IntegrationOutcome {
     pub(crate) status: Option<u16>,
     pub(crate) latency_ms: Option<u64>,
     pub(crate) error: Option<String>,
+    pub(crate) transfer_mode: Option<ResponseTransferMode>,
+    /// Streaming integrations: time from connecting to having every response
+    /// header (`$context.integration.timeToAllHeaders`).
+    pub(crate) time_to_all_headers_ms: Option<u64>,
+}
+
+impl ResponseTransferMode {
+    /// The value `$context.integration.responseTransferMode` reports.
+    fn context_name(self) -> &'static str {
+        match self {
+            Self::Buffered => "BUFFERED",
+            Self::Stream => "STREAMED",
+        }
+    }
 }
 
 /// One request: what the client sent, plus everything API Gateway records
@@ -120,12 +186,16 @@ pub(crate) struct RequestContext {
     pub(crate) path: String,
     pub(crate) query: QueryString,
     pub(crate) headers: HeaderMap,
+    /// The client's spelling of header names, known for HTTP/1 requests.
+    pub(crate) header_case: HeaderCase,
+    pub(crate) version: Version,
     pub(crate) path_params: Vec<(String, String)>,
     pub(crate) identity: ClientIdentity,
     pub(crate) body: Bytes,
-    /// `$context.authorizer.*`, filled by authorizers.
-    pub(crate) authorizer: Map<String, Value>,
+    pub(crate) authorizer: AuthorizerContext,
     pub(crate) stage_variables: Arc<StageVariables>,
+    /// This request's place in an X-Ray trace, when the stage traces.
+    pub(crate) trace: Option<Trace>,
     pub(crate) integration: IntegrationOutcome,
 }
 
@@ -163,6 +233,26 @@ impl ContextVariables {
 }
 
 impl RequestContext {
+    /// A copy of `request`'s metadata for logging, taken before the request
+    /// moves into its route: no body and no path parameters.
+    pub(crate) fn observed(api: &ApiContext, route: Option<&Route>, request: &Request) -> Self {
+        let mut snapshot = axum::http::Request::new(());
+        *snapshot.method_mut() = request.method().clone();
+        *snapshot.uri_mut() = request.uri().clone();
+        *snapshot.headers_mut() = request.headers().clone();
+        if let Some(id) = request.extensions().get::<RequestId>() {
+            snapshot.extensions_mut().insert(*id);
+        }
+        if let Some(identity) = request.extensions().get::<ClientIdentity>() {
+            snapshot.extensions_mut().insert(identity.clone());
+        }
+        if let Some(trace) = request.extensions().get::<Trace>() {
+            snapshot.extensions_mut().insert(*trace);
+        }
+        let (parts, ()) = snapshot.into_parts();
+        Self::new(api, route, parts, Vec::new())
+    }
+
     /// Captures a request before its body is read. `route` is `None` for
     /// requests that matched no route.
     pub(crate) fn new(
@@ -174,13 +264,22 @@ impl RequestContext {
         let Parts {
             method,
             uri,
-            headers,
+            version,
+            mut headers,
             mut extensions,
             ..
         } = parts;
+        if !headers.contains_key(header::HOST)
+            && let Some(authority) = uri.authority()
+            && let Ok(host) = HeaderValue::from_str(authority.as_str())
+        {
+            headers.insert(header::HOST, host);
+        }
+        let header_case = extensions.remove::<HeaderCase>().unwrap_or_default();
         let request_id = extensions
             .get::<RequestId>()
             .map_or_else(Uuid::now_v7, |id| id.0);
+        let trace = extensions.get::<Trace>().copied();
         let identity = extensions.remove::<ClientIdentity>().unwrap_or_else(|| {
             tracing::warn!("request reached the pipeline without a client identity");
             ClientIdentity::unknown()
@@ -194,6 +293,7 @@ impl RequestContext {
                 kind: api.kind,
                 api_id: api.api_id.clone(),
                 stage: api.stage.clone(),
+                release: api.release,
             },
             route_key,
             resource_path,
@@ -203,11 +303,14 @@ impl RequestContext {
             path: uri.path().to_owned(),
             query: QueryString::new(uri.query()),
             headers,
+            header_case,
+            version,
             path_params,
             identity,
             body: Bytes::new(),
-            authorizer: Map::new(),
+            authorizer: AuthorizerContext::default(),
             stage_variables: Arc::clone(&api.stage_variables),
+            trace,
             integration: IntegrationOutcome::default(),
         }
     }
@@ -224,6 +327,22 @@ impl RequestContext {
                 .copied()
                 .collect::<Vec<u8>>(),
         )
+    }
+
+    /// `$context.protocol`. REST APIs report `HTTP/1.1` even to HTTP/2 clients
+    /// (the REST `$context.protocol` documentation says so); HTTP APIs report
+    /// the client's version.
+    pub(crate) fn protocol(&self) -> &'static str {
+        if self.api.kind == ApiKind::Rest {
+            return "HTTP/1.1";
+        }
+        match self.version {
+            Version::HTTP_09 => "HTTP/0.9",
+            Version::HTTP_10 => "HTTP/1.0",
+            Version::HTTP_2 => "HTTP/2.0",
+            Version::HTTP_3 => "HTTP/3.0",
+            _ => "HTTP/1.1",
+        }
     }
 
     pub(crate) fn context_value(&self, path: &str) -> Option<String> {
@@ -277,15 +396,21 @@ impl RequestContext {
                 "userAgent": self.header_str("user-agent"),
             },
             "path": self.path,
-            "protocol": "HTTP/1.1",
+            "protocol": self.protocol(),
             "requestId": self.request_id.to_string(),
             "requestTime": self.request_time(),
             "requestTimeEpoch": self.received.as_millisecond(),
             "resourcePath": self.resource_path,
             "routeKey": self.route_key.as_str(),
             "stage": self.api.stage_name(),
-            "authorizer": Value::Object(self.authorizer.clone()),
+            "authorizer": Value::Object(self.authorizer.values().clone()),
         });
+        if let (Value::Object(fields), Some(trace)) = (&mut context, self.trace) {
+            fields.insert("xrayTraceId".to_owned(), json!(trace.id().to_string()));
+        }
+        if let (Value::Object(fields), Some(release)) = (&mut context, self.api.release) {
+            fields.insert("isCanaryRequest".to_owned(), json!(release.is_canary()));
+        }
         let mut integration = BTreeMap::new();
         if let Some(status) = self.integration.status {
             integration.insert("status", json!(status));
@@ -295,6 +420,12 @@ impl RequestContext {
         }
         if let Some(ref error) = self.integration.error {
             integration.insert("error", json!(error));
+        }
+        if let Some(mode) = self.integration.transfer_mode {
+            integration.insert("responseTransferMode", json!(mode.context_name()));
+        }
+        if let Some(time) = self.integration.time_to_all_headers_ms {
+            integration.insert("timeToAllHeaders", json!(time));
         }
         if let Value::Object(ref mut fields) = context {
             fields.insert("integration".to_owned(), json!(integration));
@@ -326,6 +457,7 @@ pub(crate) mod tests {
                 kind,
                 api_id: "abc123".to_owned(),
                 stage: Some("prod".to_owned()),
+                release: None,
             },
             route_key: RouteKey::from("POST /pets/{petId}"),
             resource_path: "/pets/{petId}".to_owned(),
@@ -335,10 +467,13 @@ pub(crate) mod tests {
             path: "/pets/7".to_owned(),
             query: QueryString::new(Some("q=1&q=2")),
             headers,
+            header_case: HeaderCase::default(),
+            version: Version::HTTP_11,
             path_params: vec![("petId".to_owned(), "7".to_owned())],
             identity,
             body: Bytes::new(),
-            authorizer: Map::new(),
+            authorizer: AuthorizerContext::default(),
+            trace: None,
             stage_variables: Arc::default(),
             integration: IntegrationOutcome::default(),
         }
@@ -376,10 +511,13 @@ pub(crate) mod tests {
             status: Some(200),
             latency_ms: Some(12),
             error: None,
+            transfer_mode: Some(ResponseTransferMode::Stream),
+            time_to_all_headers_ms: Some(5),
         };
-        request
-            .authorizer
-            .insert("principalId".to_owned(), json!("user-1"));
+        request.authorizer = AuthorizerContext::lambda(Map::from_iter([
+            ("principalId".to_owned(), json!("user-1")),
+            ("tenant".to_owned(), json!("acme")),
+        ]));
         let vars = request.variables();
         assert_eq!(vars["apiId"], "abc123");
         assert_eq!(vars["stage"], "prod");
@@ -391,8 +529,54 @@ pub(crate) mod tests {
         assert_eq!(vars["requestTime"], "14/Nov/2023:22:13:20 +0000");
         assert_eq!(vars["requestTimeEpoch"], 1_700_000_000_000_i64);
         assert_eq!(vars["integration"]["status"], 200);
+        assert_eq!(vars["integration"]["responseTransferMode"], "STREAMED");
+        assert_eq!(vars["integration"]["timeToAllHeaders"], 5);
         assert_eq!(vars["authorizer"]["principalId"], "user-1");
         assert!(vars["integration"].get("error").is_none());
+    }
+
+    #[test]
+    fn protocol_follows_the_client_for_http_apis_only() {
+        let mut http = request(ApiKind::Http);
+        let mut rest = request(ApiKind::Rest);
+        for (version, expected) in [
+            (Version::HTTP_10, "HTTP/1.0"),
+            (Version::HTTP_11, "HTTP/1.1"),
+            (Version::HTTP_2, "HTTP/2.0"),
+        ] {
+            http.version = version;
+            rest.version = version;
+            assert_eq!(http.protocol(), expected);
+            assert_eq!(
+                rest.protocol(),
+                "HTTP/1.1",
+                "REST reports HTTP/1.1 for every client"
+            );
+        }
+    }
+
+    #[test]
+    fn lambda_authorizer_context_nests_by_payload_version() {
+        let context = AuthorizerContext::lambda(Map::from_iter([
+            ("principalId".to_owned(), json!("user-1")),
+            ("tenant".to_owned(), json!("acme")),
+        ]));
+        assert_eq!(
+            context.event_value(PayloadVersion::V1),
+            Some(json!({"principalId": "user-1", "tenant": "acme"}))
+        );
+        assert_eq!(
+            context.event_value(PayloadVersion::V2),
+            Some(json!({"lambda": {"tenant": "acme"}}))
+        );
+        assert_eq!(
+            AuthorizerContext::default().event_value(PayloadVersion::V1),
+            None
+        );
+        assert_eq!(
+            AuthorizerContext::default().event_value(PayloadVersion::V2),
+            None
+        );
     }
 
     #[test]
@@ -401,6 +585,7 @@ pub(crate) mod tests {
             kind: ApiKind::Http,
             api_id: "a".to_owned(),
             stage: None,
+            release: None,
         };
         assert_eq!(info.stage_name(), "$default");
     }
