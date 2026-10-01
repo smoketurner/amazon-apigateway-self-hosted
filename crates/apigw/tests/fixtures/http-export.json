@@ -1,0 +1,67 @@
+{
+  "openapi": "3.0.1",
+  "info": { "title": "reference-http", "version": "2026-10-01" },
+  "x-amazon-apigateway-importexport-version": "1.0",
+  "x-amazon-apigateway-cors": {
+    "allowOrigins": ["https://example.com"],
+    "allowMethods": ["GET", "POST"],
+    "allowHeaders": ["authorization"],
+    "exposeHeaders": ["x-request-id"],
+    "maxAge": 300,
+    "allowCredentials": true
+  },
+  "security": [{ "jwt": [] }],
+  "paths": {
+    "/orders": {
+      "post": {
+        "security": [{ "jwt": ["orders:write"] }],
+        "x-amazon-apigateway-integration": {
+          "type": "aws_proxy",
+          "integrationSubtype": "SQS-SendMessage",
+          "credentials": "arn:aws:iam::123456789012:role/apigw-sqs",
+          "payloadFormatVersion": "1.0",
+          "requestParameters": {
+            "QueueUrl": "https://sqs.us-east-1.amazonaws.com/123456789012/orders",
+            "MessageBody": "$request.body"
+          }
+        }
+      }
+    },
+    "/items/{id}": {
+      "get": {
+        "x-amazon-apigateway-integration": {
+          "type": "http_proxy",
+          "httpMethod": "GET",
+          "uri": "https://items.example",
+          "payloadFormatVersion": "1.0",
+          "connectionType": "INTERNET",
+          "tlsConfig": { "serverNameToVerify": "items.example" },
+          "requestParameters": { "overwrite:path": "/v2/items/$request.path.id" },
+          "responseParameters": { "404": { "overwrite:statuscode": "410" } },
+          "timeoutInMillis": 10000
+        }
+      }
+    },
+    "/$default": {
+      "x-amazon-apigateway-any-method": {
+        "security": [],
+        "x-amazon-apigateway-integration": {
+          "type": "http_proxy", "httpMethod": "ANY", "uri": "https://fallback.example", "payloadFormatVersion": "1.0"
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "jwt": {
+        "type": "oauth2",
+        "flows": {},
+        "x-amazon-apigateway-authorizer": {
+          "type": "jwt",
+          "identitySource": "$request.header.Authorization",
+          "jwtConfiguration": { "issuer": "https://issuer.example", "audience": ["api"] }
+        }
+      }
+    }
+  }
+}

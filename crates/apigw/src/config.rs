@@ -9,9 +9,9 @@ use clap::{ArgGroup, Parser, ValueEnum};
 use crate::gateway::{AuthorizationMode, Enforcement, Unsupported};
 use crate::identity::{TrustedProxies, TrustedProxy};
 use crate::listener::{Edge, ProxyProtocol};
+use crate::model::ApiKind;
 use crate::router::BasePath;
 use crate::source::Source;
-use crate::spec::ApiKind;
 
 const STAGE_VARIABLE_ENV_PREFIX: &str = "APIGW_STAGE_VARIABLE_";
 

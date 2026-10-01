@@ -34,6 +34,9 @@ Management's
 | `AWS`/`HTTP` (non-proxy, VTL mapping templates), VPC links | Answer `501`; listed with the reason on `/routes` |
 | Unknown route | REST: `403 {"message":"Missing Authentication Token"}`; HTTP: `404 {"message":"Not Found"}` |
 
+`/routes` on the admin listener lists, per route, its protections, any problems, and any
+imported settings not enforced yet, plus the API-wide settings not enforced yet.
+
 Every response carries a request ID (`x-amzn-requestid` for REST APIs, `apigw-requestid` for
 HTTP APIs).
 
@@ -125,6 +128,7 @@ previous routes keep serving), so a typo never goes unnoticed.
 | [docs/architecture.md](docs/architecture.md) | Modules, request flow, the accept loop, router swapping |
 | [docs/crypto.md](docs/crypto.md) | aws-lc-rs as the only crypto provider |
 | [docs/ci-cd.md](docs/ci-cd.md) | CI jobs |
+| [reference/README.md](reference/README.md) | Terraform stack that deploys the reference APIs parity is measured against |
 
 ## Development
 

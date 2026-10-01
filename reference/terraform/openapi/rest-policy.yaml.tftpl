@@ -1,0 +1,51 @@
+openapi: "3.0.1"
+info:
+  title: "${name}"
+  version: "1.0"
+x-amazon-apigateway-policy: ${policy_json}
+paths:
+  /open:
+    get:
+      responses:
+        "200":
+          description: "allowed for every caller"
+      x-amazon-apigateway-integration:
+        type: mock
+        passthroughBehavior: when_no_match
+        requestTemplates:
+          application/json: '{"statusCode": 200}'
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: '{"route":"open"}'
+  /ip-restricted:
+    get:
+      responses:
+        "200":
+          description: "denied unless the caller is inside the allowed CIDRs"
+      x-amazon-apigateway-integration:
+        type: mock
+        passthroughBehavior: when_no_match
+        requestTemplates:
+          application/json: '{"statusCode": 200}'
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: '{"route":"ip-restricted"}'
+  /ip-denied:
+    get:
+      responses:
+        "200":
+          description: "always denied by an explicit Deny on every source IP"
+      x-amazon-apigateway-integration:
+        type: mock
+        passthroughBehavior: when_no_match
+        requestTemplates:
+          application/json: '{"statusCode": 200}'
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: '{"route":"ip-denied"}'

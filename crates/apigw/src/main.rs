@@ -5,12 +5,14 @@ mod app;
 mod config;
 mod gateway;
 mod identity;
+mod integration;
 mod lambda;
 mod listener;
+mod model;
 mod proxy;
+mod route;
 mod router;
 mod source;
-mod spec;
 
 use clap::Parser as _;
 use tracing_subscriber::EnvFilter;

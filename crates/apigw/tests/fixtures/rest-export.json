@@ -1,0 +1,107 @@
+{
+  "openapi": "3.0.1",
+  "info": { "title": "reference-rest", "version": "2026-10-01" },
+  "x-amazon-apigateway-binary-media-types": ["image/png"],
+  "x-amazon-apigateway-minimum-compression-size": 1024,
+  "x-amazon-apigateway-api-key-source": "HEADER",
+  "x-amazon-apigateway-endpoint-configuration": { "disableExecuteApiEndpoint": true },
+  "x-amazon-apigateway-request-validators": {
+    "all": { "validateRequestBody": true, "validateRequestParameters": true }
+  },
+  "x-amazon-apigateway-request-validator": "all",
+  "x-amazon-apigateway-policy": {
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow", "Principal": "*", "Action": "execute-api:Invoke", "Resource": "execute-api:/*",
+      "Condition": { "IpAddress": { "aws:SourceIp": "203.0.113.0/24" } }
+    }]
+  },
+  "x-amazon-apigateway-gateway-responses": {
+    "MISSING_AUTHENTICATION_TOKEN": {
+      "statusCode": "404",
+      "responseParameters": { "gatewayresponse.header.x-error": "'missing'" },
+      "responseTemplates": { "application/json": "{\"error\":\"$context.error.messageString\"}" }
+    }
+  },
+  "paths": {
+    "/pets": {
+      "post": {
+        "security": [{ "api_key": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Pet" } } }
+        },
+        "x-amazon-apigateway-integration": {
+          "type": "aws",
+          "httpMethod": "POST",
+          "uri": "arn:aws:apigateway:us-east-1:sqs:path/123456789012/pets",
+          "credentials": "arn:aws:iam::123456789012:role/apigw-sqs",
+          "passthroughBehavior": "when_no_templates",
+          "contentHandling": "CONVERT_TO_TEXT",
+          "cacheKeyParameters": ["method.request.querystring.page"],
+          "requestParameters": { "integration.request.header.Content-Type": "'application/x-www-form-urlencoded'" },
+          "requestTemplates": { "application/json": "Action=SendMessage&MessageBody=$util.urlEncode($input.body)" },
+          "responses": {
+            "default": { "statusCode": "200", "responseTemplates": { "application/json": "{\"ok\":true}" } },
+            "5\\d{2}": { "statusCode": "500" }
+          }
+        }
+      }
+    },
+    "/pets/{petId}": {
+      "parameters": [{ "name": "petId", "in": "path", "required": true, "schema": { "type": "string" } }],
+      "get": {
+        "security": [{ "token": [] }],
+        "parameters": [{ "name": "x-trace", "in": "header", "schema": { "type": "string" } }],
+        "x-amazon-apigateway-integration": { "$ref": "#/components/x-amazon-apigateway-integrations/proxy" }
+      }
+    },
+    "/stream": {
+      "get": {
+        "x-amazon-apigateway-request-validator": "all",
+        "x-amazon-apigateway-integration": {
+          "type": "aws_proxy",
+          "httpMethod": "POST",
+          "uri": "arn:aws:apigateway:us-east-1:lambda:path/2021-11-15/functions/arn:aws:lambda:us-east-1:123456789012:function:stream/response-streaming-invocations",
+          "responseTransferMode": "STREAM"
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Pet": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" } } }
+    },
+    "securitySchemes": {
+      "api_key": { "type": "apiKey", "name": "x-api-key", "in": "header" },
+      "token": {
+        "type": "apiKey", "name": "Authorization", "in": "header",
+        "x-amazon-apigateway-authtype": "custom",
+        "x-amazon-apigateway-authorizer": {
+          "type": "token",
+          "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:auth/invocations",
+          "authorizerResultTtlInSeconds": 300,
+          "identityValidationExpression": "^Bearer [-0-9a-zA-Z._]+$"
+        }
+      },
+      "cognito": {
+        "type": "apiKey", "name": "Authorization", "in": "header",
+        "x-amazon-apigateway-authtype": "cognito_user_pools",
+        "x-amazon-apigateway-authorizer": {
+          "type": "cognito_user_pools",
+          "providerARNs": ["arn:aws:cognito-idp:us-east-1:123456789012:userpool/us-east-1_example"]
+        }
+      }
+    },
+    "x-amazon-apigateway-integrations": {
+      "proxy": {
+        "type": "http_proxy",
+        "httpMethod": "GET",
+        "uri": "https://backend.example/pets/{petId}",
+        "connectionType": "INTERNET",
+        "tlsConfig": { "insecureSkipVerification": true },
+        "requestParameters": { "integration.request.path.petId": "method.request.path.petId" }
+      }
+    }
+  }
+}

@@ -1,8 +1,6 @@
 //! Per-request execution: turns a matched route into an integration call and
 //! shapes errors the way API Gateway does.
 
-use std::collections::BTreeMap;
-
 use axum::body::{Body, Bytes};
 use axum::extract::{FromRequestParts, RawPathParams};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
@@ -10,7 +8,9 @@ use axum::response::{IntoResponse, Response};
 use uuid::Uuid;
 
 use crate::identity::ClientIdentity;
-use crate::spec::{ApiKind, Integration, MockResponse, Protection, Route};
+use crate::integration::{Integration, MockResponse, StageVariables};
+use crate::model::{ApiKind, Protection};
+use crate::route::Route;
 use crate::{lambda, proxy};
 
 /// API Gateway's maximum payload size.
@@ -127,7 +127,7 @@ pub(crate) struct ApiContext {
     pub(crate) kind: ApiKind,
     pub(crate) api_id: String,
     pub(crate) stage: Option<String>,
-    pub(crate) stage_variables: BTreeMap<String, String>,
+    pub(crate) stage_variables: StageVariables,
     pub(crate) enforcement: Enforcement,
     pub(crate) http: reqwest::Client,
     pub(crate) lambda: aws_sdk_lambda::Client,
@@ -250,7 +250,7 @@ pub(crate) async fn handle(
         Integration::Lambda(ref target) => lambda::invoke(ctx, target, route, &incoming).await,
         Integration::Mock(ref mock) => mock_response(mock),
         Integration::Unsupported { ref reason } => {
-            tracing::warn!(route = %route.route_key(), reason, "unsupported integration invoked");
+            tracing::warn!(route = %route.key, reason, "unsupported integration invoked");
             error(
                 StatusCode::NOT_IMPLEMENTED,
                 "Integration not supported by this gateway",

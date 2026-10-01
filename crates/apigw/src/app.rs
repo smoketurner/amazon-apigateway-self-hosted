@@ -1,7 +1,7 @@
 //! Startup, configuration refresh, and shutdown.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,10 +13,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
 use crate::gateway::{ApiContext, Enforcement};
+use crate::integration::StageVariables;
 use crate::listener::{self, ConnLimits, Edge, Tls};
+use crate::model::{ApiModel, DeploymentStamp, IntegrationOverrides};
 use crate::router::{self, BasePath, LoadSummary, Loaded};
-use crate::source::{self, Fetcher, Snapshot};
-use crate::spec::{ApiDefinition, IntegrationOverrides};
+use crate::source::{Fetch, Fetcher, Snapshot, SourceError};
 
 const CERT_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -25,13 +26,13 @@ struct Builder {
     base_path: BasePath,
     enforcement: Enforcement,
     stage_variable_overrides: BTreeMap<String, String>,
-    overrides_path: Option<std::path::PathBuf>,
+    overrides_path: Option<PathBuf>,
     http: reqwest::Client,
     lambda: aws_sdk_lambda::Client,
 }
 
 /// The inputs a router was built from; a refresh rebuilds only when they change.
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 struct Inputs {
     snapshot: Snapshot,
     overrides: IntegrationOverrides,
@@ -40,7 +41,7 @@ struct Inputs {
 impl Builder {
     async fn overrides(&self) -> anyhow::Result<IntegrationOverrides> {
         let Some(ref path) = self.overrides_path else {
-            return Ok(IntegrationOverrides::new());
+            return Ok(IntegrationOverrides::default());
         };
         let bytes = tokio::fs::read(path)
             .await
@@ -55,44 +56,53 @@ impl Builder {
 
     fn build(&self, inputs: &Inputs) -> anyhow::Result<Loaded> {
         let snapshot = &inputs.snapshot;
-        let mut stage_variables = snapshot.stage_variables.clone();
-        stage_variables.extend(self.stage_variable_overrides.clone());
-        let definition = ApiDefinition::from_openapi(
-            &snapshot.openapi,
-            snapshot.kind,
-            &stage_variables,
-            &inputs.overrides,
-        )?;
+        let mut stage = snapshot.stage_settings.clone();
+        stage
+            .variables
+            .extend(self.stage_variable_overrides.clone());
+        let model = ApiModel::import(&snapshot.openapi, snapshot.kind, stage, &inputs.overrides)?;
         let ctx = Arc::new(ApiContext {
             kind: snapshot.kind,
             api_id: snapshot.api_id.clone(),
             stage: snapshot.stage.clone(),
-            stage_variables,
+            stage_variables: StageVariables::new(model.stage.variables.clone()),
             enforcement: self.enforcement,
             http: self.http.clone(),
             lambda: self.lambda.clone(),
         });
-        let (router, routes) = router::build(&definition, &ctx, &self.base_path);
+        let (router, routes) = router::build(&model, &ctx, &self.base_path);
         for route in &routes {
             if route.problems.is_empty() {
                 tracing::debug!(
-                    route = route.route_key,
+                    route = %route.route_key,
                     integration = route.integration,
                     target = route.target,
                     "route loaded"
                 );
             } else {
                 tracing::warn!(
-                    route = route.route_key,
+                    route = %route.route_key,
                     integration = route.integration,
                     problems = route.problems.join("; "),
                     "route loaded with problems"
                 );
             }
         }
+        let unenforced = model.unenforced();
+        if !unenforced.is_empty() {
+            tracing::warn!(
+                features = unenforced
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                "API uses features this gateway does not enforce yet"
+            );
+        }
         tracing::info!(
             api_id = snapshot.api_id,
             stage = snapshot.stage,
+            deployment = snapshot.stamp.deployment_id,
             routes = routes.len(),
             "API definition loaded"
         );
@@ -102,95 +112,167 @@ impl Builder {
             summary: LoadSummary {
                 api_id: snapshot.api_id.clone(),
                 stage: snapshot.stage.clone(),
+                deployment_id: snapshot.stamp.deployment_id.clone(),
                 loaded_at: jiff::Timestamp::now().to_string(),
+                unenforced,
                 routes,
             },
         })
     }
 }
 
-async fn fetch_and_cache(
-    fetcher: &Fetcher,
-    cache: Option<&Path>,
-) -> Result<Snapshot, source::SourceError> {
-    let snapshot = fetcher.fetch().await?;
-    if let Some(cache) = cache
-        && let Err(err) = source::store_cache(cache, &snapshot).await
-    {
-        tracing::warn!(%err, "failed to update the configuration cache");
-    }
-    Ok(snapshot)
-}
-
-async fn initial_snapshot(fetcher: &Fetcher, cache: Option<&Path>) -> anyhow::Result<Snapshot> {
-    match fetch_and_cache(fetcher, cache).await {
-        Ok(snapshot) => Ok(snapshot),
-        Err(err) => {
-            let Some(cache) = cache else {
-                return Err(err).context("failed to load the API definition");
-            };
-            tracing::warn!(%err, cache = %cache.display(), "API Gateway unreachable; starting from the cached configuration");
-            source::load_cache(cache).await.with_context(|| {
-                format!("failed to load the API definition, and the cache is unusable ({err})")
-            })
-        }
-    }
-}
-
-async fn refresh_loop(
+/// Fetches configurations and keeps the last-known-good copy on disk.
+struct Loader {
     fetcher: Fetcher,
+    cache: Option<PathBuf>,
+}
+
+impl Loader {
+    async fn fetch(&self, current: Option<&DeploymentStamp>) -> Result<Fetch, SourceError> {
+        let fetched = self.fetcher.fetch(current).await?;
+        if let (Fetch::Changed(snapshot), Some(cache)) = (&fetched, &self.cache)
+            && let Err(err) = snapshot.store(cache).await
+        {
+            tracing::warn!(%err, "failed to update the configuration cache");
+        }
+        Ok(fetched)
+    }
+
+    /// The configuration to start with: a fresh download, or the cache when
+    /// API Gateway is unreachable.
+    async fn initial(&self) -> anyhow::Result<Snapshot> {
+        let err = match self.fetch(None).await {
+            Ok(Fetch::Changed(snapshot)) => return Ok(*snapshot),
+            Ok(Fetch::Unchanged) => anyhow::anyhow!("the source reported no configuration"),
+            Err(err) => anyhow::Error::new(err),
+        };
+        let Some(ref cache) = self.cache else {
+            return Err(err).context("failed to load the API definition");
+        };
+        tracing::warn!(err = format!("{err:#}"), cache = %cache.display(), "API Gateway unreachable; starting from the cached configuration");
+        Snapshot::load(cache).await.with_context(|| {
+            format!("failed to load the API definition, and the cache is unusable ({err:#})")
+        })
+    }
+}
+
+/// Spaces out refreshes after failures: the delay doubles per consecutive
+/// failure up to [`Backoff::MAX`], with +/-20% jitter so replicas that failed
+/// together don't retry together against the shared control-plane limit.
+#[derive(Debug, Default)]
+struct Backoff {
+    failures: u32,
+}
+
+impl Backoff {
+    const MAX: Duration = Duration::from_mins(15);
+
+    fn record_failure(&mut self) {
+        self.failures = self.failures.saturating_add(1);
+    }
+
+    fn reset(&mut self) {
+        self.failures = 0;
+    }
+
+    fn delay(&self, interval: Duration) -> Duration {
+        let factor = 1_u32.checked_shl(self.failures).unwrap_or(u32::MAX);
+        let base = interval
+            .checked_mul(factor)
+            .unwrap_or(Self::MAX)
+            .min(Self::MAX);
+        Self::jitter(base, Self::random())
+    }
+
+    /// Scales `base` into [80%, 120%] using `random`.
+    fn jitter(base: Duration, random: u64) -> Duration {
+        let millis = u64::try_from(base.as_millis()).unwrap_or(u64::MAX);
+        let spread = millis.checked_div(5).unwrap_or(0);
+        let span = spread.saturating_mul(2).saturating_add(1);
+        let offset = random.checked_rem(span).unwrap_or(0);
+        Duration::from_millis(millis.saturating_sub(spread).saturating_add(offset))
+    }
+
+    fn random() -> u64 {
+        use std::hash::{BuildHasher as _, Hasher as _};
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u128(jiff::Timestamp::now().as_nanosecond().unsigned_abs());
+        hasher.finish()
+    }
+}
+
+/// Periodically re-checks the source and swaps in a new router when the
+/// deployment or the override file changes.
+struct Refresher {
+    loader: Loader,
     builder: Builder,
-    cache: Option<std::path::PathBuf>,
-    mut inputs: Inputs,
-    interval: Duration,
-    current: watch::Sender<Arc<Loaded>>,
-    shutdown: CancellationToken,
-) {
-    let now = tokio::time::Instant::now();
-    let mut ticker = tokio::time::interval_at(now.checked_add(interval).unwrap_or(now), interval);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut rejected: Option<Inputs> = None;
-    loop {
-        tokio::select! {
-            () = shutdown.cancelled() => return,
-            _ = ticker.tick() => {}
+    inputs: Inputs,
+    rejected: Option<Inputs>,
+    backoff: Backoff,
+}
+
+impl Refresher {
+    async fn run(
+        mut self,
+        interval: Duration,
+        current: watch::Sender<Arc<Loaded>>,
+        shutdown: CancellationToken,
+    ) {
+        loop {
+            let delay = self.backoff.delay(interval);
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = tokio::time::sleep(delay) => {}
+            }
+            match self.next_inputs().await {
+                Ok(next) => {
+                    self.backoff.reset();
+                    if let Some(loaded) = self.consider(next) {
+                        current.send_replace(Arc::new(loaded));
+                    }
+                }
+                Err(err) => {
+                    self.backoff.record_failure();
+                    tracing::warn!(
+                        err = format!("{err:#}"),
+                        retry_in_secs = self.backoff.delay(interval).as_secs(),
+                        "configuration refresh failed; keeping the current routes"
+                    );
+                }
+            }
         }
-        let snapshot = match fetch_and_cache(&fetcher, cache.as_deref()).await {
-            Ok(snapshot) => snapshot,
-            Err(err) => {
-                tracing::warn!(%err, "configuration refresh failed; keeping the current routes");
-                continue;
-            }
+    }
+
+    async fn next_inputs(&self) -> anyhow::Result<Inputs> {
+        let snapshot = match self.loader.fetch(Some(&self.inputs.snapshot.stamp)).await? {
+            Fetch::Unchanged => self.inputs.snapshot.clone(),
+            Fetch::Changed(snapshot) => *snapshot,
         };
-        let overrides = match builder.overrides().await {
-            Ok(overrides) => overrides,
-            Err(err) => {
-                tracing::warn!(
-                    err = format!("{err:#}"),
-                    "configuration refresh failed; keeping the current routes"
-                );
-                continue;
-            }
-        };
-        let next = Inputs {
+        Ok(Inputs {
             snapshot,
-            overrides,
-        };
-        if next == inputs || rejected.as_ref() == Some(&next) {
-            continue;
+            overrides: self.builder.overrides().await?,
+        })
+    }
+
+    /// Builds `next` if it differs from what is loaded and from the last
+    /// rejected input, so a broken definition is logged once, not every tick.
+    fn consider(&mut self, next: Inputs) -> Option<Loaded> {
+        if next == self.inputs || self.rejected.as_ref() == Some(&next) {
+            return None;
         }
-        match builder.build(&next) {
+        match self.builder.build(&next) {
             Ok(loaded) => {
-                current.send_replace(Arc::new(loaded));
-                inputs = next;
-                rejected = None;
+                self.inputs = next;
+                self.rejected = None;
+                Some(loaded)
             }
             Err(err) => {
                 tracing::error!(
                     err = format!("{err:#}"),
                     "new API definition rejected; keeping the current routes"
                 );
-                rejected = Some(next);
+                self.rejected = Some(next);
+                None
             }
         }
     }
@@ -240,10 +322,13 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         lambda: aws_sdk_lambda::Client::new(&sdk_config),
     };
     builder.enforcement.warn_if_relaxed();
-    let fetcher = Fetcher::new(config.source(), &sdk_config);
-    tracing::info!(source = ?fetcher.source(), "loading API definition");
+    let loader = Loader {
+        fetcher: Fetcher::new(config.source(), &sdk_config),
+        cache: config.cache.clone(),
+    };
+    tracing::info!(source = ?loader.fetcher.source(), "loading API definition");
 
-    let snapshot = initial_snapshot(&fetcher, config.cache.as_deref()).await?;
+    let snapshot = loader.initial().await?;
     let inputs = Inputs {
         snapshot,
         overrides: builder.overrides().await?,
@@ -283,15 +368,14 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
     }
     tasks.spawn(tls.watch(CERT_POLL_INTERVAL, shutdown.clone()));
     if let Some(interval) = config.refresh_interval() {
-        tasks.spawn(refresh_loop(
-            fetcher,
+        let refresher = Refresher {
+            loader,
             builder,
-            config.cache.clone(),
             inputs,
-            interval,
-            current,
-            shutdown.clone(),
-        ));
+            rejected: None,
+            backoff: Backoff::default(),
+        };
+        tasks.spawn(refresher.run(interval, current, shutdown.clone()));
     }
 
     shutdown_signal().await;
@@ -307,13 +391,15 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
     clippy::indexing_slicing,
     reason = "tests index fixtures of known length"
 )]
+#[expect(clippy::panic, reason = "tests fail loudly on unexpected variants")]
 mod tests {
+    use proptest::prelude::*;
     use serde_json::json;
 
     use super::*;
     use crate::gateway::{AuthorizationMode, Unsupported};
+    use crate::model::{ApiKind, StageSettings};
     use crate::source::Source;
-    use crate::spec::ApiKind;
 
     fn sdk_config() -> aws_config::SdkConfig {
         aws_config::SdkConfig::builder()
@@ -321,7 +407,7 @@ mod tests {
             .build()
     }
 
-    fn builder(overrides_path: Option<std::path::PathBuf>) -> Builder {
+    fn builder(overrides_path: Option<PathBuf>) -> Builder {
         Builder {
             base_path: BasePath::default(),
             enforcement: Enforcement {
@@ -344,14 +430,34 @@ mod tests {
             kind: ApiKind::Rest,
             api_id: "abc".to_owned(),
             stage: Some("prod".to_owned()),
-            stage_variables: BTreeMap::from([("host".to_owned(), "aws.example".to_owned())]),
+            stamp: DeploymentStamp {
+                deployment_id: Some("d1".to_owned()),
+                last_updated_epoch_ms: None,
+            },
+            stage_settings: StageSettings {
+                variables: BTreeMap::from([("host".to_owned(), "aws.example".to_owned())]),
+                ..StageSettings::default()
+            },
             openapi: json!({"paths": {"/pets": {"get": {"x-amazon-apigateway-integration":
                 {"type": "http_proxy", "uri": "https://${stageVariables.host}/pets"}}}}}),
         }
     }
 
-    fn scratch(name: &str) -> std::path::PathBuf {
+    fn scratch(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("apigw-app-{}-{name}", uuid::Uuid::now_v7()))
+    }
+
+    fn file_loader(path: PathBuf, cache: Option<PathBuf>) -> Loader {
+        Loader {
+            fetcher: Fetcher::new(
+                Source::File {
+                    path,
+                    kind: ApiKind::Rest,
+                },
+                &sdk_config(),
+            ),
+            cache,
+        }
     }
 
     #[tokio::test]
@@ -365,6 +471,25 @@ mod tests {
         assert_eq!(
             loaded.summary.routes[0].target.as_deref(),
             Some("https://local.internal/pets")
+        );
+        assert_eq!(loaded.summary.deployment_id.as_deref(), Some("d1"));
+    }
+
+    #[tokio::test]
+    async fn unenforced_features_are_summarized() {
+        let mut snapshot = snapshot();
+        snapshot.openapi =
+            json!({"x-amazon-apigateway-binary-media-types": ["image/png"], "paths": {}});
+        snapshot.stage_settings.tracing_enabled = true;
+        let inputs = Inputs {
+            snapshot,
+            overrides: IntegrationOverrides::default(),
+        };
+        let loaded = builder(None).build(&inputs).unwrap();
+        let rendered = serde_json::to_value(&loaded.summary).unwrap();
+        assert_eq!(
+            rendered["unenforced"],
+            json!(["binary_media_types", "tracing"])
         );
     }
 
@@ -388,22 +513,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initial_snapshot_falls_back_to_cache() {
-        let fetcher = Fetcher::new(
-            Source::File {
-                path: scratch("absent.json"),
-                kind: ApiKind::Rest,
-            },
-            &sdk_config(),
-        );
-        assert!(initial_snapshot(&fetcher, None).await.is_err());
+    async fn initial_load_falls_back_to_cache() {
+        let absent = scratch("absent.json");
+        assert!(file_loader(absent.clone(), None).initial().await.is_err());
         let cache = scratch("cache.json");
-        assert!(initial_snapshot(&fetcher, Some(&cache)).await.is_err());
-        source::store_cache(&cache, &snapshot()).await.unwrap();
-        assert_eq!(
-            initial_snapshot(&fetcher, Some(&cache)).await.unwrap(),
-            snapshot()
-        );
+        let loader = file_loader(absent, Some(cache.clone()));
+        assert!(loader.initial().await.is_err());
+        snapshot().store(&cache).await.unwrap();
+        assert_eq!(loader.initial().await.unwrap(), snapshot());
         tokio::fs::remove_file(&cache).await.unwrap();
     }
 
@@ -412,17 +529,59 @@ mod tests {
         let doc = scratch("api.json");
         tokio::fs::write(&doc, br#"{"paths": {}}"#).await.unwrap();
         let cache = scratch("cache.json");
-        let fetcher = Fetcher::new(
-            Source::File {
-                path: doc.clone(),
-                kind: ApiKind::Http,
-            },
-            &sdk_config(),
-        );
-        let snapshot = initial_snapshot(&fetcher, Some(&cache)).await.unwrap();
-        assert_eq!(source::load_cache(&cache).await.unwrap(), snapshot);
+        let snapshot = file_loader(doc.clone(), Some(cache.clone()))
+            .initial()
+            .await
+            .unwrap();
+        assert_eq!(Snapshot::load(&cache).await.unwrap(), snapshot);
         tokio::fs::remove_file(&doc).await.unwrap();
         tokio::fs::remove_file(&cache).await.unwrap();
+    }
+
+    #[test]
+    fn same_deployment_requires_a_known_deployment_id() {
+        let known = DeploymentStamp {
+            deployment_id: Some("d".to_owned()),
+            last_updated_epoch_ms: Some(1),
+        };
+        assert!(known.is_same_deployment(&known.clone()));
+        let moved = DeploymentStamp {
+            last_updated_epoch_ms: Some(2),
+            ..known.clone()
+        };
+        assert!(!known.is_same_deployment(&moved));
+        let unknown = DeploymentStamp::default();
+        assert!(!unknown.is_same_deployment(&unknown.clone()));
+    }
+
+    #[test]
+    fn backoff_grows_per_failure_and_is_capped() {
+        let interval = Duration::from_secs(60);
+        let mut backoff = Backoff::default();
+        let within = |delay: Duration, base: Duration| {
+            delay >= base.mul_f64(0.8)
+                && delay <= base.mul_f64(1.2).saturating_add(Duration::from_millis(1))
+        };
+        assert!(within(backoff.delay(interval), interval));
+        backoff.record_failure();
+        assert!(within(backoff.delay(interval), Duration::from_secs(120)));
+        for _ in 0..100 {
+            backoff.record_failure();
+        }
+        assert!(within(backoff.delay(interval), Backoff::MAX));
+        backoff.reset();
+        assert!(within(backoff.delay(interval), interval));
+    }
+
+    proptest! {
+        #[test]
+        fn jitter_stays_within_twenty_percent(millis in 0_u64..10_000_000, random: u64) {
+            let base = Duration::from_millis(millis);
+            let jittered = Backoff::jitter(base, random).as_millis();
+            let millis = u128::from(millis);
+            prop_assert!(jittered.saturating_mul(5) >= millis.saturating_mul(4), "{jittered} < 80% of {millis}");
+            prop_assert!(jittered.saturating_mul(5) <= millis.saturating_mul(6), "{jittered} > 120% of {millis}");
+        }
     }
 
     #[tokio::test]
@@ -434,29 +593,26 @@ mod tests {
             .to_string()
         };
         tokio::fs::write(&doc, write(200)).await.unwrap();
-        let fetcher = Fetcher::new(
-            Source::File {
-                path: doc.clone(),
-                kind: ApiKind::Rest,
-            },
-            &sdk_config(),
-        );
+        let loader = file_loader(doc.clone(), None);
         let builder = builder(None);
+        let Fetch::Changed(snapshot) = loader.fetch(None).await.unwrap() else {
+            panic!("file sources always report a change");
+        };
         let inputs = Inputs {
-            snapshot: fetcher.fetch().await.unwrap(),
-            overrides: IntegrationOverrides::new(),
+            snapshot: *snapshot,
+            overrides: IntegrationOverrides::default(),
         };
         let (current, routes) = watch::channel(Arc::new(builder.build(&inputs).unwrap()));
         let shutdown = CancellationToken::new();
-        let task = tokio::spawn(refresh_loop(
-            fetcher,
+        let refresher = Refresher {
+            loader,
             builder,
-            None,
             inputs,
-            Duration::from_millis(50),
-            current,
-            shutdown.clone(),
-        ));
+            rejected: None,
+            backoff: Backoff::default(),
+        };
+        let task =
+            tokio::spawn(refresher.run(Duration::from_millis(50), current, shutdown.clone()));
 
         let app = router::dispatcher(routes.clone());
         let status = |app: axum::Router| async move {
