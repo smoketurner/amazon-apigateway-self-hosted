@@ -1,0 +1,55 @@
+{"name":"sm-add","output":"[true]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"sm-add2","output":"[1, 2]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"sm-remove-idx","output":"[5][6]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"sm-remove-obj","output":"[true][b]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"sm-clear","output":"[][]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"sm-seq","output":"[true][1, 2]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"sm-seq2","output":"[true][true]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"sm-seq4","output":"[1]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"arity-substr0","output":"[$s.substring()]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"arity-substr3","output":"[$s.substring(1,2,3)]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"arity-add-none","output":"[$l.add()]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"esc-dir-2","output":"\\Y","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"esc-dir-3","error":"ParseErrorException"}
+{"name":"esc-dir-4","output":"\\\\Y","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"esc-set-2","output":"\\\\[1]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"esc-set-3","output":"\\#set($x = 1)[$x]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"esc-dir-else","output":" B","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"esc-quiet-undef-even","output":"\\\\|\\\\$!u|\\\\","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"esc-quiet-def-even","output":"\\1|\\$!u|\\1","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"void-ref","output":"[]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bool-method-out","output":"[true][false]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"foreach-outside","output":"[$foreach.index][$velocityCount]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"foreach-hasnext-dollar","output":"1, 2, 3","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"foreach-index-math","output":"12","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"foreach-lastbreak","output":"12L","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"dq-escape","output":"a\"ba'ba\"b","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"formal-mod","output":"2c ab.length() ABx","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"quiet-chain","output":"   0","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"mixed-quiet-literal","output":" $m['k']","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"int-vs-long-arg","output":"defdef$s.substring($k)","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"double-arg","output":"[$s.substring($d)]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"tostring-types","output":"[1.0, 100.0, 1.0E7, 1.23456789E7, 0.001, 1.0E-4, -0.0, 1.5E-7, 1.23456789012E11]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"long-tostring","output":"[1, -1, 2147483648, 9223372036854775807]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"nested-tostring","output":"[[], [[]], {}, {a={}}, {a=[]}, [{}]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"tostring-str-in-list","output":"[a b, c\"d, , e,f]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"tostring-null-in-map","output":"{a=null, b=1} 2","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-ordering","output":"{z=1, a=2, m=3}","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-update-order","output":"{z=9, a=2, b=3}","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-keyset-iter","output":"ba","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-getordefault","output":"7 true  {a=1, x=2}","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"list-more","output":"[1, 2] 2 true true [3, 1, 2, 7, 8] 3 [9, 1, 2, 7, 8] 9 [1, 2, 7, 8]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"list-json-body","output":"2 a 2 2 [{id=1, name=a}, {id=2, name=b}]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"input-json","output":"{\"id\":1,\"name\":\"a\"} 2 null [1,2] \"n\"","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"input-body","output":"[{\"items\":[{\"id\":1,\"name\":\"a\"},{\"id\":2,\"name\":\"b\"}],\"total\":2,\"price\":9.99,\"big\":3000000000,\"name\":\"n\",\"flag\":true}]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"input-params","output":"7 x y hv [] {path={id=7}, querystring={q=x y}, header={X-H=hv}} {id=7} hv","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"context-access","output":"r1 1.2.3.4 {header={}, querystring={}, path={}} dev {env=dev}","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"context-override-set","output":"{header={foo=bar}, querystring={q=x}, path={}}","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{"foo":"bar"},"querystring":{"q":"x"},"path":{}}}}
+{"name":"context-override-set-var","output":"{foo=bar}","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{"foo":"bar"},"querystring":{},"path":{}}}}
+{"name":"util-all","error":"ParseErrorException"}
+{"name":"util-escjs-chars","output":"<>&\\'\\/\\\\\\\\\\u00E9\\u4E2D\\u0001","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"util-base64-bad","error":"MethodInvocationException"}
+{"name":"util-null-arg","error":"MethodInvocationException"}
+{"name":"util-num-arg","output":"[$util.urlEncode(5)]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"util-unknown","output":"[$util.foo('x')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"jsonpath-misc","error":"ParseErrorException"}

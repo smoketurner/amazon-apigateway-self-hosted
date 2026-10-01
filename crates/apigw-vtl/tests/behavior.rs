@@ -345,3 +345,12 @@ fn values_and_templates_can_cross_threads() {
     assert_send_sync::<Map>();
     assert_send_sync::<SimpleInput>();
 }
+
+#[test]
+fn paren_before_a_closing_directive_is_text_not_a_method_call() {
+    assert_eq!(
+        render("#foreach($i in [1])$foreach.hasNext(#end").unwrap(),
+        "false("
+    );
+    assert!(render("#foreach($i in [1])$foreach.hasNext( #end").is_err());
+}

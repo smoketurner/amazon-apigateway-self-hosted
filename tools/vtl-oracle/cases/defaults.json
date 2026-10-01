@@ -1,0 +1,44 @@
+{
+  "bodyJson": {
+    "items": [
+      {
+        "id": 1,
+        "name": "a"
+      },
+      {
+        "id": 2,
+        "name": "b"
+      }
+    ],
+    "total": 2,
+    "price": 9.99,
+    "big": 3000000000,
+    "name": "n",
+    "flag": true
+  },
+  "params": {
+    "path": {
+      "id": "7"
+    },
+    "querystring": {
+      "q": "x y"
+    },
+    "header": {
+      "X-H": "hv"
+    }
+  },
+  "context": {
+    "requestId": "r1",
+    "identity": {
+      "sourceIp": "1.2.3.4"
+    },
+    "requestOverride": {
+      "header": {},
+      "querystring": {},
+      "path": {}
+    }
+  },
+  "stageVariables": {
+    "env": "dev"
+  }
+}
