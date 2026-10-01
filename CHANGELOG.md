@@ -83,6 +83,15 @@ All notable changes to this project are documented here. The format follows
   on its own, and `/ping` and `/sping` answer 200 as on API Gateway. `--domain-cert-dir` serves
   each domain its own certificate by SNI, reloaded when the files change. `/routes` lists each
   domain's mappings and APIs.
+- Mutual TLS: a custom domain with a `mutualTlsAuthentication` truststore requires client
+  certificates. The CA bundle is read from S3 (`truststoreUri` at `truststoreVersion`) and
+  re-read on every refresh; clients must present a certificate chained to it, unexpired, in the
+  TLS handshake, and requests to the domain from a client that did not (for example one that asked
+  for a different name in SNI) are refused. A domain whose truststore cannot be loaded refuses
+  every connection rather than serving unverified. `$context.identity.clientCert.*` (access logs),
+  and `requestContext.identity.clientCert` and `requestContext.authentication.clientCert` in
+  Lambda events, carry `clientCertPem`, `subjectDN`, `issuerDN`, `serialNumber`, and `validity`;
+  a certificate reported by a trusted proxy in `X-Forwarded-Client-Cert` is described the same way.
 - Log delivery uses bounded queues that drop (and count) events instead of slowing requests,
   and flushes everything on shutdown.
 - REST gateway responses: every error the gateway generates (missing authentication token,

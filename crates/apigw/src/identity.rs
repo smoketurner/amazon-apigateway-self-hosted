@@ -15,6 +15,8 @@ use std::sync::Arc;
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use ipnet::IpNet;
 
+use crate::client_cert::ClientCertDetails;
+
 const X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
 const X_FORWARDED_CLIENT_CERT: HeaderName = HeaderName::from_static("x-forwarded-client-cert");
 
@@ -183,9 +185,17 @@ impl TrustedProxies {
                 headers.remove(X_FORWARDED_FOR);
             }
         }
+        let client_cert = match certificate {
+            ClientCertificate::Forwarded(ref forwarded) => {
+                forwarded.client_cert(self.hops).map(Arc::new)
+            }
+            ClientCertificate::Absent | ClientCertificate::Malformed => None,
+        };
         ClientIdentity {
             source_ip,
             certificate,
+            client_cert,
+            cert_verified: false,
         }
     }
 
@@ -213,6 +223,11 @@ impl TrustedProxies {
 pub(crate) struct ClientIdentity {
     source_ip: SourceIp,
     certificate: ClientCertificate,
+    /// The client certificate to report: the one verified in this gateway's own
+    /// TLS handshake, else the one a trusted proxy forwarded.
+    client_cert: Option<Arc<ClientCertDetails>>,
+    /// Whether `client_cert` completed this gateway's mutual TLS handshake.
+    cert_verified: bool,
 }
 
 impl ClientIdentity {
@@ -221,7 +236,28 @@ impl ClientIdentity {
         Self {
             source_ip: SourceIp::Unknown,
             certificate: ClientCertificate::Absent,
+            client_cert: None,
+            cert_verified: false,
         }
+    }
+
+    /// This identity with the certificate the client presented in the TLS
+    /// handshake, which replaces anything a proxy forwarded.
+    pub(crate) fn with_verified_certificate(mut self, certificate: ClientCertDetails) -> Self {
+        self.client_cert = Some(Arc::new(certificate));
+        self.cert_verified = true;
+        self
+    }
+
+    /// The client certificate to report as `$context.identity.clientCert`.
+    pub(crate) fn client_cert(&self) -> Option<&ClientCertDetails> {
+        self.client_cert.as_deref()
+    }
+
+    /// Whether the client proved possession of its certificate to this gateway
+    /// in the TLS handshake. A forwarded certificate is not proof.
+    pub(crate) fn has_verified_certificate(&self) -> bool {
+        self.cert_verified
     }
 
     pub(crate) fn source_ip(&self) -> SourceIp {
@@ -229,10 +265,7 @@ impl ClientIdentity {
     }
 
     /// The client certificate a trusted proxy reported.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the mTLS client-certificate work")
-    )]
+    #[cfg(test)]
     pub(crate) fn certificate(&self) -> &ClientCertificate {
         &self.certificate
     }
@@ -268,12 +301,30 @@ pub(crate) struct ForwardedClientCert {
 }
 
 impl ForwardedClientCert {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the mTLS client-certificate work")
-    )]
+    #[cfg(test)]
     pub(crate) fn elements(&self) -> &[CertElement] {
         &self.elements
+    }
+
+    /// The certificate of the client, as the proxy `hops` from the end of the
+    /// chain saw it. Each trusted proxy appended one element, so with a single
+    /// trusted proxy the client is the last element, and elements before the
+    /// trusted ones (which the client may have written itself) are never read.
+    fn client_cert(&self, hops: NonZeroU8) -> Option<ClientCertDetails> {
+        let index = self.elements.len().saturating_sub(usize::from(hops.get()));
+        let element = self.elements.get(index)?;
+        if let Some(ref pem) = element.cert {
+            match ClientCertDetails::from_pem(pem) {
+                Ok(details) => return Some(details),
+                Err(err) => {
+                    tracing::debug!(%err, "ignoring an unreadable forwarded client certificate");
+                }
+            }
+        }
+        element
+            .subject
+            .as_deref()
+            .map(ClientCertDetails::from_subject)
     }
 }
 
@@ -450,6 +501,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::client_cert::tests::certificate;
 
     fn proxies(nets: &[&str], hops: u8) -> TrustedProxies {
         let nets: Vec<TrustedProxy> = nets.iter().map(|net| net.parse().unwrap()).collect();
@@ -911,5 +963,115 @@ mod tests {
             prop_assert_eq!(ip.to_string().parse::<ForwardedAddr>().unwrap(), canonical);
             prop_assert_eq!(SocketAddr::new(ip, port).to_string().parse::<ForwardedAddr>().unwrap(), canonical);
         }
+    }
+
+    fn percent_encoded(text: &str) -> String {
+        text.bytes()
+            .map(|b| {
+                if b.is_ascii_alphanumeric() {
+                    char::from(b).to_string()
+                } else {
+                    format!("%{b:02X}")
+                }
+            })
+            .collect()
+    }
+
+    fn client_header(name: &str) -> String {
+        let (_, pem) = certificate(name);
+        format!("By=spiffe://proxy;Cert=\"{}\"", percent_encoded(&pem))
+    }
+
+    fn subject_of(identity: &ClientIdentity) -> Option<String> {
+        identity
+            .client_cert()
+            .and_then(|c| c.to_json().get("subjectDN").map(ToString::to_string))
+    }
+
+    #[test]
+    fn a_forwarded_certificate_is_described_but_is_not_proof() {
+        let trust = proxies(&["10.0.0.0/8"], 1);
+        let mut map = headers(&[("x-forwarded-client-cert", &client_header("web client"))]);
+        let identity = trust.identify(peer("10.0.0.1"), &mut map);
+        assert_eq!(
+            subject_of(&identity).as_deref(),
+            Some("\"C=US,O=Acme,CN=web client\"")
+        );
+        assert!(
+            identity
+                .client_cert()
+                .unwrap()
+                .to_json()
+                .get("clientCertPem")
+                .is_some()
+        );
+        assert!(!identity.has_verified_certificate());
+    }
+
+    #[test]
+    fn a_forwarded_subject_without_a_certificate_reports_only_the_subject() {
+        let trust = proxies(&["10.0.0.0/8"], 1);
+        let mut map = headers(&[("x-forwarded-client-cert", CERT_HEADER)]);
+        let identity = trust.identify(peer("10.0.0.1"), &mut map);
+        assert_eq!(
+            identity.client_cert().unwrap().to_json(),
+            serde_json::json!({"subjectDN": "CN=client,O=Acme"})
+        );
+    }
+
+    #[test]
+    fn the_client_is_the_element_the_trusted_hops_say() {
+        let header = format!(
+            "{}, {}",
+            client_header("forged by the client"),
+            client_header("seen by the proxy")
+        );
+        let one_hop = proxies(&["10.0.0.0/8"], 1);
+        let mut map = headers(&[("x-forwarded-client-cert", &header)]);
+        let identity = one_hop.identify(peer("10.0.0.1"), &mut map);
+        assert_eq!(
+            subject_of(&identity).as_deref(),
+            Some("\"C=US,O=Acme,CN=seen by the proxy\""),
+            "elements before the trusted proxy's are never read"
+        );
+        let two_hops = proxies(&["10.0.0.0/8"], 2);
+        let mut map = headers(&[("x-forwarded-client-cert", &header)]);
+        let identity = two_hops.identify(peer("10.0.0.1"), &mut map);
+        assert_eq!(
+            subject_of(&identity).as_deref(),
+            Some("\"C=US,O=Acme,CN=forged by the client\"")
+        );
+    }
+
+    #[test]
+    fn untrusted_malformed_and_unreadable_certificates_report_nothing() {
+        let header = client_header("x");
+        let mut map = headers(&[("x-forwarded-client-cert", &header)]);
+        let identity = proxies(&["10.0.0.0/8"], 1).identify(peer("198.51.100.5"), &mut map);
+        assert!(identity.client_cert().is_none());
+        let mut map = headers(&[("x-forwarded-client-cert", "Cert=\"unterminated")]);
+        let identity = proxies(&["10.0.0.0/8"], 1).identify(peer("10.0.0.1"), &mut map);
+        assert!(identity.client_cert().is_none());
+        let mut map = headers(&[("x-forwarded-client-cert", "By=x;Cert=\"garbage\"")]);
+        let identity = proxies(&["10.0.0.0/8"], 1).identify(peer("10.0.0.1"), &mut map);
+        assert!(
+            identity.client_cert().is_none(),
+            "no subject to fall back to"
+        );
+    }
+
+    #[test]
+    fn a_certificate_verified_in_the_handshake_replaces_a_forwarded_one() {
+        let trust = proxies(&["10.0.0.0/8"], 1);
+        let mut map = headers(&[("x-forwarded-client-cert", &client_header("forwarded"))]);
+        let (der, _) = certificate("handshake");
+        let identity = trust
+            .identify(peer("10.0.0.1"), &mut map)
+            .with_verified_certificate(ClientCertDetails::from_der(der.as_ref()).unwrap());
+        assert!(identity.has_verified_certificate());
+        assert_eq!(
+            subject_of(&identity).as_deref(),
+            Some("\"C=US,O=Acme,CN=handshake\"")
+        );
     }
 }

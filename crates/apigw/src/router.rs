@@ -21,6 +21,7 @@ use crate::canary::{CanaryRelease, CanarySummary};
 use crate::domain::{DomainName, DomainRegistry, DomainSummary, Resolution};
 use crate::gateway::{ApiContext, Enforcement, RequestId};
 use crate::http_routes::{HttpRoutes, PathPattern};
+use crate::identity::ClientIdentity;
 use crate::integration::Integration;
 use crate::model::{ApiKind, ApiModel, Feature, MethodMatch, Protections, RouteKey, RoutePath};
 use crate::pipeline::Pipeline;
@@ -445,6 +446,20 @@ pub(crate) fn domain_dispatcher(domains: DomainRegistry) -> Router {
             let Some(state) = domains.find(&host) else {
                 return CustomDomain::error(StatusCode::FORBIDDEN, "Forbidden");
             };
+            if state.requires_client_certificate()
+                && !request
+                    .extensions()
+                    .get::<ClientIdentity>()
+                    .is_some_and(ClientIdentity::has_verified_certificate)
+            {
+                // A client that asked for a different name in its TLS handshake
+                // than in `Host` was not asked for a certificate.
+                tracing::warn!(
+                    host,
+                    "refused a request to a mutual TLS domain without a verified client certificate"
+                );
+                return CustomDomain::error(StatusCode::FORBIDDEN, "Forbidden");
+            }
             match state.resolve(&path, request.headers()) {
                 Resolution::Matched(loaded, routed_path) => {
                     if CustomDomain::rewrite_path(&mut request, &routed_path).is_err() {

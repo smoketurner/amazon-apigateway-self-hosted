@@ -145,7 +145,28 @@ matches answer `403 {"message":"Forbidden"}`.
   `--config-cache`, and `--canary-export-stage` (each API serves its stage's deployment; a
   stage with a canary serves both releases as in single-API mode).
 
-`/routes` lists each domain's mode, mappings, and loaded APIs.
+`/routes` lists each domain's mode, mappings, whether it requires client certificates, and
+loaded APIs.
+
+**Mutual TLS.** A domain with a `mutualTlsAuthentication` truststore requires client certificates.
+The truststore (`truststoreUri`, an `s3://bucket/key` PEM bundle of CA certificates, at
+`truststoreVersion` when set) is read from S3 at startup and on every refresh, and a changed
+bundle takes effect for new connections. Clients must present a certificate chained to a CA in the
+bundle that is currently valid, with an algorithm rustls accepts (SHA-256 or stronger, RSA 2048 or
+stronger, ECDSA); revocation is not checked, as on API Gateway. A client that fails verification
+has its connection closed in the handshake (API Gateway answers 403). A domain whose truststore
+cannot be loaded refuses every connection until it can, and requests whose `Host` names a mutual
+TLS domain but whose connection did not present a verified certificate (for example a different
+SNI name) answer `403`. Mutual TLS is verified by this gateway's own handshake, so put it behind a
+TCP passthrough with PROXY protocol, not a proxy that terminates TLS; certificates a trusted
+proxy forwards in `X-Forwarded-Client-Cert` are reported as `clientCert` but never satisfy a
+domain's requirement.
+
+The presented certificate is available as `$context.identity.clientCert.clientCertPem`,
+`.subjectDN`, `.issuerDN`, `.serialNumber`, `.validity.notBefore`, and `.validity.notAfter`
+(DNs as `C=US,O=Acme,CN=client`, dates as `May 28 12:30:02 2019 GMT`), in access logs, and in
+Lambda events as `requestContext.identity.clientCert` (REST and payload 1.0) or
+`requestContext.authentication.clientCert` (payload 2.0).
 
 ## Canary releases
 
@@ -239,6 +260,7 @@ are flushed every 5 seconds, when a batch is full, and at shutdown.
 | `apigateway:GET` | the same two resources for the stage named by `--canary-export-stage` | canary releases from a shadow stage |
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/apis/<id>/exports/OAS30`, `.../apis/<id>/stages/<stage>` | HTTP APIs |
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/v2/domainnames/<domain>`, `.../apimappings`, `.../routingrules`, `arn:aws:apigateway:<region>::/restapis/<id>` | `--domain-name` |
+| `s3:GetObject` | the truststore object of each mutual TLS domain (`s3:GetObjectVersion` when the domain pins a `truststoreVersion`) | mutual TLS |
 | `lambda:InvokeFunction` | each integrated function (and its aliases) and each Lambda authorizer function | `AWS_PROXY` routes and Lambda authorizers; the same action covers `InvokeWithResponseStream` for streaming routes |
 | `sts:AssumeRole` | each integration `credentials` and each `authorizerCredentials` role | integrations and authorizers with a role, unless `--integration-credentials=gateway` |
 | `logs:CreateLogStream`, `logs:PutLogEvents` | each access log group, the metrics log group, and `arn:aws:logs:<region>:<account>:log-group:API-Gateway-Execution-Logs_<id>/<stage>:*` | access logs, metrics, execution logs |

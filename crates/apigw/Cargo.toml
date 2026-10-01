@@ -20,6 +20,7 @@ aws-sdk-apigatewayv2 = { workspace = true, features = ["behavior-version-latest"
 aws-sdk-cloudwatchlogs = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 aws-sdk-firehose     = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 aws-sdk-lambda       = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
+aws-sdk-s3           = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 aws-sdk-xray         = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 axum                 = { workspace = true, features = ["http1", "http2", "tokio", "json"] }
 base64               = { workspace = true, features = ["std"] }
@@ -43,6 +44,7 @@ tower                = { workspace = true, features = ["util"] }
 tracing              = { workspace = true, features = ["std", "attributes"] }
 tracing-subscriber   = { workspace = true, features = ["std", "fmt", "env-filter", "ansi", "json"] }
 uuid                 = { workspace = true, features = ["std", "v7"] }
+x509-parser          = { workspace = true }
 
 [dev-dependencies]
 tokio                = { workspace = true, features = ["test-util"] }
