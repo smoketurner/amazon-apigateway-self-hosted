@@ -19,9 +19,9 @@ use axum::response::{IntoResponse as _, Response};
 
 pub(crate) use context::RequestContext;
 
-use crate::authz::{AuthRequest, Denial, RouteAuthorizer};
+use crate::authz::{AuthRequest, Denial};
 use crate::cors::Cors;
-use crate::gateway::{ApiContext, AuthorizationMode, GatewayError, MAX_BODY_BYTES};
+use crate::gateway::{ApiContext, GatewayError, MAX_BODY_BYTES};
 use crate::gateway_response::Failure;
 use crate::integration::{Integration, MockResponse};
 use crate::model::{Protection, ResponseType};
@@ -141,28 +141,22 @@ impl<'a> Pipeline<'a> {
             .map_err(|_| GatewayError::RequestTooLarge)
     }
 
-    /// Runs the route's authorizer and records what it contributes to
-    /// `$context.authorizer`. Authorization happens before the body is read so
-    /// that a request that is turned away costs no buffering.
-    /// `--insecure-skip-authorization` skips it.
+    /// Checks the resource policy and the route's authorizer, and records what
+    /// the authorizer contributes to `$context.authorizer`. Authorization
+    /// happens before the body is read so that a request that is turned away
+    /// costs no buffering. `--insecure-skip-authorization` skips authorizers
+    /// but never the resource policy.
     async fn authorize(&self, ctx: &mut RequestContext) -> Result<(), Denial> {
-        let RouteAuthorizer::Evaluated {
-            ref authorizer,
-            ref scopes,
-        } = self.route.authorizer
-        else {
-            return Ok(());
-        };
-        if self.api.enforcement.authorization == AuthorizationMode::Skip {
-            return Ok(());
-        }
         let request = AuthRequest {
             aws: &self.api.aws,
             keys: &self.api.keys,
             state: &self.api.state,
             ctx,
         };
-        ctx.authorizer = authorizer.authorize(&request, scopes).await?;
+        let context = request
+            .authorize(self.route, self.api.enforcement.authorization)
+            .await?;
+        ctx.authorizer = context;
         Ok(())
     }
 

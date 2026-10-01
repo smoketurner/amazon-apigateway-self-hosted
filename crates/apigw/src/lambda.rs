@@ -497,7 +497,7 @@ mod tests {
     use axum::routing::post;
 
     use super::*;
-    use crate::authz::RouteAuthorizer;
+    use crate::authz::{RouteAuthorizer, RoutePolicy};
     use crate::aws::{CredentialsMode, FunctionArn, LambdaEndpoints};
     use crate::client_cert::ClientCertDetails;
     use crate::client_cert::tests::certificate;
@@ -692,6 +692,7 @@ mod tests {
             },
             protections: Protections::default(),
             authorizer: RouteAuthorizer::None,
+            policy: RoutePolicy::None,
             throttle: None,
             unenforced: Vec::new(),
         }

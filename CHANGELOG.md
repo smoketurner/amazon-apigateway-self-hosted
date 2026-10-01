@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Resource policies are evaluated as API Gateway evaluates them: an explicit `Deny` ends the request
+  before authentication, then the policy is combined with the authorizer's decision per the
+  authorization-flow tables (no authorizer, Lambda authorizer, Cognito user pool). `aws:SourceIp`
+  (`IpAddress`, `NotIpAddress`), `aws:UserAgent`, `aws:Referer`, `aws:SecureTransport`, and date
+  conditions are evaluated against the trusted client address; conditions that cannot be decided
+  count as matching for a `Deny` and not matching for an `Allow`. Denials answer `403` with AWS's
+  message.
 - Cognito user pool authorizers (REST) and JWT authorizers (HTTP APIs) are evaluated. Tokens are
   verified (RS256/RS384/RS512) against the issuer's published keys, fetched over HTTPS with a 1.5 s
   timeout and 150 KB cap, cached for two hours, and refreshed at most every 30 s when a token names an
@@ -129,6 +136,12 @@ All notable changes to this project are documented here. The format follows
   integrations that use a VPC link from an in-cluster URL; REST routes send the integration
   URI's host as the `Host` header, HTTP API routes send the request path (with the stage prefix
   API Gateway adds). Routes whose link has no mapping still answer `501`, now naming the flag.
+
+### Removed
+
+- `--unsupported-resource-policy` (`APIGW_UNSUPPORTED_RESOURCE_POLICY`): resource policies are
+  evaluated, so routes no longer answer `403` for every policy. A policy that cannot be read still
+  refuses its routes.
 
 ### Changed
 
