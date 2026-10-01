@@ -7,6 +7,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- REST binary media types: Lambda proxy events carry a request body as base64 when its
+  `Content-Type` matches `binaryMediaTypes` (exact, `type/*`, `*/*`) and as text otherwise, and a
+  function's base64 response is decoded only when the client's first `Accept` media type matches
+  (the response `Content-Type` when there is no `Accept`). `contentHandling` is no longer reported
+  for proxy integrations, where it has no effect.
+- REST payload compression: with `minimumCompressionSize`, buffered responses at least that large
+  are compressed for clients accepting `gzip` or `deflate` (the highest-weighted coding must be one
+  API Gateway supports), and `gzip`/`deflate` request bodies are decompressed before the
+  integration sees them. Adds the `flate2` dependency (pure Rust backend).
+
 - `crates/apigw-vtl`: an Apache Velocity 1.7 engine for mapping templates. It parses and renders
   references, `#set`, `#if`/`#elseif`/`#else`, `#foreach` (1,000-iteration cap, `$foreach.*`,
   `$velocityCount`), `#break`, `#stop`, comments, escaping, and Velocity's whitespace gobbling,

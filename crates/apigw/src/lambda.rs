@@ -98,7 +98,14 @@ impl LambdaProxy {
             tracing::error!(route = %route.key, function = %self.function, bytes = invocation.payload.len(), "Lambda response is larger than the invocation payload limit");
             return Err(GatewayError::IntegrationFailure);
         }
-        let mut response = ProxyResponse::into_http(&invocation.payload, self.payload).map_err(|reason| {
+        let negotiation =
+            (ctx.api.kind == ApiKind::Rest).then(|| ctx.payload.negotiate(&ctx.headers));
+        let mut response = ProxyResponse::into_http(
+            &invocation.payload,
+            self.payload,
+            negotiation.as_ref(),
+        )
+        .map_err(|reason| {
             tracing::error!(route = %route.key, function = %self.function, reason, "malformed Lambda proxy response");
             GatewayError::IntegrationFailure
         })?;
@@ -182,6 +189,32 @@ struct EventBody {
 }
 
 impl EventBody {
+    /// REST APIs send a body as base64 when its `Content-Type` is one of the API's
+    /// binary media types and as text otherwise; HTTP APIs base64-encode what
+    /// is not valid UTF-8.
+    fn for_request(ctx: &RequestContext) -> Self {
+        match ctx.api.kind {
+            ApiKind::Rest => Self::declared(&ctx.body, ctx.payload.request_is_binary(&ctx.headers)),
+            ApiKind::Http => Self::new(&ctx.body),
+        }
+    }
+
+    fn declared(body: &[u8], binary: bool) -> Self {
+        if body.is_empty() {
+            return Self::new(body);
+        }
+        if binary {
+            return Self {
+                body: Value::String(BASE64.encode(body)),
+                is_base64: true,
+            };
+        }
+        Self {
+            body: Value::String(String::from_utf8_lossy(body).into_owned()),
+            is_base64: false,
+        }
+    }
+
     fn new(body: &[u8]) -> Self {
         if body.is_empty() {
             return Self {
@@ -408,7 +441,7 @@ impl<'a> ProxyEvent<'a> {
         let ctx = self.ctx;
         let (headers, multi_headers) = self.headers().single_and_multi();
         let (query, multi_query) = self.query().single_and_multi();
-        let body = EventBody::new(&ctx.body);
+        let body = EventBody::for_request(ctx);
         json!({
             "resource": ctx.resource_path,
             "path": ctx.path,
@@ -455,7 +488,7 @@ impl<'a> ProxyEvent<'a> {
             .filter(|c| !c.is_empty())
             .map(str::to_owned)
             .collect();
-        let body = EventBody::new(&ctx.body);
+        let body = EventBody::for_request(ctx);
         let mut event = json!({
             "version": "2.0",
             "routeKey": ctx.route_key.as_str(),
@@ -524,6 +557,7 @@ impl<'a> ProxyEvent<'a> {
 #[expect(clippy::unwrap_used, reason = "tests assert on known-good fixtures")]
 #[expect(clippy::indexing_slicing, reason = "tests index known JSON fields")]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use axum::body::Bytes;
@@ -538,6 +572,7 @@ mod tests {
     use crate::header_case::HeaderCase;
     use crate::integration::Integration;
     use crate::model::{MethodMatch, Protections, RouteKey, RoutePath};
+    use crate::payload::PayloadSettings;
     use crate::pipeline::context::tests::request;
     use crate::pipeline::context::{AuthorizerContext, QueryString};
 
@@ -672,8 +707,45 @@ mod tests {
     }
 
     #[test]
+    fn rest_bodies_are_base64_only_for_binary_media_types() {
+        let mut ctx = incoming(&[0xff, 0x00, b'a']);
+        ctx.headers.insert(
+            "content-type",
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        let text = event(&ctx, PayloadVersion::V1);
+        assert_eq!(
+            text["body"], "\u{fffd}\0a",
+            "without binaryMediaTypes the body is text"
+        );
+        assert_eq!(text["isBase64Encoded"], false);
+
+        ctx.payload = Arc::new(PayloadSettings::new(
+            &["application/octet-stream".to_owned()],
+            None,
+        ));
+        let binary = event(&ctx, PayloadVersion::V1);
+        assert_eq!(binary["body"], "/wBh");
+        assert_eq!(binary["isBase64Encoded"], true);
+
+        ctx.headers
+            .insert("content-type", HeaderValue::from_static("application/json"));
+        ctx.body = Bytes::from_static(b"{\"a\":1}");
+        let json_body = event(&ctx, PayloadVersion::V1);
+        assert_eq!(json_body["body"], "{\"a\":1}");
+        assert_eq!(json_body["isBase64Encoded"], false);
+
+        ctx.payload = Arc::new(PayloadSettings::new(&["*/*".to_owned()], None));
+        assert_eq!(event(&ctx, PayloadVersion::V1)["isBase64Encoded"], true);
+        ctx.body = Bytes::new();
+        assert!(event(&ctx, PayloadVersion::V1)["body"].is_null());
+    }
+
+    #[test]
     fn v2_event_joins_values_and_extracts_cookies() {
-        let event = event(&incoming(&[0xff, 0x00]), PayloadVersion::V2);
+        let mut ctx = incoming(&[0xff, 0x00]);
+        ctx.api.kind = ApiKind::Http;
+        let event = event(&ctx, PayloadVersion::V2);
         assert_eq!(event["version"], "2.0");
         assert_eq!(event["routeKey"], "POST /pets/{petId}");
         assert_eq!(event["rawQueryString"], "q=1&q=2");
@@ -895,11 +967,11 @@ mod tests {
     #[tokio::test]
     async fn streaming_invocations_answer_before_the_function_finishes() {
         let (release, released) = tokio::sync::oneshot::channel::<()>();
-        let released = std::sync::Arc::new(tokio::sync::Mutex::new(Some(released)));
+        let released = Arc::new(tokio::sync::Mutex::new(Some(released)));
         let app = axum::Router::new().route(
             "/stream",
             post(move || {
-                let released = std::sync::Arc::clone(&released);
+                let released = Arc::clone(&released);
                 async move {
                     let (sender, receiver) = tokio::sync::mpsc::channel::<
                         Result<Bytes, std::convert::Infallible>,

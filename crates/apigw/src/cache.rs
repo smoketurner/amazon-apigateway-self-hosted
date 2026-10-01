@@ -1039,6 +1039,7 @@ mod tests {
             observer: StageObserver::disabled(),
             release: None,
             cache: scope,
+            payload: Arc::default(),
             http: reqwest::Client::new(),
             aws: Arc::new(AwsClients::new(
                 aws_config::SdkConfig::builder()

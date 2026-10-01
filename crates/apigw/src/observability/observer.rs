@@ -558,6 +558,7 @@ mod tests {
             keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
             observer: StageObserver::new(&observability, &model, "abc", Some("prod"), None),
             release: None,
+            payload: Arc::default(),
             cache: CacheScope::Off,
         });
         let (router, _) = build(&model, &ctx, &BasePath::default());

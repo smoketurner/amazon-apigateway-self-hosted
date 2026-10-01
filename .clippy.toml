@@ -37,6 +37,7 @@ absolute-paths-allowed-crates = [
     "base64",
     "clap",
     "fancy_regex",
+    "flate2",
     "hyper",
     "hyper_util",
     "indexmap",

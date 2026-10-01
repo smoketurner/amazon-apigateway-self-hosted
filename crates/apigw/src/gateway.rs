@@ -20,6 +20,7 @@ use crate::integration::StageVariables;
 use crate::limits::LimitExceeded;
 use crate::model::{ApiKind, Protection, ResponseType};
 use crate::observability::StageObserver;
+use crate::payload::PayloadSettings;
 use crate::pipeline::RequestContext;
 use crate::route::Route;
 use crate::state::StateBackend;
@@ -161,6 +162,8 @@ pub(crate) struct ApiContext {
     /// Which release of a canary stage this context serves; `None` when the
     /// stage has no canary.
     pub(crate) release: Option<Release>,
+    /// Binary media types and compression settings.
+    pub(crate) payload: Arc<PayloadSettings>,
     /// Whether this release caches responses, and where.
     pub(crate) cache: CacheScope,
 }

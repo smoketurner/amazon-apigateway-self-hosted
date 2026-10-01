@@ -22,6 +22,7 @@ use crate::identity::ClientIdentity;
 use crate::integration::StageVariables;
 use crate::model::{ApiKind, PayloadVersion, ResponseTransferMode, RouteKey};
 use crate::observability::Trace;
+use crate::payload::PayloadSettings;
 use crate::route::Route;
 
 /// The API and stage a request was received on.
@@ -221,6 +222,8 @@ pub(crate) struct RequestContext {
     pub(crate) body: Bytes,
     pub(crate) authorizer: AuthorizerContext,
     pub(crate) stage_variables: Arc<StageVariables>,
+    /// The API's binary media types and compression settings.
+    pub(crate) payload: Arc<PayloadSettings>,
     /// This request's place in an X-Ray trace, when the stage traces.
     pub(crate) trace: Option<Trace>,
     pub(crate) integration: IntegrationOutcome,
@@ -342,6 +345,7 @@ impl RequestContext {
             body: Bytes::new(),
             authorizer: AuthorizerContext::default(),
             stage_variables: Arc::clone(&api.stage_variables),
+            payload: Arc::clone(&api.payload),
             trace,
             integration: IntegrationOutcome::default(),
         }
@@ -515,6 +519,7 @@ pub(crate) mod tests {
             authorizer: AuthorizerContext::default(),
             trace: None,
             stage_variables: Arc::default(),
+            payload: Arc::default(),
             integration: IntegrationOutcome::default(),
         }
     }
