@@ -424,7 +424,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::authz::RouteAuthorizer;
+    use crate::authz::{RouteAuthorizer, RoutePolicy};
     use crate::integration::Integration;
     use crate::integration_tls::TlsClient;
     use crate::listener::test_tls::generate;
@@ -472,6 +472,7 @@ mod tests {
             integration: Integration::HttpProxy(target.clone()),
             protections: Protections::default(),
             authorizer: RouteAuthorizer::None,
+            policy: RoutePolicy::None,
             unenforced: Vec::new(),
             throttle: None,
         }

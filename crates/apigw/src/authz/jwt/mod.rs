@@ -23,7 +23,7 @@ use self::keys::{Issuer, KeyLocation};
 use self::token::{Claims, IssuerConfig, TokenError, Verifier};
 use super::identity_source::IdentitySources;
 use super::pattern::TokenPattern;
-use super::{AuthRequest, Denial};
+use super::{AuthRequest, Authorized, Denial};
 use crate::integration::StageVariables;
 use crate::model::AuthorizerSpec;
 use crate::pipeline::context::AuthorizerContext;
@@ -209,7 +209,7 @@ impl JwtAuthorizer {
         &self,
         request: &AuthRequest<'_>,
         required: &[String],
-    ) -> Result<AuthorizerContext, Denial> {
+    ) -> Result<Authorized, Denial> {
         let ctx = request.ctx;
         let identity = self
             .sources
@@ -232,13 +232,12 @@ impl JwtAuthorizer {
                 if !claims.grants_any(required) {
                     return Err(Denial::InsufficientScope);
                 }
-                Ok(Self::http_context(&claims))
+                Ok(Authorized::allow(Self::http_context(&claims)))
             }
             Flavor::Cognito { ref audience } => {
                 Self::check_cognito(&claims, audience.as_ref(), required)?;
-                Ok(AuthorizerContext::claims(Self::claims_value(
-                    ClaimStyle::Rest,
-                    &claims,
+                Ok(Authorized::allow(AuthorizerContext::claims(
+                    Self::claims_value(ClaimStyle::Rest, &claims),
                 )))
             }
         }
