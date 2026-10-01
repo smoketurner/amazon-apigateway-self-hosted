@@ -131,6 +131,7 @@ impl InMemory {
 #[expect(clippy::unwrap_used, reason = "tests assert on known-good fixtures")]
 mod tests {
     use super::*;
+    use crate::state::quota::QuotaPeriod;
 
     fn at(seconds: i64) -> Timestamp {
         Timestamp::from_second(seconds).unwrap()
@@ -182,7 +183,7 @@ mod tests {
         let memory = small();
         let quota = QuotaLimit {
             limit: 1,
-            period: crate::state::quota::QuotaPeriod::Day,
+            period: QuotaPeriod::Day,
         };
         let key = StateKey::new("q", &["k"]);
         assert!(matches!(

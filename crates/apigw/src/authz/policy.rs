@@ -289,10 +289,11 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::aws::FunctionArn;
 
     fn scope() -> ArnScope {
         "arn:aws:lambda:us-east-1:123456789012:function:auth"
-            .parse::<crate::aws::FunctionArn>()
+            .parse::<FunctionArn>()
             .unwrap()
             .scope()
             .unwrap()
