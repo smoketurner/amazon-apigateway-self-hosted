@@ -1,0 +1,12 @@
+{
+  "name": "policy-open-route",
+  "source": "hand_written",
+  "api": "rest_policy",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": "{\"route\":\"open\"}"
+  }
+}

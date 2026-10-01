@@ -13,22 +13,27 @@ x-amazon-apigateway-request-validators:
     validateRequestBody: false
     validateRequestParameters: true
 x-amazon-apigateway-gateway-responses:
-  DEFAULT_4XX:
+  BAD_REQUEST_BODY:
+    statusCode: "422"
     responseParameters:
-      gatewayresponse.header.x-reference-gateway-response: "'default-4xx'"
+      gatewayresponse.header.x-reference-gateway-response: "'bad-request-body'"
+    responseTemplates:
+      application/json: '{"message":$context.error.validationErrorString,"type":"$context.error.responseType"}'
+  BAD_REQUEST_PARAMETERS:
+    responseParameters:
+      gatewayresponse.header.x-reference-gateway-response: "'bad-request-parameters'"
     responseTemplates:
       application/json: '{"message":$context.error.messageString,"type":"$context.error.responseType"}'
-  MISSING_AUTHENTICATION_TOKEN:
-    statusCode: "404"
+  THROTTLED:
     responseParameters:
-      gatewayresponse.header.x-reference-gateway-response: "'missing-authentication-token'"
+      gatewayresponse.header.Retry-After: "'1'"
     responseTemplates:
-      application/json: '{"message":"no such route","type":"$context.error.responseType"}'
-  UNAUTHORIZED:
+      application/json: '{"message":"slow down","type":"$context.error.responseType"}'
+  DEFAULT_5XX:
     responseParameters:
-      gatewayresponse.header.Access-Control-Allow-Origin: "'${cors_origin}'"
+      gatewayresponse.header.x-reference-gateway-response: "'default-5xx'"
     responseTemplates:
-      application/json: '{"message":$context.error.messageString}'
+      application/json: '{"message":$context.error.messageString,"type":"$context.error.responseType"}'
 paths:
   /mock:
     get:

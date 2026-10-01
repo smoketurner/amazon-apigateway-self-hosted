@@ -1,0 +1,116 @@
+{
+  "source": "hand_written",
+  "api": "http",
+  "stage": "ref",
+  "stage_variables": {
+    "echo_host": "echo.lambda-url.us-east-1.on.aws"
+  },
+  "openapi": {
+    "openapi": "3.0.1",
+    "info": {
+      "title": "apigw-ref-http",
+      "version": "1.0"
+    },
+    "paths": {
+      "/http-proxy/{proxy+}": {
+        "x-amazon-apigateway-any-method": {
+          "x-amazon-apigateway-integration": {
+            "type": "http_proxy",
+            "httpMethod": "ANY",
+            "uri": "https://${stageVariables.echo_host}/http-proxy/{proxy}",
+            "payloadFormatVersion": "1.0",
+            "timeoutInMillis": 5000,
+            "requestParameters": {
+              "overwrite:header.x-echo-secret": "$stageVariables.echo_secret"
+            }
+          }
+        }
+      },
+      "/mapped/{id}": {
+        "get": {
+          "x-amazon-apigateway-integration": {
+            "type": "http_proxy",
+            "httpMethod": "GET",
+            "uri": "https://${stageVariables.echo_host}/http-mapped/{id}",
+            "payloadFormatVersion": "1.0",
+            "timeoutInMillis": 5000,
+            "requestParameters": {
+              "overwrite:path": "/http-mapped/$request.path.id",
+              "overwrite:querystring.fixed": "literal",
+              "append:querystring.appended": "$context.stage",
+              "append:header.x-appended": "$context.stage",
+              "overwrite:header.x-echo-secret": "$stageVariables.echo_secret",
+              "remove:header.x-remove-me": ""
+            }
+          }
+        }
+      },
+      "/authz/jwt": {
+        "get": {
+          "x-amazon-apigateway-integration": {
+            "type": "aws_proxy",
+            "httpMethod": "POST",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations",
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "passthroughBehavior": "when_no_match",
+            "payloadFormatVersion": "2.0"
+          },
+          "security": [
+            {
+              "jwt": []
+            }
+          ]
+        }
+      },
+      "/authz/lambda-simple": {
+        "get": {
+          "x-amazon-apigateway-integration": {
+            "type": "aws_proxy",
+            "httpMethod": "POST",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations",
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "passthroughBehavior": "when_no_match",
+            "payloadFormatVersion": "2.0"
+          },
+          "security": [
+            {
+              "lambda_simple": []
+            }
+          ]
+        }
+      }
+    },
+    "components": {
+      "securitySchemes": {
+        "jwt": {
+          "type": "oauth2",
+          "flows": {},
+          "x-amazon-apigateway-authorizer": {
+            "type": "jwt",
+            "jwtConfiguration": {
+              "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_EXAMPLE",
+              "audience": [
+                "exampleclientid"
+              ]
+            },
+            "identitySource": "$request.header.Authorization"
+          }
+        },
+        "lambda_simple": {
+          "type": "apiKey",
+          "name": "x-auth",
+          "in": "header",
+          "x-amazon-apigateway-authorizer": {
+            "type": "request",
+            "identitySource": "$request.header.x-auth",
+            "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-authorizer/invocations",
+            "authorizerCredentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "authorizerPayloadFormatVersion": "2.0",
+            "authorizerResultTtlInSeconds": 0,
+            "enableSimpleResponses": true
+          }
+        }
+      }
+    }
+  }
+}
