@@ -26,6 +26,7 @@ hyper                = { workspace = true, features = ["http1", "http2", "server
 hyper-util           = { workspace = true, features = ["server-auto", "service", "tokio"] }
 ipnet                = { workspace = true, features = ["std"] }
 jiff                 = { workspace = true, features = ["std"] }
+jsonwebtoken         = { workspace = true, features = ["aws_lc_rs"] }
 matchit              = { workspace = true }
 proxy-header         = { workspace = true, features = ["tokio"] }
 reqwest              = { workspace = true, features = ["rustls", "http2", "stream"] }
@@ -42,6 +43,7 @@ tracing-subscriber   = { workspace = true, features = ["std", "fmt", "env-filter
 uuid                 = { workspace = true, features = ["std", "v7"] }
 
 [dev-dependencies]
+aws-lc-rs            = { workspace = true, features = ["aws-lc-sys", "alloc"] }
 tokio                = { workspace = true, features = ["test-util"] }
 rcgen                = { workspace = true, features = ["aws_lc_rs", "pem"] }
 proptest             = { workspace = true, features = ["std"] }

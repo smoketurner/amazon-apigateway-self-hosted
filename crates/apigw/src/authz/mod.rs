@@ -8,7 +8,9 @@
 mod cache;
 mod glob;
 mod identity_source;
+mod jwt;
 mod lambda;
+mod pattern;
 mod policy;
 #[cfg(test)]
 mod tests;
@@ -18,6 +20,7 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 
+pub(crate) use jwt::{IssuerEndpoint, KeyStore};
 pub(crate) use policy::MethodArn;
 
 use crate::aws::AwsClients;
@@ -27,6 +30,7 @@ use crate::model::{ApiKind, ApiModel, AuthorizerSpec, Operation, Protection, Res
 use crate::pipeline::RequestContext;
 use crate::pipeline::context::AuthorizerContext;
 
+use self::jwt::JwtAuthorizer;
 use self::lambda::LambdaAuthorizer;
 
 /// Why a request was turned away, with the response API Gateway gives for it.
@@ -46,6 +50,8 @@ pub(crate) enum Denial {
     AuthorizerConfiguration,
     /// The method ARN is longer than API Gateway allows: 414.
     UriTooLong,
+    /// A valid token that grants none of the scopes the route requires: 403.
+    InsufficientScope,
 }
 
 impl Denial {
@@ -57,9 +63,11 @@ impl Denial {
                 .with_message(
                     "User is not authorized to access this resource with an explicit deny in an identity-based policy",
                 ),
-            (Self::ImplicitDeny, ApiKind::Rest) => Failure::new(ResponseType::AccessDenied)
-                .with_message("User is not authorized to access this resource"),
-            (Self::ExplicitDeny | Self::ImplicitDeny, ApiKind::Http) => {
+            (Self::ImplicitDeny | Self::InsufficientScope, ApiKind::Rest) => {
+                Failure::new(ResponseType::AccessDenied)
+                    .with_message("User is not authorized to access this resource")
+            }
+            (Self::ExplicitDeny | Self::ImplicitDeny | Self::InsufficientScope, ApiKind::Http) => {
                 Failure::new(ResponseType::AccessDenied).with_message("Forbidden")
             }
             (Self::AuthorizerFailure, ApiKind::Rest) => {
@@ -84,13 +92,15 @@ impl Denial {
 /// What an authorizer needs to know about the request being authorized.
 pub(crate) struct AuthRequest<'a> {
     pub(crate) aws: &'a AwsClients,
+    pub(crate) keys: &'a KeyStore,
     pub(crate) ctx: &'a RequestContext,
 }
 
 /// A compiled authorizer definition.
 #[derive(Debug)]
 pub(crate) enum Authorizer {
-    Lambda(LambdaAuthorizer),
+    Lambda(Box<LambdaAuthorizer>),
+    Jwt(JwtAuthorizer),
 }
 
 impl Authorizer {
@@ -112,7 +122,11 @@ impl Authorizer {
             .unwrap_or_default();
         match authorizer_type.to_ascii_lowercase().as_str() {
             "token" | "request" => {
-                LambdaAuthorizer::compile(spec, kind, variables).map(Self::Lambda)
+                LambdaAuthorizer::compile(spec, kind, variables).map(|a| Self::Lambda(Box::new(a)))
+            }
+            "jwt" if kind == ApiKind::Http => JwtAuthorizer::compile_http(spec).map(Self::Jwt),
+            "cognito_user_pools" if kind == ApiKind::Rest => {
+                JwtAuthorizer::compile_cognito(spec, variables).map(Self::Jwt)
             }
             other => Err(format!(
                 "{other:?} authorizers are not evaluated by this gateway yet"
@@ -129,9 +143,11 @@ impl Authorizer {
     pub(crate) async fn authorize(
         &self,
         request: &AuthRequest<'_>,
+        scopes: &[String],
     ) -> Result<AuthorizerContext, Denial> {
         match *self {
             Self::Lambda(ref authorizer) => authorizer.authorize(request).await,
+            Self::Jwt(ref authorizer) => authorizer.authorize(request, scopes).await,
         }
     }
 }
@@ -141,7 +157,11 @@ impl Authorizer {
 pub(crate) enum RouteAuthorizer {
     /// The route has no authorizer.
     None,
-    Evaluated(Arc<Authorizer>),
+    /// The authorizer, and the OAuth scopes the route asks of it.
+    Evaluated {
+        authorizer: Arc<Authorizer>,
+        scopes: Vec<String>,
+    },
     /// The route needs an authorizer this gateway cannot run, for the reason
     /// given.
     Unevaluable(String),
@@ -156,7 +176,7 @@ impl RouteAuthorizer {
     pub(crate) fn unevaluable_reason(&self) -> Option<&str> {
         match *self {
             Self::Unevaluable(ref reason) => Some(reason),
-            Self::None | Self::Evaluated(_) => None,
+            Self::None | Self::Evaluated { .. } => None,
         }
     }
 }
@@ -202,7 +222,10 @@ impl Authorizers {
             );
         };
         match self.0.get(&reference.name) {
-            Some(Ok(authorizer)) => RouteAuthorizer::Evaluated(Arc::clone(authorizer)),
+            Some(Ok(authorizer)) => RouteAuthorizer::Evaluated {
+                authorizer: Arc::clone(authorizer),
+                scopes: reference.scopes.clone(),
+            },
             Some(Err(reason)) => {
                 RouteAuthorizer::Unevaluable(format!("authorizer {:?}: {reason}", reference.name))
             }

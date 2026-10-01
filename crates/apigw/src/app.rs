@@ -11,6 +11,7 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+use crate::authz::KeyStore;
 use crate::aws::AwsClients;
 use crate::config::Config;
 use crate::gateway::{ApiContext, Enforcement};
@@ -32,6 +33,7 @@ struct Builder {
     overrides_path: Option<PathBuf>,
     http: reqwest::Client,
     aws: Arc<AwsClients>,
+    keys: Arc<KeyStore>,
     observability: Arc<Observability>,
 }
 
@@ -74,6 +76,7 @@ impl Builder {
             enforcement: self.enforcement,
             http: self.http.clone(),
             aws: Arc::clone(&self.aws),
+            keys: Arc::clone(&self.keys),
             observer: StageObserver::new(
                 &self.observability,
                 &model,
@@ -330,6 +333,13 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         config.lambda_endpoints(),
         http.clone(),
     ));
+    for endpoint in config.issuer_endpoints.iter().filter(|e| e.is_plaintext()) {
+        tracing::warn!(?endpoint, "token signing keys are fetched over plain HTTP");
+    }
+    let keys = Arc::new(KeyStore::new(
+        http.clone(),
+        config.issuer_endpoints.iter().cloned(),
+    ));
     let observability = Observability::start(
         sdk_config.clone(),
         config.observability(std::env::var("HOSTNAME").ok().as_deref()),
@@ -341,6 +351,7 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         stage_variable_overrides: config.stage_variable_overrides(std::env::vars()),
         overrides_path: config.integration_overrides.clone(),
         aws: Arc::clone(&aws),
+        keys,
         http,
     };
     builder.enforcement.warn_if_relaxed();
@@ -452,6 +463,7 @@ mod tests {
                 LambdaEndpoints::default(),
                 reqwest::Client::new(),
             )),
+            keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
         }
     }
 

@@ -415,6 +415,7 @@ mod tests {
             },
             http: reqwest::Client::new(),
             aws: clients,
+            keys: Arc::new(crate::authz::KeyStore::new(reqwest::Client::new(), [])),
             observer: StageObserver::new(&observability, &model, "abc", Some("prod")),
         });
         let (router, _) = build(&model, &ctx, &BasePath::default());

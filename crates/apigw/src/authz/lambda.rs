@@ -5,15 +5,14 @@
 //! it returns by identity source, and evaluates the returned policy against the
 //! method being called on every request, cached or not.
 
-use std::str::FromStr;
 use std::time::Duration;
 
-use apigw_regex::{JavaRegex, RegexError};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::cache::TtlCache;
 use super::identity_source::{IdentitySource, IdentitySources};
+use super::pattern::TokenPattern;
 use super::policy::{AccessRequest, Decision, MethodArn, PolicyDocument};
 use super::{AuthRequest, Denial};
 use crate::aws::{ArnScope, FunctionArn, IntegrationCredentials, RoleArn};
@@ -30,28 +29,6 @@ const MAX_TTL: Duration = Duration::from_hours(1);
 const DEFAULT_REST_TTL: Duration = Duration::from_mins(5);
 /// Distinct identities whose results are kept per authorizer.
 const CACHE_CAPACITY: usize = 10_000;
-
-/// A `TOKEN` authorizer's `identityValidationExpression`, a Java regular
-/// expression the whole token must match. A token that does not match is
-/// rejected with 401 before the function is invoked.
-#[derive(Debug)]
-struct TokenPattern(Box<JavaRegex>);
-
-impl FromStr for TokenPattern {
-    type Err = RegexError;
-
-    fn from_str(expression: &str) -> Result<Self, Self::Err> {
-        JavaRegex::new(expression).map(|regex| Self(Box::new(regex)))
-    }
-}
-
-impl TokenPattern {
-    /// Whether `token` matches. A match that cannot be completed (the backtrack
-    /// limit) is an error, which answers 500 rather than guessing.
-    fn is_match(&self, token: &str) -> Result<bool, RegexError> {
-        self.0.matches(token)
-    }
-}
 
 #[derive(Debug)]
 enum Flavor {
@@ -147,7 +124,7 @@ impl LambdaAuthorizer {
                     .as_deref()
                     .map(str::parse)
                     .transpose()
-                    .map_err(|e: RegexError| {
+                    .map_err(|e: apigw_regex::RegexError| {
                         format!("identityValidationExpression cannot be evaluated: {e}")
                     })?,
             },

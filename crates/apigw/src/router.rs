@@ -357,6 +357,7 @@ mod tests {
             enforcement,
             http: reqwest::Client::new(),
             aws: aws(),
+            keys: Arc::new(crate::authz::KeyStore::new(reqwest::Client::new(), [])),
             observer: crate::observability::StageObserver::disabled(),
         })
     }
@@ -838,6 +839,7 @@ mod tests {
             enforcement: STRICT,
             http: reqwest::Client::new(),
             aws,
+            keys: Arc::new(crate::authz::KeyStore::new(reqwest::Client::new(), [])),
             observer: crate::observability::StageObserver::disabled(),
         });
         let (router, _) = build(&model, &api, &BasePath::default());
