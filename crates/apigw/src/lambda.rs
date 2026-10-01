@@ -2,6 +2,7 @@
 //! (payload format 1.0 for REST APIs, 1.0 or 2.0 for HTTP APIs), buffered
 //! (`Invoke`) or streamed (`InvokeWithResponseStream`).
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
@@ -16,9 +17,10 @@ use tokio::time::Instant as TokioInstant;
 use crate::authz::MethodArn;
 use crate::aws::AwsClients;
 use crate::gateway::GatewayError;
+use crate::header_policy::{Flavor, IamAuthorization};
 use crate::integration::{LambdaProxy, StageVariables};
 use crate::lambda_response::{PreludeError, ProxyResponse, StreamBody, StreamPrelude};
-use crate::model::{ApiKind, PayloadVersion, ResponseTransferMode};
+use crate::model::{ApiKind, PayloadVersion, Protection, ResponseTransferMode};
 use crate::pipeline::RequestContext;
 use crate::route::Route;
 
@@ -34,8 +36,14 @@ impl LambdaProxy {
         ctx: &mut RequestContext,
         stage_variables: &StageVariables,
     ) -> Result<Response, GatewayError> {
+        let iam = if route.protections.iter().any(|p| p == Protection::Iam) {
+            IamAuthorization::Used
+        } else {
+            IamAuthorization::NotUsed
+        };
         let event = ProxyEvent::new(ctx, stage_variables)
             .with_account(self.function.account().unwrap_or_default())
+            .with_header_table(iam)
             .render(self.payload)
             .to_string()
             .into_bytes();
@@ -90,10 +98,12 @@ impl LambdaProxy {
             tracing::error!(route = %route.key, function = %self.function, bytes = invocation.payload.len(), "Lambda response is larger than the invocation payload limit");
             return Err(GatewayError::IntegrationFailure);
         }
-        ProxyResponse::into_http(&invocation.payload, self.payload).map_err(|reason| {
+        let mut response = ProxyResponse::into_http(&invocation.payload, self.payload).map_err(|reason| {
             tracing::error!(route = %route.key, function = %self.function, reason, "malformed Lambda proxy response");
             GatewayError::IntegrationFailure
-        })
+        })?;
+        Self::remap_headers(ctx.api.kind, &mut response);
+        Ok(response)
     }
 
     /// Starts the invocation and answers as soon as the function has sent its
@@ -146,8 +156,16 @@ impl LambdaProxy {
             tracing::error!(route = %route.key, function = %self.function, reason, "invalid response metadata in Lambda stream");
             GatewayError::MalformedStreamingResponse
         })?;
+        Self::remap_headers(ctx.api.kind, &mut response);
         *response.body_mut() = StreamBody::spawn(stream, first, deadline);
         Ok(response)
+    }
+
+    /// REST APIs rename and drop some of the function's response headers.
+    fn remap_headers(kind: ApiKind, response: &mut Response) {
+        if kind == ApiKind::Rest {
+            Flavor::Lambda.remap_response(response.headers_mut());
+        }
     }
 
     fn stream_timeout(&self, route: &Route) -> GatewayError {
@@ -250,6 +268,9 @@ pub(crate) struct ProxyEvent<'a> {
     /// The account the event reports: API Gateway reports the API owner's,
     /// which a self-hosted gateway only knows from the function's ARN.
     account_id: &'a str,
+    /// REST proxy events carry the client's headers as API Gateway's header
+    /// table lets them through; `None` sends them all, as authorizer events do.
+    header_table: Option<IamAuthorization>,
 }
 
 impl<'a> ProxyEvent<'a> {
@@ -258,7 +279,14 @@ impl<'a> ProxyEvent<'a> {
             ctx,
             stage_variables,
             account_id: "",
+            header_table: None,
         }
+    }
+
+    /// Applies API Gateway's REST header table to the event's headers.
+    pub(crate) fn with_header_table(mut self, iam: IamAuthorization) -> Self {
+        self.header_table = Some(iam);
+        self
     }
 
     /// Reports `account_id` as the account in `requestContext`.
@@ -318,8 +346,14 @@ impl<'a> ProxyEvent<'a> {
     /// client's case, everything else is lower case.
     fn headers(&self) -> MultiValues {
         let keep_case = self.ctx.api.kind == ApiKind::Rest;
+        let allowed = match self.header_table {
+            Some(iam) if keep_case => {
+                Cow::Owned(Flavor::Lambda.request_headers(&self.ctx.headers, iam))
+            }
+            Some(_) | None => Cow::Borrowed(&self.ctx.headers),
+        };
         let mut headers = MultiValues::default();
-        for (name, value) in &self.ctx.headers {
+        for (name, value) in allowed.iter() {
             let name = if keep_case {
                 self.ctx.header_case.spelling(name.as_str())
             } else {
@@ -393,7 +427,7 @@ impl<'a> ProxyEvent<'a> {
                 "extendedRequestId": ctx.extended_request_id(),
                 "httpMethod": ctx.method.as_str(),
                 "identity": self.identity(),
-                "path": ctx.path,
+                "path": ctx.full_path,
                 "protocol": ctx.protocol(),
                 "requestId": ctx.request_id.to_string(),
                 "requestTime": ctx.request_time(),
@@ -425,7 +459,7 @@ impl<'a> ProxyEvent<'a> {
         let mut event = json!({
             "version": "2.0",
             "routeKey": ctx.route_key.as_str(),
-            "rawPath": ctx.path,
+            "rawPath": ctx.full_path,
             "rawQueryString": ctx.query.raw().unwrap_or_default(),
             "headers": headers.joined(),
             "requestContext": {
@@ -435,7 +469,7 @@ impl<'a> ProxyEvent<'a> {
                 "domainPrefix": ctx.domain_prefix(),
                 "http": {
                     "method": ctx.method.as_str(),
-                    "path": ctx.path,
+                    "path": ctx.full_path,
                     "protocol": ctx.protocol(),
                     "sourceIp": ctx.source_ip(),
                     "userAgent": ctx.header_str("user-agent"),
@@ -564,7 +598,8 @@ mod tests {
         assert_eq!(context["extendedRequestId"], ctx.extended_request_id());
         assert_ne!(context["extendedRequestId"], context["requestId"]);
         assert_eq!(context["protocol"], "HTTP/1.1");
-        assert_eq!(context["path"], "/pets/7");
+        assert_eq!(context["path"], "/prod/pets/7");
+        assert_eq!(event["path"], "/pets/7");
         assert!(context["resourceId"].is_null());
         assert_eq!(context["resourcePath"], "/pets/{petId}");
         let identity = context["identity"].as_object().unwrap();
@@ -607,6 +642,33 @@ mod tests {
         assert_eq!(http["headers"]["content-type"], "text/plain");
         let v2 = event(&ctx, PayloadVersion::V2);
         assert_eq!(v2["headers"]["content-type"], "text/plain");
+    }
+
+    #[test]
+    fn rest_events_apply_the_header_table_but_authorizer_events_do_not() {
+        let mut ctx = incoming(b"");
+        for (name, value) in [
+            ("expect", "100-continue"),
+            ("content-md5", "abc"),
+            ("via", "1.1 proxy"),
+            ("authorization", "Bearer t"),
+        ] {
+            ctx.headers.insert(name, HeaderValue::from_static(value));
+        }
+        let vars = variables();
+        let table = ProxyEvent::new(&ctx, &vars)
+            .with_header_table(IamAuthorization::NotUsed)
+            .render(PayloadVersion::V1);
+        assert!(table["headers"].get("expect").is_none());
+        assert!(table["headers"].get("content-md5").is_none());
+        assert_eq!(table["headers"]["via"], "1.1 proxy");
+        assert_eq!(table["headers"]["authorization"], "Bearer t");
+        let iam = ProxyEvent::new(&ctx, &vars)
+            .with_header_table(IamAuthorization::Used)
+            .render(PayloadVersion::V1);
+        assert!(iam["headers"].get("authorization").is_none());
+        let unfiltered = ProxyEvent::new(&ctx, &vars).render(PayloadVersion::V1);
+        assert_eq!(unfiltered["headers"]["expect"], "100-continue");
     }
 
     #[test]
@@ -789,6 +851,44 @@ mod tests {
             GatewayError::IntegrationFailure,
             "the event, larger than the body, exceeds Lambda's request limit"
         );
+    }
+
+    #[tokio::test]
+    async fn rest_function_responses_are_remapped() {
+        let app = axum::Router::new().route(
+            "/ok",
+            post(|| async {
+                r#"{"statusCode":200,"headers":{"Server":"fn","Date":"d","WWW-Authenticate":"Basic","X-Ok":"1"},"body":"hi"}"#
+            }),
+        );
+        let base = serve(app).await;
+        let mut rest = incoming(b"");
+        let response = run(
+            ResponseTransferMode::Buffered,
+            &base.join("ok").unwrap(),
+            &mut rest,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.headers()["x-amzn-remapped-server"], "fn");
+        assert_eq!(response.headers()["x-amzn-remapped-date"], "d");
+        assert_eq!(
+            response.headers()["x-amzn-remapped-www-authenticate"],
+            "Basic"
+        );
+        assert_eq!(response.headers()["x-ok"], "1");
+        assert!(response.headers().get("server").is_none());
+
+        let mut http = incoming(b"");
+        http.api.kind = ApiKind::Http;
+        let response = run(
+            ResponseTransferMode::Buffered,
+            &base.join("ok").unwrap(),
+            &mut http,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.headers()["server"], "fn");
     }
 
     #[tokio::test]

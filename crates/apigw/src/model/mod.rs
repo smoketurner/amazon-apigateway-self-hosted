@@ -339,9 +339,6 @@ impl IntegrationSpec {
         if self.content_handling.is_some() {
             features.push(Feature::ContentHandling);
         }
-        if self.tls_config.is_some() {
-            features.push(Feature::IntegrationTlsConfig);
-        }
         if !self.cache_key_parameters.is_empty() {
             features.push(Feature::ResponseCaching);
         }
@@ -550,7 +547,6 @@ pub(crate) enum Feature {
     BinaryMediaTypes,
     Compression,
     ContentHandling,
-    IntegrationTlsConfig,
     ResponseCaching,
 }
 
@@ -560,7 +556,6 @@ impl fmt::Display for Feature {
             Self::BinaryMediaTypes => "binary media types",
             Self::Compression => "compression",
             Self::ContentHandling => "content handling",
-            Self::IntegrationTlsConfig => "integration TLS config",
             Self::ResponseCaching => "response caching",
         };
         f.write_str(name)

@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::body::Bytes;
+use axum::extract::OriginalUri;
 use axum::extract::Request;
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, Version, header};
@@ -47,6 +48,17 @@ pub(crate) struct QueryString(Option<String>);
 impl QueryString {
     pub(crate) fn new(raw: Option<&str>) -> Self {
         Self(raw.filter(|q| !q.is_empty()).map(str::to_owned))
+    }
+
+    /// The query string of a request to an API of this type. REST APIs split
+    /// the data on `;` as they do on `&` ("The semicolon character (`;`) is not
+    /// supported for any request URL query string and results in the data being
+    /// split"), so `a=1;b=2` is two parameters.
+    pub(crate) fn for_api(kind: ApiKind, raw: Option<&str>) -> Self {
+        match kind {
+            ApiKind::Rest => Self::new(raw.map(|query| query.replace(';', "&")).as_deref()),
+            ApiKind::Http => Self::new(raw),
+        }
     }
 
     pub(crate) fn raw(&self) -> Option<&str> {
@@ -194,7 +206,11 @@ pub(crate) struct RequestContext {
     pub(crate) request_id: Uuid,
     pub(crate) received: jiff::Timestamp,
     pub(crate) method: Method,
+    /// The request path within the API (`/pets/7`).
     pub(crate) path: String,
+    /// The path as the client sent it, including a stage prefix served with
+    /// `--base-path` (`/prod/pets/7`): `$context.path`, and HTTP APIs' `rawPath`.
+    pub(crate) full_path: String,
     pub(crate) query: QueryString,
     pub(crate) headers: HeaderMap,
     /// The client's spelling of header names, known for HTTP/1 requests.
@@ -295,6 +311,10 @@ impl RequestContext {
             tracing::warn!("request reached the pipeline without a client identity");
             ClientIdentity::unknown()
         });
+        let full_path = extensions
+            .get::<OriginalUri>()
+            .map_or_else(|| uri.path(), |original| original.0.path())
+            .to_owned();
         let (route_key, resource_path) = match route {
             Some(route) => (route.key.clone(), route.path.to_string()),
             None => (RouteKey::from(""), uri.path().to_owned()),
@@ -312,7 +332,8 @@ impl RequestContext {
             received: jiff::Timestamp::now(),
             method,
             path: uri.path().to_owned(),
-            query: QueryString::new(uri.query()),
+            full_path,
+            query: QueryString::for_api(api.kind, uri.query()),
             headers,
             header_case,
             version,
@@ -406,7 +427,7 @@ impl RequestContext {
                 "sourceIp": self.source_ip(),
                 "userAgent": self.header_str("user-agent"),
             },
-            "path": self.path,
+            "path": self.full_path,
             "protocol": self.protocol(),
             "requestId": self.request_id.to_string(),
             "requestTime": self.request_time(),
@@ -483,6 +504,7 @@ pub(crate) mod tests {
             received: jiff::Timestamp::from_second(1_700_000_000).unwrap(),
             method: Method::POST,
             path: "/pets/7".to_owned(),
+            full_path: "/prod/pets/7".to_owned(),
             query: QueryString::new(Some("q=1&q=2")),
             headers,
             header_case: HeaderCase::default(),
@@ -504,6 +526,24 @@ pub(crate) mod tests {
         assert_eq!(FormEncoded("%zz%4").decode(), "%zz%4");
         assert_eq!(FormEncoded("%E2%9C%93").decode(), "\u{2713}");
         assert_eq!(FormEncoded("%FF").decode(), "\u{FFFD}");
+    }
+
+    #[test]
+    fn rest_query_strings_split_on_semicolons_and_http_apis_do_not() {
+        let rest = QueryString::for_api(ApiKind::Rest, Some("a=1;b=2&c=3"));
+        assert_eq!(rest.raw(), Some("a=1&b=2&c=3"));
+        assert_eq!(
+            rest.pairs(),
+            vec![
+                ("a".to_owned(), "1".to_owned()),
+                ("b".to_owned(), "2".to_owned()),
+                ("c".to_owned(), "3".to_owned()),
+            ]
+        );
+        let http = QueryString::for_api(ApiKind::Http, Some("a=1;b=2"));
+        assert_eq!(http.raw(), Some("a=1;b=2"));
+        assert_eq!(http.pairs(), vec![("a".to_owned(), "1;b=2".to_owned())]);
+        assert_eq!(QueryString::for_api(ApiKind::Rest, None).raw(), None);
     }
 
     #[test]

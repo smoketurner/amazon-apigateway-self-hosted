@@ -28,6 +28,21 @@ All notable changes to this project are documented here. The format follows
   timeout and 150 KB cap, cached for two hours, and refreshed at most every 30 s when a token names an
   unknown key. Issuer, audience, expiry, and scopes are checked, and claims reach `$context.authorizer`.
   `--issuer-endpoint` fetches an issuer's keys from a mirror instead.
+- REST header behavior from API Gateway's documented header table: request headers API Gateway
+  drops never reach `HTTP_PROXY` backends or Lambda, backend and Lambda response headers are
+  dropped or renamed to `X-Amzn-Remapped-*`, `X-HTTP-Method-Override` replaces the method before
+  routing, and `;` splits query strings. `HTTP_PROXY` requests gain `x-amzn-apigateway-api-id`,
+  a default `User-Agent`, `X-Forwarded-Proto`, and `X-Forwarded-Port`. HTTP APIs send `Forwarded`
+  in place of `X-Forwarded-*` and a `Content-Type` on body-less requests.
+- `HTTP_PROXY` `tlsConfig`: `insecureSkipVerification` and `serverNameToVerify` (verification and
+  SNI against that name, connecting to the integration's own host), with a client cached per
+  server name and address set. The unenforced-feature report no longer lists it.
+- Integration timeouts are bounded as API Gateway bounds them: at least 50 ms, REST not capped at 29
+  s, HTTP APIs at 30 s.
+- Request-size quotas: REST URLs over 10,240 characters answer `414` and REST headers over 20,480
+  bytes `431`; HTTP API request line plus headers over 10,240 bytes answer `431`. HTTP/2 header
+  lists up to 64 KiB reach the check instead of being refused by hyper at 16 KiB.
+
 - Lambda authorizers are evaluated. REST `TOKEN` (with `identityValidationExpression`) and `REQUEST`
   authorizers and HTTP API `REQUEST` authorizers (payload 1.0 and 2.0, simple responses) are invoked
   with the request's identity sources, their results are cached by identity source and TTL, and the

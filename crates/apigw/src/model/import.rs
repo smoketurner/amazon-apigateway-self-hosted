@@ -664,7 +664,7 @@ mod tests {
             vec!["orders:write".to_owned()]
         );
         let items = ops["/items/{id}"];
-        assert_eq!(items.unenforced(), vec![Feature::IntegrationTlsConfig]);
+        assert!(items.unenforced().is_empty());
         assert!(
             items.protections.contains(Protection::Authorizer),
             "document-level security applies"

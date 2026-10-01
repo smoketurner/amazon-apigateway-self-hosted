@@ -19,7 +19,7 @@ use crate::authz::{Authorizers, ResourcePolicies};
 use crate::aws::{AwsClients, RoleArn, RoleStatus};
 use crate::canary::{CanaryRelease, CanarySummary};
 use crate::domain::{DomainName, DomainRegistry, DomainSummary, Resolution};
-use crate::gateway::{ApiContext, Enforcement, RequestId};
+use crate::gateway::{ApiContext, Enforcement, GatewayError, RequestId};
 use crate::http_routes::{HttpRoutes, PathPattern};
 use crate::identity::ClientIdentity;
 use crate::integration::Integration;
@@ -54,7 +54,7 @@ impl BasePath {
                 let ctx = Arc::clone(&ctx);
                 async move {
                     let pending = ctx.observer.begin(&ctx, &mut request, None);
-                    let response = ctx.reject_unrouted(request);
+                    let response = ctx.reject(request, GatewayError::NoRoute);
                     ctx.observer.finish(pending, response)
                 }
             })
@@ -173,12 +173,14 @@ impl PathRoutes {
     }
 
     async fn handle(&self, mut request: Request) -> Response {
+        self.ctx.kind.override_method(&mut request);
         let route = self.select(request.method());
         let pending = self.ctx.observer.begin(&self.ctx, &mut request, route);
-        let response = match route {
+        let response = match (self.ctx.kind.request_limits().check(&request), route) {
+            (Err(exceeded), _) => self.ctx.reject(request, exceeded.into()),
             // The pipeline future holds whole SDK calls; box it once here.
-            Some(route) => Box::pin(Pipeline::new(&self.ctx, route).run(request)).await,
-            None => self.ctx.reject_unrouted(request),
+            (Ok(()), Some(route)) => Box::pin(Pipeline::new(&self.ctx, route).run(request)).await,
+            (Ok(()), None) => self.ctx.reject(request, GatewayError::NoRoute),
         };
         self.ctx.observer.finish(pending, response)
     }
@@ -198,13 +200,14 @@ impl HttpHandler {
             self.ctx
                 .observer
                 .begin(&self.ctx, &mut request, selection.as_ref().map(|s| s.route));
-        let response = match selection {
-            Some(selection) => {
+        let response = match (self.ctx.kind.request_limits().check(&request), selection) {
+            (Err(exceeded), _) => self.ctx.reject(request, exceeded.into()),
+            (Ok(()), Some(selection)) => {
                 let pipeline =
                     Pipeline::new(&self.ctx, selection.route).with_path_params(selection.params);
                 Box::pin(pipeline.run(request)).await
             }
-            None => self.ctx.reject_unrouted(request),
+            (Ok(()), None) => self.ctx.reject(request, GatewayError::NoRoute),
         };
         self.ctx.observer.finish(pending, response)
     }
@@ -1092,6 +1095,83 @@ mod tests {
                 .all(|s| s.protections.contains(Protection::ResourcePolicy)
                     && s.problems.iter().all(|p| !p.contains("resource policy"))),
             "{summaries:?}"
+        );
+    }
+
+    async fn status_with(
+        router: &Router,
+        method: Method,
+        uri: &str,
+        headers: &[(&str, String)],
+    ) -> StatusCode {
+        let mut builder = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            builder = builder.header(*name, value);
+        }
+        let request = builder.body(Body::empty()).unwrap();
+        router.clone().oneshot(request).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn rest_apis_honor_method_override_and_enforce_request_limits() {
+        let (rest, _) = router(&sample(), ApiKind::Rest, AuthorizationMode::Enforce, "");
+        assert_eq!(
+            status_with(&rest, Method::POST, "/pets", &[]).await,
+            StatusCode::ACCEPTED
+        );
+        let override_get = [("x-http-method-override", "GET".to_owned())];
+        assert_eq!(
+            status_with(&rest, Method::POST, "/pets", &override_get).await,
+            StatusCode::OK,
+            "the header replaces the method before routing"
+        );
+
+        let at_limit = format!("/pets?q={}", "a".repeat(10_240 - "/pets?q=".len()));
+        assert_eq!(
+            status_with(&rest, Method::GET, &at_limit, &[]).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status_with(&rest, Method::GET, &format!("{at_limit}a"), &[]).await,
+            StatusCode::URI_TOO_LONG
+        );
+        let big_header = [("x-pad", "a".repeat(20_480 - "x-pad: \r\n".len()))];
+        assert_eq!(
+            status_with(&rest, Method::GET, "/pets", &big_header).await,
+            StatusCode::OK
+        );
+        let bigger = [("x-pad", "a".repeat(20_481 - "x-pad: \r\n".len()))];
+        assert_eq!(
+            status_with(&rest, Method::GET, "/pets", &bigger).await,
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+        );
+        assert_eq!(
+            status_with(&rest, Method::GET, "/missing", &bigger).await,
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+            "unrouted requests are measured too"
+        );
+
+        let (http, _) = router(&sample(), ApiKind::Http, AuthorizationMode::Enforce, "");
+        assert_eq!(
+            status_with(&http, Method::POST, "/pets", &override_get).await,
+            StatusCode::ACCEPTED,
+            "HTTP APIs ignore the override header"
+        );
+        let http_limit = [(
+            "x-pad",
+            "a".repeat(10_240 - "GET /pets HTTP/1.1\r\nx-pad: \r\n".len()),
+        )];
+        assert_eq!(
+            status_with(&http, Method::GET, "/pets", &http_limit).await,
+            StatusCode::OK
+        );
+        let http_over = [(
+            "x-pad",
+            "a".repeat(10_241 - "GET /pets HTTP/1.1\r\nx-pad: \r\n".len()),
+        )];
+        assert_eq!(
+            status_with(&http, Method::GET, "/pets", &http_over).await,
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
         );
     }
 
