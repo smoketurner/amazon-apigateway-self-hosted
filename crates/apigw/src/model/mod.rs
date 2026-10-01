@@ -564,7 +564,6 @@ pub(crate) enum Feature {
     ParameterMapping,
     Throttling,
     ResponseCaching,
-    Tracing,
     Canary,
 }
 
@@ -579,7 +578,6 @@ impl fmt::Display for Feature {
             Self::ParameterMapping => "parameter mapping",
             Self::Throttling => "throttling",
             Self::ResponseCaching => "response caching",
-            Self::Tracing => "tracing",
             Self::Canary => "canary",
         };
         f.write_str(name)

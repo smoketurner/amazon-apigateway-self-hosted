@@ -510,7 +510,7 @@ mod tests {
         let mut snapshot = snapshot();
         snapshot.openapi =
             json!({"x-amazon-apigateway-binary-media-types": ["image/png"], "paths": {}});
-        snapshot.stage_settings.tracing_enabled = true;
+        snapshot.stage_settings.cache_cluster_enabled = true;
         let inputs = Inputs {
             snapshot,
             overrides: IntegrationOverrides::default(),
@@ -519,7 +519,7 @@ mod tests {
         let rendered = serde_json::to_value(&loaded.summary).unwrap();
         assert_eq!(
             rendered["unenforced"],
-            json!(["binary_media_types", "tracing"])
+            json!(["binary_media_types", "response_caching"])
         );
     }
 

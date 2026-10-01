@@ -285,9 +285,6 @@ impl StageSettings {
         if self.cache_cluster_enabled {
             features.push(Feature::ResponseCaching);
         }
-        if self.tracing_enabled {
-            features.push(Feature::Tracing);
-        }
         if self
             .canary
             .as_ref()
@@ -519,7 +516,6 @@ mod tests {
             vec![
                 Feature::Throttling,
                 Feature::ResponseCaching,
-                Feature::Tracing,
                 Feature::Canary
             ]
         );

@@ -99,7 +99,7 @@ Routes whose protection is not evaluated yet are refused, never served unprotect
 |---|---|---|---|
 | Access logs to CloudWatch Logs or Firehose | Supported | Supported | The stage's `$context` format is rendered per request and written to the stage's log group (one stream per process) or Firehose stream, standard output otherwise. `$context.responseLength` is `-` for streamed responses of unknown length; variables for features not implemented yet render `-` ([#41](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/41)) |
 | CloudWatch metrics | Partial | Partial | Published as embedded metric format events under `--metrics-namespace` (not `AWS/ApiGateway`), aggregated per minute, with API Gateway's metric names and dimensions. Use `Sum` for `Count` and error metrics; latency percentiles are estimated from at most 100 samples per minute. No cache metrics until [#38](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/38), no `DataProcessed` ([#42](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/42)) |
-| X-Ray tracing | Planned | Planned | A client's `X-Amzn-Trace-Id` is passed to Lambda invocations; no segments are sent ([#43](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/43)) |
+| X-Ray tracing | Partial | n/a | REST stages with tracing send one segment per sampled request and pass `X-Amzn-Trace-Id` (and `traceparent` to HTTP backends) downstream; callers' sampling decisions are honored, otherwise X-Ray's default rule (1 per second, then 5%) is used without fetching sampling rules. No integration subsegment, no passive mode ([#43](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/43)) |
 | Execution logs | Partial | n/a | `loggingLevel` and `dataTraceEnabled` write a request trace to `API-Gateway-Execution-Logs_{apiId}/{stage}`; steps this gateway does not perform are not logged and bodies are not logged ([#44](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/44)) |
 
 ## Operating the gateway
@@ -150,7 +150,6 @@ Imported settings that are not enforced yet map to issues as follows:
 | `throttling` | [#21](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/21) |
 | `response_caching` | [#38](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/38) |
 | `canary` | [#39](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/39) |
-| `tracing` | [#43](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/43) |
 
 ## Fidelity limits of the export
 

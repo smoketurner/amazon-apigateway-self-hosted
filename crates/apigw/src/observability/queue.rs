@@ -371,11 +371,75 @@ impl FirehoseShipper {
     }
 }
 
+/// Writes segment documents to X-Ray.
+#[derive(Debug)]
+pub(crate) struct XRayShipper {
+    client: aws_sdk_xray::Client,
+}
+
+impl XRayShipper {
+    pub(crate) fn new(client: aws_sdk_xray::Client) -> Self {
+        Self { client }
+    }
+
+    /// X-Ray segment documents are at most 64 kB, and its daemon sends 50 per call.
+    const LIMITS: BatchLimits = BatchLimits {
+        max_events: 50,
+        max_bytes: 50 * 65_536,
+        event_overhead: 0,
+        max_event_bytes: 65_536,
+    };
+
+    /// Sends `events` and returns the segments X-Ray did not process.
+    async fn ship(&self, events: Vec<LogEvent>) -> Vec<LogEvent> {
+        let sent = within_timeout(async {
+            self.client
+                .put_trace_segments()
+                .set_trace_segment_documents(Some(
+                    events.iter().map(|e| e.message.clone()).collect(),
+                ))
+                .send()
+                .await
+                .map_err(|err| {
+                    ShipError::Aws(aws_sdk_xray::error::DisplayErrorContext(err).to_string())
+                })
+        })
+        .await;
+        match sent {
+            Err(err) => {
+                tracing::warn!(%err, count = events.len(), "failed to send trace segments");
+                events
+            }
+            Ok(output) if output.unprocessed_trace_segments().is_empty() => Vec::new(),
+            Ok(output) => {
+                for segment in output.unprocessed_trace_segments() {
+                    tracing::warn!(
+                        segment = segment.id(),
+                        code = segment.error_code(),
+                        message = segment.message(),
+                        "X-Ray did not process a trace segment"
+                    );
+                }
+                let failed: Vec<&str> = output
+                    .unprocessed_trace_segments()
+                    .iter()
+                    .filter_map(|s| s.id())
+                    .collect();
+                events
+                    .into_iter()
+                    .filter(|e| failed.iter().any(|id| e.message.contains(id)))
+                    .collect()
+            }
+        }
+    }
+}
+
 /// Where a worker sends its batches.
 #[derive(Debug)]
 pub(crate) enum Shipper {
     CloudWatch(CloudWatchShipper),
     Firehose(FirehoseShipper),
+    XRay(XRayShipper),
     Stdout,
 }
 
@@ -391,6 +455,7 @@ impl Shipper {
         match self {
             Self::CloudWatch(_) => CloudWatchShipper::LIMITS,
             Self::Firehose(_) => FirehoseShipper::LIMITS,
+            Self::XRay(_) => XRayShipper::LIMITS,
             Self::Stdout => Self::STDOUT_LIMITS,
         }
     }
@@ -406,6 +471,7 @@ impl Shipper {
         match self {
             Self::CloudWatch(shipper) => shipper.ship(events).await,
             Self::Firehose(shipper) => shipper.ship(events).await,
+            Self::XRay(shipper) => shipper.ship(events).await,
             Self::Stdout => Self::write_stdout(events).await,
         }
     }
@@ -525,8 +591,16 @@ impl Worker {
             return;
         }
         let failed = self.shipper.ship(batch.take_sorted()).await;
-        if !failed.is_empty() && !matches!(self.shipper, Shipper::Stdout) {
-            Shipper::write_stdout(failed).await;
+        if failed.is_empty() {
+            return;
+        }
+        match self.shipper {
+            Shipper::Stdout => {}
+            // Trace segments are not log lines; losing them is the fallback.
+            Shipper::XRay(_) => tracing::warn!(count = failed.len(), "dropped trace segments"),
+            Shipper::CloudWatch(_) | Shipper::Firehose(_) => {
+                Shipper::write_stdout(failed).await;
+            }
         }
     }
 }
@@ -748,6 +822,43 @@ mod tests {
         let message = put.body["logEvents"][0]["message"].as_str().unwrap();
         assert!(message.len() <= CloudWatchShipper::LIMITS.max_event_bytes);
         assert!(message.chars().all(|c| c == '\u{e9}'));
+    }
+
+    #[tokio::test]
+    async fn x_ray_segments_are_sent_and_unprocessed_ones_returned() {
+        let aws = MockAws::start().await;
+        let shipper = Shipper::XRay(XRayShipper::new(aws.xray()));
+        let first = event(1, r#"{"id":"aaaaaaaaaaaaaaaa"}"#);
+        let second = event(2, r#"{"id":"bbbbbbbbbbbbbbbb"}"#);
+        assert!(
+            shipper
+                .ship(vec![first.clone(), second.clone()])
+                .await
+                .is_empty()
+        );
+        let call = &aws.calls()[0];
+        assert_eq!(call.target, "/TraceSegments");
+        assert_eq!(call.body["TraceSegmentDocuments"][0], first.message);
+        assert_eq!(call.body["TraceSegmentDocuments"][1], second.message);
+
+        aws.reply(
+            "/TraceSegments",
+            Reply::json(
+                r#"{"UnprocessedTraceSegments":[{"Id":"bbbbbbbbbbbbbbbb","ErrorCode":"InvalidTraceId","Message":"old"}]}"#,
+            ),
+        );
+        assert_eq!(
+            shipper.ship(vec![first, second.clone()]).await,
+            vec![second]
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_x_ray_calls_return_every_segment() {
+        let aws = MockAws::start().await;
+        aws.reply("/TraceSegments", Reply::error("InvalidRequestException"));
+        let shipper = Shipper::XRay(XRayShipper::new(aws.xray()));
+        assert_eq!(shipper.ship(vec![event(1, "{}")]).await.len(), 1);
     }
 
     #[tokio::test]
