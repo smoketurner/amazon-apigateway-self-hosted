@@ -1,0 +1,12 @@
+{
+  "name": "rest-http-nonproxy-unsupported-media-type",
+  "source": "hand_written",
+  "api": "rest",
+  "response": {
+    "status": 415,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": "{\"message\":\"Unsupported Media Type\"}"
+  }
+}

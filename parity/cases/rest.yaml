@@ -16,7 +16,6 @@ cases:
     api: rest
     path: /mock/vtl
     query: {name: world}
-    known_gap: "#23"
     compare:
       body: json
 
@@ -56,6 +55,32 @@ cases:
     compare:
       body: ignore
       echo: {headers: [x-mapped-header]}
+
+  # Non-proxy HTTP: request template, parameter mappings, and integration response selection
+  - name: rest-http-nonproxy-template
+    api: rest
+    path: /http-nonproxy/42
+    query: {q: hello, extra: dropped}
+    headers: {x-from-client: not-forwarded}
+    compare:
+      headers: [content-type]
+      body: json
+
+  - name: rest-http-nonproxy-client-error
+    api: rest
+    path: /http-nonproxy/42
+    query: {echo_status: "404"}
+    compare:
+      headers: [content-type]
+      body: json
+
+  - name: rest-http-nonproxy-unsupported-media-type
+    api: rest
+    path: /http-nonproxy/42
+    headers: {content-type: text/plain}
+    compare:
+      headers: [content-type]
+      body: json
 
   # AWS_PROXY (payload 1.0) through apigw's Lambda endpoint override
   - name: rest-lambda-proxy-greedy

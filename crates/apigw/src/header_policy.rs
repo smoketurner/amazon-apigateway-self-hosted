@@ -18,10 +18,6 @@ const REMAPPED_PREFIX: &str = "x-amzn-remapped-";
 /// order (`http`/`http_proxy`/`lambda`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Flavor {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by non-proxy HTTP integrations (#28)")
-    )]
     Http,
     HttpProxy,
     Lambda,

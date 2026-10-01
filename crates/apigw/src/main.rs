@@ -25,6 +25,7 @@ mod lambda;
 mod lambda_response;
 mod limits;
 mod listener;
+mod mapped;
 mod mapping;
 mod model;
 mod observability;

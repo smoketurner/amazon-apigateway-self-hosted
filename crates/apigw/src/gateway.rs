@@ -212,6 +212,9 @@ pub(crate) enum GatewayError {
     RequestTooLarge,
     /// An integration this gateway can't execute yet.
     UnsupportedIntegration,
+    /// No request template matches the request's `Content-Type` and the
+    /// integration's `passthroughBehavior` does not allow the body through.
+    UnsupportedMediaType,
     /// A streaming integration's output doesn't follow the response streaming
     /// format; API Gateway answers `500`.
     MalformedStreamingResponse,
@@ -266,6 +269,7 @@ impl GatewayError {
                 StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
                 "Request Header Fields Too Large",
             ),
+            (Self::UnsupportedMediaType, _) => Failure::new(ResponseType::UnsupportedMediaType),
             (Self::UnsupportedIntegration, _) => Failure::gateway(
                 StatusCode::NOT_IMPLEMENTED,
                 "Integration not supported by this gateway",

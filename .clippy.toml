@@ -26,6 +26,7 @@ absolute-paths-allowed-crates = [
     "proc_macro",
     "anyhow",
     "apigw_regex",
+    "apigw_vtl",
     "aws_config",
     "aws_lc_rs",
     "aws_sdk_apigateway",

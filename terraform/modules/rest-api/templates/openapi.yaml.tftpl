@@ -191,6 +191,11 @@ paths:
           required: false
           schema:
             type: string
+        - name: echo_status
+          in: query
+          required: false
+          schema:
+            type: string
       responses:
         "200":
           description: "templated response"
@@ -206,6 +211,7 @@ paths:
           integration.request.path.backendId: "method.request.path.id"
           integration.request.header.x-echo-secret: "stageVariables.echo_secret"
           integration.request.header.Content-Type: "'application/json'"
+          integration.request.querystring.echo_status: "method.request.querystring.echo_status"
         requestTemplates:
           application/json: |-
             {"id":"$input.params('id')","q":"$input.params('q')","stage":"$context.stage"}
@@ -214,7 +220,7 @@ paths:
             statusCode: "200"
             responseTemplates:
               application/json: |-
-                {"upstreamStatus":"ok","path":$input.json('$.rawPath')}
+                {"upstreamStatus":"ok","path":$input.json('$.rawPath'),"query":$input.json('$.rawQueryString'),"received":$input.json('$.body')}
           "4\\d{2}":
             statusCode: "400"
             responseTemplates:
