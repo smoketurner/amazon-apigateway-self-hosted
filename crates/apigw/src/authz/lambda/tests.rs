@@ -4,34 +4,52 @@ fn pattern(expression: &str) -> TokenPattern {
     expression.parse().unwrap()
 }
 
+fn matches(expression: &str, token: &str) -> bool {
+    pattern(expression).is_match(token).unwrap()
+}
+
 #[test]
 fn token_patterns_match_the_whole_token() {
-    let bearer = pattern("^Bearer [-0-9a-zA-Z._]+$");
-    assert!(bearer.is_match("Bearer abc.DEF-1_2"));
-    assert!(!bearer.is_match("Bearer "));
-    assert!(!bearer.is_match("Bearer a b"));
-    assert!(!bearer.is_match("xBearer a"));
-    assert!(pattern("a|b").is_match("a"));
-    assert!(!pattern("a|b").is_match("ab"));
-    assert!(!pattern("a").is_match("a\n"));
-    assert!(pattern("").is_match(""));
-    assert!(!pattern("").is_match("a"));
+    let bearer = "^Bearer [-0-9a-zA-Z._]+$";
+    assert!(matches(bearer, "Bearer abc.DEF-1_2"));
+    assert!(!matches(bearer, "Bearer "));
+    assert!(!matches(bearer, "Bearer a b"));
+    assert!(!matches(bearer, "xBearer a"));
+    assert!(matches("a|b", "a"));
+    assert!(!matches("a|b", "ab"));
+    assert!(!matches("a", "a\n"));
+    assert!(matches("", ""));
+    assert!(!matches("", "a"));
 }
 
 #[test]
 fn token_pattern_classes_are_ascii_as_in_java() {
-    assert!(pattern(r"\w+").is_match("abc_123"));
-    assert!(!pattern(r"\w+").is_match("caf\u{e9}"));
-    assert!(pattern(r"\d+").is_match("123"));
-    assert!(!pattern(r"\d+").is_match("\u{663}"));
-    assert!(pattern("caf\u{e9}").is_match("caf\u{e9}"));
+    assert!(matches(r"\w+", "abc_123"));
+    assert!(!matches(r"\w+", "caf\u{e9}"));
+    assert!(matches(r"\d+", "123"));
+    assert!(!matches(r"\d+", "\u{663}"));
+    assert!(matches("caf\u{e9}", "caf\u{e9}"));
 }
 
 #[test]
-fn token_patterns_that_rust_cannot_evaluate_are_rejected() {
-    for expression in ["(?=a)b", r"(a)\1", "(", "[", r"\p{L}+", "a{99999999}"] {
+fn java_constructs_beyond_plain_regular_expressions_work() {
+    assert!(matches(r"(?i)bearer .+", "BEARER x"));
+    assert!(matches(r"Bearer (?!none$).+", "Bearer x"));
+    assert!(!matches(r"Bearer (?!none$).+", "Bearer none"));
+    assert!(matches(r"(\w)\1", "aa"));
+}
+
+#[test]
+fn token_patterns_that_cannot_be_evaluated_are_rejected() {
+    for expression in [r"\G", r"\X", "(", "[", r"\p{javaLowerCase}"] {
         assert!(expression.parse::<TokenPattern>().is_err(), "{expression}");
     }
+}
+
+#[test]
+fn a_runaway_match_is_an_error_not_a_pass() {
+    let hostile = pattern(r"(a|aa)+\1c");
+    assert!(hostile.is_match(&format!("{}b", "a".repeat(200))).is_err());
 }
 
 #[test]

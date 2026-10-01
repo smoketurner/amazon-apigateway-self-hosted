@@ -8,6 +8,7 @@
 use std::str::FromStr;
 use std::time::Duration;
 
+use apigw_regex::{JavaRegex, RegexError};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
@@ -30,32 +31,25 @@ const DEFAULT_REST_TTL: Duration = Duration::from_mins(5);
 /// Distinct identities whose results are kept per authorizer.
 const CACHE_CAPACITY: usize = 10_000;
 
-/// A `TOKEN` authorizer's `identityValidationExpression`. A token that does not
-/// match is rejected with 401 before the function is invoked.
-///
-/// The expression is a Java regular expression matched against the whole
-/// token. This is compiled as a Rust regular expression with ASCII classes,
-/// which accepts the common subset (anchors, classes, groups, alternation,
-/// quantifiers) and rejects anything else, such as look-around, when the
-/// definition loads.
-// TODO(#22): translate Java syntax with the shared regex translator.
+/// A `TOKEN` authorizer's `identityValidationExpression`, a Java regular
+/// expression the whole token must match. A token that does not match is
+/// rejected with 401 before the function is invoked.
 #[derive(Debug)]
-struct TokenPattern(regex::bytes::Regex);
+struct TokenPattern(Box<JavaRegex>);
 
 impl FromStr for TokenPattern {
-    type Err = regex::Error;
+    type Err = RegexError;
 
     fn from_str(expression: &str) -> Result<Self, Self::Err> {
-        regex::bytes::RegexBuilder::new(&format!(r"\A(?:{expression})\z"))
-            .unicode(false)
-            .build()
-            .map(Self)
+        JavaRegex::new(expression).map(|regex| Self(Box::new(regex)))
     }
 }
 
 impl TokenPattern {
-    fn is_match(&self, token: &str) -> bool {
-        self.0.is_match(token.as_bytes())
+    /// Whether `token` matches. A match that cannot be completed (the backtrack
+    /// limit) is an error, which answers 500 rather than guessing.
+    fn is_match(&self, token: &str) -> Result<bool, RegexError> {
+        self.0.matches(token)
     }
 }
 
@@ -153,7 +147,7 @@ impl LambdaAuthorizer {
                     .as_deref()
                     .map(str::parse)
                     .transpose()
-                    .map_err(|e: regex::Error| {
+                    .map_err(|e: RegexError| {
                         format!("identityValidationExpression cannot be evaluated: {e}")
                     })?,
             },
@@ -225,11 +219,15 @@ impl LambdaAuthorizer {
         if let Flavor::RestToken {
             validation: Some(ref pattern),
         } = self.flavor
-            && !identity
-                .first()
-                .is_some_and(|token| pattern.is_match(token))
         {
-            return Err(Denial::Unauthorized);
+            let token = identity.first().map_or("", String::as_str);
+            let matched = pattern.is_match(token).map_err(|error| {
+                tracing::warn!(function = %self.function, %error, "identityValidationExpression could not be evaluated");
+                Denial::AuthorizerConfiguration
+            })?;
+            if !matched {
+                return Err(Denial::Unauthorized);
+            }
         }
         let arn = MethodArn::new(
             &self.scope,

@@ -11,6 +11,7 @@ publish                = false
 workspace = true
 
 [dependencies]
+apigw-regex          = { workspace = true }
 anyhow               = { workspace = true, features = ["std"] }
 aws-config           = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio", "credentials-process", "sso"] }
 aws-sdk-apigateway   = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
@@ -27,7 +28,6 @@ ipnet                = { workspace = true, features = ["std"] }
 jiff                 = { workspace = true, features = ["std"] }
 matchit              = { workspace = true }
 proxy-header         = { workspace = true, features = ["tokio"] }
-regex                = { workspace = true, features = ["std", "perf"] }
 reqwest              = { workspace = true, features = ["rustls", "http2", "stream"] }
 rustls               = { workspace = true, features = ["aws-lc-rs", "std", "tls12", "prefer-post-quantum"] }
 serde                = { workspace = true, features = ["std", "derive"] }
