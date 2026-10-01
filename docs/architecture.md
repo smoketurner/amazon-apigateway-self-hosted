@@ -1,86 +1,58 @@
 # Architecture
 
-How the pieces of a project built from this template fit together.
+One crate, `crates/apigw`, building one binary.
 
-## Workspace
+| Module | Responsibility |
+|---|---|
+| `config` | clap CLI/env configuration |
+| `source` | Downloads the OpenAPI export and stage variables (`GetExport`/`GetStage` for REST, `ExportApi`/`GetStage` for HTTP APIs) or reads a file; reads/writes the last-known-good cache |
+| `spec` | Parses the export's `paths` and `x-amazon-apigateway-integration` objects into `Route`s, applying stage variables and integration overrides |
+| `router` | Builds an axum `Router` from the routes; the dispatcher that swaps routers live; admin routes |
+| `gateway` | Per-request execution: authorization gate, body buffering, API Gateway-shaped errors |
+| `proxy` | `HTTP_PROXY` forwarding |
+| `lambda` | `AWS_PROXY` event construction (payload 1.0 and 2.0) and response mapping |
+| `listener` | TLS accept loop and certificate reload |
+| `app` | Startup, refresh loop, shutdown |
 
-A virtual Cargo workspace (`Cargo.toml` has no `[package]`). All crates live under
-`crates/` and are discovered by `members = ["crates/*"]`. Shared settings come from the
-root:
+## Loading and refreshing
 
-- `[workspace.package]` — `version`, `edition = "2024"`, `rust-version` (MSRV), `license`.
-  Inherit per crate with `edition.workspace = true`, etc.
-- `[workspace.dependencies]` — the pinned dependency menu. Crates use
-  `dep = { workspace = true, features = ["..."] }`.
-- `[workspace.lints]` — the strict lint baseline. Crates use `[lints] workspace = true`.
-
-`resolver = "3"` (the edition-2024 default) gives MSRV-aware dependency resolution.
-
-## Recommended layering
-
-```
-            +-----------------------------+
-            |        <name>-server        |  axum, rust-embed, fluent, Tailwind
-            |        (or <name>-cli)      |  + persistence (db module):
-            |                             |  sqlx + sea-query, migrations, DSQL auth
-            +--------------+--------------+
-                           | depends on
-            +--------------v--------------+
-            |        <name>-common        |  domain types, error, config
-            +-----------------------------+
+```text
+Fetcher::fetch ─► Snapshot { kind, api_id, stage, stage_variables, openapi }
+                    │  (written to --config-cache)
+                    ▼
+ApiDefinition::from_openapi(openapi, kind, stage vars + local overrides, integration overrides)
+                    ▼
+router::build ─► Loaded { router, summary } ─► watch::Sender<Arc<Loaded>>
 ```
 
-- **`-common`** has no I/O. Pure types, the crate's error enum (`thiserror`), and config
-  parsing. Everything else depends on it.
-- **`-server`** owns the HTTP surface, the embedded UI, **and persistence**. Keep the data
-  layer in a `db` module — the `Pool` abstraction over SQLite and Postgres/DSQL, the
-  sea-query store, and migrations, exposing typed methods (never raw SQL) to handlers. The
-  crate holds shared state (`Arc<AppState>` containing the store) and wires routes,
-  middleware, assets, and i18n.
+The refresh loop rebuilds only when the snapshot or the override file changed. A build
+failure keeps the current `Loaded` in place.
 
-Keeping persistence in a `db` module and types in `-common` means the SQLite-vs-DSQL decision
-and the sea-query translation never leak into request handlers.
+## Routing
 
-## Request flow (server)
+API Gateway paths map to axum paths: `{name}` stays, `{name+}` becomes `{*name}`. Routes are
+grouped by path, and each path gets a single `any(...)` handler that selects the integration
+by method (exact method, then `ANY`, then the HTTP API `$default` route), because axum
+panics on overlapping method routes and API Gateway allows `ANY` next to explicit methods.
 
-```
-HTTP request
-  -> tower middleware (request-id, timeout, body limit, i18n negotiation)
-  -> axum handler
-       -> store method (db module)      sea-query -> SqliteQueryBuilder | PostgresQueryBuilder
-            -> sqlx Pool (Sqlite | Pg)  (Pg path wraps writes in OCC retry for DSQL)
-       -> askama template + fluent translations
-  -> response (HTML from embedded templates, assets from rust-embed)
-```
+axum also panics on conflicting paths. Each path is first inserted into a `matchit` router of
+the same version axum uses; a path that conflicts is skipped and reported on `/routes`
+instead of aborting the process. axum's 0.7-syntax checks are disabled because API Gateway
+paths may contain segments beginning with `:` or `*`. A property test feeds arbitrary paths
+through `router::build` to keep it panic-free.
 
-## Lint inheritance
+The dispatcher reads the current `Loaded` once per request and calls its router, so a swap
+never affects a request already in progress.
 
-Every crate must declare:
+## Accept loop
 
-```toml
-[lints]
-workspace = true
+`listener::serve` drives hyper directly instead of `axum::serve`, which installs no timer and
+so leaves hyper's header-read timeout disabled:
+
+```text
+accept → TCP_NODELAY → connection cap → spawn → TLS handshake (5 s)
+  → hyper-util auto HTTP/1 + HTTP/2 (10 s header read, idle limit, h2 keep-alive)
 ```
 
-This applies the panic-prevention, cast, and arithmetic denies plus clippy `pedantic`
-(as warnings) from the root. Without it, a crate silently escapes the baseline.
-
-## Build & test flow
-
-```bash
-make check   # cargo check --workspace --all-targets --all-features
-make lint    # clippy with -D warnings
-make test    # cargo test --workspace --all-features
-make deny    # cargo deny check (advisories, licenses, bans)
-```
-
-Tests use SQLite in-memory (`sqlite::memory:`) so they need no external services. The
-Postgres/DSQL path is exercised against a real cluster or a vanilla Postgres for
-wire-compatible checks; DSQL-only constraints are verified separately (`dsql.md`).
-
-## Adding a layer
-
-1. `cargo new --lib crates/<name>-<layer>` (see `crates/README.md`).
-2. Add `[lints] workspace = true` and inherit package fields.
-3. Pull deps from the workspace menu; add new ones (pinned) to `[workspace.dependencies]`.
-4. Read the matching `docs/` file for that layer's patterns before writing code.
+The task is spawned before any per-connection I/O, so a slow handshake never blocks
+`accept`. On shutdown the listener stops accepting and gives open connections 30 s to finish.

@@ -1,68 +1,129 @@
-# rust-template
+# apigw — self-hosted Amazon API Gateway
 
-An opinionated GitHub **template repository** for building Rust services. It ships the
-configuration, supply-chain policy, CI, and Claude-agent conventions up front — plus
-documented patterns for the stack below — so a new project starts with the boring,
-load-bearing decisions already made.
+`apigw` is a single Rust binary that serves the routes of an **existing** Amazon API
+Gateway REST API (v1) or HTTP API (v2) from anywhere: a Kubernetes cluster on another cloud,
+on-prem, or a laptop. It downloads the API's definition from API Gateway, builds an axum
+router from it, and keeps the router current as the API changes. API Gateway remains the
+place you design the API; `apigw` is a data-plane replica, in the spirit of Azure API
+Management's
+[self-hosted gateway](https://learn.microsoft.com/en-us/azure/api-management/self-hosted-gateway-overview).
 
-> This template ships **no crates**. The patterns are documented (with code) under
-> [`docs/`](docs/); you add real crates under [`crates/`](crates/). Until you do,
-> `cargo build` reports "no members" — that is expected.
+```text
+             GetExport / ExportApi (OpenAPI 3.0 + x-amazon-apigateway-* extensions)
+ API Gateway ───────────────────────────────────────────────┐   every --refresh-seconds
+                                                            ▼
+ clients ──TLS──► apigw ──► axum router (swapped live) ──► HTTP backends
+                                                       ├──► Lambda (Invoke)
+                                                       └──► MOCK responses
+```
 
-## The stack
+## What it serves
 
-| Concern | Choice | Why |
+| API Gateway feature | Behavior in `apigw` |
+|---|---|
+| Resource paths, `{param}`, greedy `{proxy+}`, `ANY`, HTTP API `$default` | Routed exactly as API Gateway routes them |
+| `HTTP_PROXY` integrations | Forwarded, streaming the response; `requestParameters` path/query/header mappings and `timeoutInMillis` honored |
+| `AWS_PROXY` (Lambda) integrations | Invoked with the API Gateway proxy event, payload format 1.0 or 2.0 |
+| `MOCK` integrations | Status, literal response headers, and response template returned (templates are not evaluated as VTL) |
+| Stage variables | Read from the stage and substituted into integration URIs; overridable locally |
+| Authorizers, IAM auth, API keys | **Not evaluated.** Protected routes answer `401` unless `--insecure-skip-authorization` is set |
+| `AWS`/`HTTP` (non-proxy, VTL mapping templates), VPC links | Answer `501`; listed with the reason on `/routes` |
+| Unknown route | REST: `403 {"message":"Missing Authentication Token"}`; HTTP: `404 {"message":"Not Found"}` |
+
+Every response carries a request ID (`x-amzn-requestid` for REST APIs, `apigw-requestid` for
+HTTP APIs).
+
+## Quick start
+
+```bash
+# TLS is mandatory; any PEM certificate and key work.
+apigw \
+  --rest-api-id a1b2c3d4e5 --stage prod \
+  --tls-cert /etc/apigw/tls/tls.crt --tls-key /etc/apigw/tls/tls.key
+```
+
+Every flag has an environment variable (`apigw --help` lists them). The main ones:
+
+| Flag | Env | Default | Purpose |
+|---|---|---|---|
+| `--rest-api-id` + `--stage` | `APIGW_REST_API_ID`, `APIGW_STAGE` | | Mirror a REST API stage |
+| `--http-api-id` [`--stage`] | `APIGW_HTTP_API_ID` | | Mirror an HTTP API |
+| `--openapi-file` + `--api-type` | `APIGW_OPENAPI_FILE` | `rest` | Serve an export from disk (no AWS calls for config) |
+| `--tls-cert`, `--tls-key` | `APIGW_TLS_CERT`, `APIGW_TLS_KEY` | required | PEM files; reloaded automatically when they change |
+| `--listen` | `APIGW_LISTEN` | `0.0.0.0:8443` | API traffic |
+| `--admin-listen` | `APIGW_ADMIN_LISTEN` | off | `/healthz` and `/routes` (also TLS) |
+| `--base-path` | `APIGW_BASE_PATH` | none | Serve under `/prod` etc., like an `execute-api` URL |
+| `--refresh-seconds` | `APIGW_REFRESH_SECONDS` | `60` | Re-download interval; `0` disables |
+| `--config-cache` | `APIGW_CONFIG_CACHE` | none | Last-known-good definition, used when AWS is unreachable at startup |
+| `--stage-variable NAME=VALUE` | `APIGW_STAGE_VARIABLE_<NAME>` | | Override a stage variable |
+| `--integration-overrides` | `APIGW_INTEGRATION_OVERRIDES` | none | Re-point individual routes (below) |
+
+Logs are JSON on stdout by default (`--log-format text` for humans); filter with `RUST_LOG`.
+
+## Pointing routes at different targets
+
+The paths always come from API Gateway. The targets can be changed locally, two ways.
+
+**Stage variables** are API Gateway's own per-environment mechanism. If an integration URI is
+`http://${stageVariables.petsHost}/pets/{id}`, set `APIGW_STAGE_VARIABLE_petsHost=pets.default.svc:8080`.
+
+**Integration overrides** replace a route's integration outright, keyed by route key, using
+the same shape as `x-amazon-apigateway-integration`. This can turn a Lambda route into an
+HTTP route:
+
+```json
+{
+  "GET /pets/{petId}": {
+    "type": "http_proxy",
+    "httpMethod": "GET",
+    "uri": "http://pets.default.svc:8080/pets/{petId}"
+  },
+  "ANY /orders/{proxy+}": {
+    "type": "http_proxy",
+    "uri": "http://orders.default.svc:8080/{proxy}"
+  }
+}
+```
+
+The file is re-read on every refresh. A key that names no route rejects the whole update (the
+previous routes keep serving), so a typo never goes unnoticed.
+
+## Refresh and failure behavior
+
+- A refresh that fails (AWS unreachable, invalid definition, bad override file) keeps the
+  current routes and logs the error once per distinct bad input.
+- A successful download is written to `--config-cache`. At startup, if API Gateway is
+  unreachable, `apigw` starts from that cache.
+- Requests in flight finish on the router they started with; new requests use the new one.
+
+## AWS permissions
+
+`apigw` uses the standard AWS credential chain (environment, shared config/profile,
+`credential_process`, web identity). It needs:
+
+| Action | Resource | For |
 |---|---|---|
-| Workspace | Cargo workspace, crates under `crates/` | Edition 2024, resolver 3 |
-| Local / test DB | SQLite (`sqlite::memory:` for tests) | Zero-setup, fast |
-| Production DB | Amazon Aurora DSQL (Postgres-compatible) | Serverless, scalable |
-| Query layer | [`sea-query`](https://crates.io/crates/sea-query) | One query, both SQLite & Postgres backends |
-| DB driver | [`sqlx`](https://crates.io/crates/sqlx) | Async, `tls-rustls-aws-lc-rs` |
-| Crypto / TLS | [`aws-lc-rs`](https://crates.io/crates/aws-lc-rs) | Preferred over OpenSSL and `ring` |
-| Web | [`axum`](https://crates.io/crates/axum) | Embedded server UI |
-| Assets | [`rust-embed`](https://crates.io/crates/rust-embed) | Single self-contained binary |
-| i18n | [`fluent`](https://crates.io/crates/fluent-bundle) via `i18n-embed` | Per-request locale negotiation |
-| Styling | [Tailwind CSS](https://tailwindcss.com) | Built to `static/css/output.css`, embedded |
-
-## What's in the box
-
-- **`Cargo.toml`** — virtual workspace with a curated, version-pinned `[workspace.dependencies]`
-  menu and a strict `[workspace.lints]` baseline (clippy `pedantic` + panic/arithmetic/cast
-  denies). Member crates inherit with `[lints] workspace = true`.
-- **`.rustfmt.toml`, `.clippy.toml`, `deny.toml`, `rust-toolchain.toml`, `.editorconfig`** —
-  formatting, lint tuning, supply-chain policy (advisories, licenses, bans — OpenSSL/`ring`
-  denied), and a pinned toolchain.
-- **`.github/`** — CI (fmt, clippy, `cargo test`, dependency-review, `cargo-deny`; actions
-  SHA-pinned, plus `secure_workflows.yml` enforcing SHA pins) and Dependabot (cargo +
-  actions, grouped, 7-day cooldown).
-- **`Makefile`** — `build`, `fmt`, `lint`, `test`, `deny`, `css-build`, `run`, `help`.
-- **`CLAUDE.md` + `.claude/rules/`** — conventions for the `rust-agents` Claude Code plugin
-  (branching, Conventional Commits, continuous improvement).
-- **`docs/`** — the patterns, with copy-pasteable code (see below).
-- **Repo hygiene** — `AGENTS.md` (agent pointer to `CLAUDE.md`), `CONTRIBUTING.md`,
-  `SECURITY.md`, `.env.example`, `.gitattributes`.
-
-## Using this template
-
-1. Click **"Use this template"** on GitHub (or `gh repo create <name> --template smoketurner/rust-template`).
-2. Rename: update `repository` / package names, `LICENSE-*` copyright, and the
-   `SERVER_CRATE` default in the `Makefile`.
-3. Add your first crate under `crates/` — see [`crates/README.md`](crates/README.md).
-   Once one crate exists, CI and `cargo build` work.
-4. Read the docs as you wire up each layer.
+| `apigateway:GET` | `arn:aws:apigateway:<region>::/restapis/<id>/stages/<stage>/exports/oas30`, `.../restapis/<id>/stages/<stage>` | REST APIs |
+| `apigateway:GET` | `arn:aws:apigateway:<region>::/apis/<id>/exports/OAS30`, `.../apis/<id>/stages/<stage>` | HTTP APIs |
+| `lambda:InvokeFunction` | each integrated function | `AWS_PROXY` routes |
 
 ## Documentation
 
 | Doc | Covers |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | Workspace layout, recommended crate split, lint inheritance |
-| [docs/database.md](docs/database.md) | SQLite ↔ DSQL pool, IAM auth, connection lifecycle |
-| [docs/dsql.md](docs/dsql.md) | Aurora DSQL SQL constraints (the deep reference) |
-| [docs/migrations.md](docs/migrations.md) | Dual migration dirs, DSQL-safe runner, async indexes |
-| [docs/sea-query.md](docs/sea-query.md) | Backend-dispatch macros, `Iden` schema, OCC retry |
-| [docs/web-ui.md](docs/web-ui.md) | axum + rust-embed + fluent + Tailwind |
-| [docs/crypto.md](docs/crypto.md) | aws-lc-rs default provider, keeping `ring`/OpenSSL out |
-| [docs/ci-cd.md](docs/ci-cd.md) | CI jobs, and the deferred Docker/build/scan/release patterns |
+| [docs/deployment.md](docs/deployment.md) | Container image, Kubernetes, Istio, certificates, credentials outside AWS |
+| [docs/architecture.md](docs/architecture.md) | Modules, request flow, the accept loop, router swapping |
+| [docs/crypto.md](docs/crypto.md) | aws-lc-rs as the only crypto provider |
+| [docs/ci-cd.md](docs/ci-cd.md) | CI jobs |
+
+## Development
+
+```bash
+make lint   # cargo clippy --workspace --all-targets --all-features -- -D warnings
+make test   # cargo test --workspace --all-features
+make deny   # cargo deny check
+make image  # docker build -t apigw:local .
+```
 
 ## License
 

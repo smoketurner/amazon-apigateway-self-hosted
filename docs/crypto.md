@@ -1,7 +1,7 @@
 # Crypto & TLS: aws-lc-rs only
 
-This template uses **aws-lc-rs** as the single crypto provider, everywhere — for rustls TLS
-(DSQL, outbound HTTPS) and any signing. OpenSSL and `ring` are deliberately kept out: they're
+apigw uses **aws-lc-rs** as the single crypto provider, everywhere — for the TLS listeners,
+outbound HTTPS to integrations, and the AWS SDK's HTTPS client. OpenSSL and `ring` are deliberately kept out: they're
 banned in `deny.toml` and excluded by feature selection.
 
 Why: one audited, FIPS-capable provider; no system OpenSSL to cross-compile or patch; a
@@ -10,7 +10,7 @@ smaller attack surface; and no ambiguity about which backend rustls picks at run
 ## Install the default provider once, at startup
 
 rustls requires a process-wide default `CryptoProvider`. Install aws-lc-rs as the very first
-thing in `main`, before any TLS connection (pool, HTTP client) is created:
+thing in `main`, before any TLS connection or HTTP client is created:
 
 ```rust
 fn main() -> anyhow::Result<()> {
@@ -18,7 +18,7 @@ fn main() -> anyhow::Result<()> {
         .install_default()
         .map_err(|_| anyhow::anyhow!("default crypto provider already installed"))?;
 
-    // ... build runtime, pools, server ...
+    // ... build runtime, clients, listeners ...
     Ok(())
 }
 ```
@@ -42,15 +42,15 @@ Enable the aws-lc-rs path on every TLS-using crate, with default features off so
 backend sneaks in:
 
 ```toml
-rustls       = { workspace = true, features = ["aws_lc_rs", "std", "tls12"] }
-tokio-rustls = { workspace = true, features = ["aws-lc-rs"] }
-sqlx         = { workspace = true, features = ["tls-rustls-aws-lc-rs", /* runtime-tokio, postgres, sqlite, migrate */] }
-webpki-roots = { workspace = true }
+rustls       = { workspace = true, features = ["aws-lc-rs", "std", "tls12", "prefer-post-quantum"] }
+tokio-rustls = { workspace = true, features = ["aws-lc-rs", "tls12"] }
+reqwest      = { workspace = true, features = ["rustls", "http2", "stream"] }  # rustls = aws-lc-rs in 0.13
+aws-sdk-*    = { workspace = true, features = ["default-https-client", ...] }  # not the legacy `rustls` feature
+rcgen        = { workspace = true, features = ["aws_lc_rs", "pem"] }           # dev-dependency
 ```
 
-If you add an HTTP client (`reqwest`) or JWTs (`jsonwebtoken`), pick their `rustls` +
-`aws-lc-rs` features too — never `native-tls`, `default-tls`, or a `ring` feature. (Optional:
-rustls' `prefer-post-quantum` feature enables hybrid key exchange.)
+Never enable `native-tls`, `default-tls`, a `ring` feature, or the AWS SDK's
+`rustls`/`legacy-https-client` features (they pull hyper 0.14 with `ring`).
 
 ## Enforce it
 
@@ -60,7 +60,7 @@ feature fails `cargo deny check`. Double-check the resolved graph after wiring u
 ```bash
 cargo tree -i ring          # expect: "package ID specification ... did not match any packages"
 cargo tree -i openssl-sys   # expect: no match
-cargo tree -i aws-lc-rs     # expect: aws-lc-rs present, pulled by rustls/sqlx
+cargo tree -i aws-lc-rs     # expect: aws-lc-rs present, pulled by rustls
 ```
 
 An empty result for `ring`/`openssl-sys` and a present `aws-lc-rs` confirms the single-

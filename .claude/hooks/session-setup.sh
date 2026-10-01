@@ -7,9 +7,9 @@
 
 [ "$(uname)" = "Linux" ] || exit 0
 
-# System packages: aws-lc-rs (FIPS) and hidapi builds (see AGENTS.md), plus the
-# shell linters the prek hooks invoke. dpkg -s fails if ANY package is missing.
-pkgs=(libudev-dev libssl-dev pkg-config cmake clang golang-go shellcheck shfmt)
+# System packages: the aws-lc-rs build (see AGENTS.md), plus the shell linters
+# the prek hooks invoke. dpkg -s fails if ANY package is missing.
+pkgs=(pkg-config cmake clang shellcheck shfmt)
 if ! dpkg -s "${pkgs[@]}" >/dev/null 2>&1; then
   # Not &&-chained: a single broken third-party repo makes `update` exit nonzero,
   # but installs from the already-cached indexes still succeed.
@@ -22,35 +22,6 @@ fi
 if ! command -v rustup >/dev/null 2>&1 && [ ! -x "$HOME/.cargo/bin/rustup" ]; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
     sh -s -- -y --default-toolchain none >/dev/null 2>&1
-fi
-
-# TailwindCSS CLI, required by `make css-build` (and thus build/run-server).
-# Prefer the standalone binary (repo policy); fall back to the npm registry,
-# which stays reachable when github.com egress is restricted to session repos.
-if ! command -v tailwindcss >/dev/null 2>&1; then
-  case "$(uname -m)" in
-  x86_64) tw_arch=x64 ;;
-  aarch64 | arm64) tw_arch=arm64 ;;
-  *) tw_arch="" ;;
-  esac
-  if [ -n "$tw_arch" ]; then
-    tw_tmp=$(mktemp)
-    if curl -fsSL --max-time 120 -o "$tw_tmp" \
-      "https://github.com/tailwindlabs/tailwindcss/releases/latest/download/tailwindcss-linux-${tw_arch}" \
-      >/dev/null 2>&1; then
-      sudo install -m 755 "$tw_tmp" /usr/local/bin/tailwindcss >/dev/null 2>&1
-    fi
-    rm -f "$tw_tmp"
-  fi
-  if ! command -v tailwindcss >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
-    npm install -g --silent @tailwindcss/cli >/dev/null 2>&1
-    # Unlike the standalone binary, the npm CLI resolves `@import "tailwindcss"`
-    # by walking node_modules up from the input CSS file, so the package must
-    # also be installed. Put it in the checkout's parent directory: that is on
-    # the resolution path but keeps the repo working tree clean (--no-save
-    # writes no package.json there either).
-    (cd "$(dirname "$PWD")" && npm install --no-save --silent tailwindcss >/dev/null 2>&1)
-  fi
 fi
 
 # prek, required by the pre-PR gate (see .claude/rules/branching.md). PyPI ships

@@ -1,53 +1,54 @@
 # Code Standards — review gates
 
-Non-negotiable invariants for this stack that the compiler does **not** catch. Read this
-before implementing or reviewing a change. Each item links to the doc with the full rationale
-and code — this file is the gate, the doc is the detail.
+Invariants the compiler does **not** catch. Read before implementing or reviewing a change.
 
 > The `rust-agents` plugin does **not** auto-load this file. Its agents read
-> `commits-and-issues.md`, `branching.md`, and `continuous-improvement.md` — each of which
-> points here — and the main session reaches it through `CLAUDE.md`. Keep those pointers
-> intact so the gates below reach plugin-spawned agents doing data-layer, crypto, or
-> dependency work.
+> `commits-and-issues.md`, `branching.md`, and `continuous-improvement.md`, each of which
+> points here, and the main session reaches it through `CLAUDE.md`. Keep those pointers.
 
-## Crypto & TLS → [docs/crypto.md](../../docs/crypto.md)
+## TLS & crypto → [docs/crypto.md](../../docs/crypto.md)
 
-- [ ] **aws-lc-rs is the only crypto provider.** No `openssl`, `openssl-sys`, `native-tls`,
-      or `ring` features on any dependency (`deny.toml` bans them).
-- [ ] TLS crates use their rustls **+ aws-lc-rs** features (`rustls` → `aws_lc_rs`,
-      `sqlx` → `tls-rustls-aws-lc-rs`, etc.).
-- [ ] Binaries install the default provider **once** at the top of `main`
-      (`aws_lc_rs::default_provider().install_default()`), before any TLS use.
-- [ ] After touching TLS deps: `cargo tree -i ring` and `cargo tree -i openssl-sys` return no
-      match; `cargo deny check` passes.
+- [ ] **Every listener terminates TLS.** No plaintext listener, no `--no-tls` flag, no
+      80→443 redirect.
+- [ ] **aws-lc-rs is the only crypto provider.** No `openssl`, `native-tls`, or `ring`
+      features; AWS SDK crates use `default-https-client`, never `rustls`/`legacy-https-client`.
+- [ ] The default provider is installed once at the top of `main`.
+- [ ] After touching TLS deps: `cargo tree -i ring` and `cargo tree -i openssl-sys` match
+      nothing; `cargo deny check` passes.
 
-## Data layer & DSQL → [docs/dsql.md](../../docs/dsql.md), [docs/migrations.md](../../docs/migrations.md)
+## Never crash on API definitions → [docs/architecture.md](../../docs/architecture.md)
 
-- [ ] **No `FOREIGN KEY`** in DDL — enforce referential integrity in code.
-- [ ] **UUID v7 primary keys**, client-generated via `uuid::Uuid::now_v7()` — not v4
-      (`gen_random_uuid()`), not `SERIAL`/sequential PKs.
-- [ ] **One DDL statement per migration file**; never mix DDL and DML in one transaction.
-- [ ] Indexes on non-empty tables use **`CREATE INDEX ASYNC`** (sync `CREATE INDEX` only on
-      empty tables).
-- [ ] Every write is **idempotent and wrapped in OCC retry** (`with_dsql_retry!`, SQLSTATE
-      `40001`).
-- [ ] Bulk writes chunked under the per-transaction row/byte limits; pool `max_lifetime` is
-      **below the ~60-min** connection cap.
-- [ ] No unsupported features: triggers, materialized views, PL/pgSQL, extensions, temp
-      tables, `TRUNCATE`, `money`/`enum`/custom types.
-- [ ] Queries built with sea-query through the `db_*!` dispatch macros — **no raw SQL in
-      handlers**, and both backends covered.
+- [ ] Nothing derived from an API Gateway export, override file, or cache may reach a
+      panicking API. axum's `Router::route`/`nest` panic on invalid or conflicting paths:
+      every path goes through `axum_path` and the `matchit` pre-check, and routers keep
+      `without_v07_checks()`. The release profile uses `panic = "abort"`.
+- [ ] A definition that fails to build is rejected as a whole; the current routes keep
+      serving.
+- [ ] `build_never_panics` (proptest) stays green; extend it when route building changes.
 
-## Workspace hygiene → [docs/architecture.md](../../docs/architecture.md)
+## Fail closed
 
-- [ ] Every member crate declares `[lints] workspace = true` — no crate escapes the baseline.
-- [ ] Dependencies are pinned `=x.y.z` with `default-features = false` in
-      `[workspace.dependencies]`; members opt in with `{ workspace = true, features = [...] }`.
-      New deps are added to the workspace menu (current version looked up), never inline.
-- [ ] Panics opt out narrowly in tests only: `#[expect(clippy::unwrap_used, reason = "...")]`.
-- [ ] `thiserror` for library crates, `anyhow` for binaries; `tracing` for logging, never
-      `println!`/`eprintln!`.
-- [ ] Date/time uses `jiff`, not `chrono` or `time`, for direct handling.
+- [ ] Routes with an authorizer, IAM auth, or API key requirement answer `401` unless
+      `--insecure-skip-authorization` is set. New integration types must not bypass the gate
+      in `gateway::handle`.
+- [ ] Integrations that can't be served faithfully (VTL mapping templates, VPC links) answer
+      `501` and are reported on `/routes`, never approximated silently.
+
+## API Gateway fidelity
+
+- [ ] Error bodies match API Gateway (`{"message": ...}`, REST `403 Missing Authentication
+      Token` vs HTTP `404 Not Found`, `502`/`504` for integration failures).
+- [ ] Lambda events follow the published payload format 1.0/2.0 shapes; responses follow
+      API Gateway's parsing rules.
+- [ ] Proxies never forward hop-by-hop headers and never follow redirects.
+
+## Workspace hygiene
+
+- [ ] `[lints] workspace = true`; dependencies pinned `=x.y.z`, `default-features = false`,
+      added to `[workspace.dependencies]` (current version looked up). No comments in
+      `Cargo.toml` files.
+- [ ] Panics opt out narrowly in tests only (`#[expect(..., reason = "...")]`).
+- [ ] `thiserror` for module errors, `anyhow` at the binary edge; `tracing`, never `println!`.
 
 ## Before opening a PR
 
@@ -57,7 +58,3 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace
 cargo deny check
 ```
-
-(These require at least one crate under `crates/`.) See
-[branching.md](branching.md) for the full pre-PR gate and
-[commits-and-issues.md](commits-and-issues.md) for commit format.

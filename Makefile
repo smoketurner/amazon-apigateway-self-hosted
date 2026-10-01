@@ -1,18 +1,11 @@
-# Makefile for rust-template.
-#
-# NOTE: this template ships no crates yet, so cargo targets report
-# "no members" until you add one under crates/ (see crates/README.md).
+# Makefile for apigw.
 
 -include .env
 export
 
 CARGO ?= cargo
 
-# Name of the server crate used by the CSS targets. Override once you create it:
-#   make css-build SERVER_CRATE=my-server
-SERVER_CRATE ?= app-server
-
-.PHONY: all build check clean fmt fmt-check lint test test-coverage test-mutants deny hooks css-dev css-build run help
+.PHONY: all build check clean fmt fmt-check lint test test-coverage test-mutants deny hooks image run help
 
 all: build
 
@@ -54,18 +47,15 @@ deny: ## Check advisories, licenses, bans, and sources
 hooks: ## Install prek git hooks (pre-commit + pre-push)
 	prek install
 
-##@ UI assets
+##@ Container
 
-css-dev: ## Watch and rebuild Tailwind CSS for the server crate
-	cd crates/$(SERVER_CRATE) && tailwindcss -i styles/input.css -o static/css/output.css --watch
-
-css-build: ## Build minified Tailwind CSS for the server crate
-	cd crates/$(SERVER_CRATE) && tailwindcss -i styles/input.css -o static/css/output.css --minify
+image: ## Build the container image as apigw:local
+	docker build -t apigw:local .
 
 ##@ Run
 
-run: ## Run a binary: make run BIN=<name> ARGS="..."
-	$(CARGO) run --bin $(BIN) -- $(ARGS)
+run: ## Run apigw: make run ARGS="--openapi-file api.json --tls-cert ... --tls-key ..."
+	$(CARGO) run --bin apigw -- $(ARGS)
 
 ##@ Help
 

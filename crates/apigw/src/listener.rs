@@ -1,0 +1,729 @@
+//! TLS connection accept loop. Every listener terminates TLS (rustls with
+//! aws-lc-rs); there is no plaintext mode.
+//!
+//! `axum::serve` builds hyper's connection builder privately and never installs
+//! a [`hyper::rt::Timer`], so hyper's HTTP/1 header read timeout silently
+//! becomes "no timeout": a client that sends nothing, or dribbles a request head
+//! one byte at a time, holds a connection open indefinitely. This module drives
+//! hyper directly so the timer can be installed.
+//!
+//! Each accepted connection runs in its own task:
+//!
+//! ```text
+//! accept → set_nodelay → connection cap → spawn → TLS handshake (timeout)
+//!   → hyper-util auto HTTP/1 or HTTP/2 (TokioTimer, idle limit)
+//! ```
+//!
+//! The task is spawned before any per-connection I/O, so a client that stalls
+//! its TLS handshake occupies only its own task and never blocks `accept`.
+
+use std::convert::Infallible;
+use std::io;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::{Arc, PoisonError, RwLock};
+use std::task::{Context, Poll};
+use std::time::Duration;
+
+use axum::Router;
+use axum::body::Body;
+use axum::extract::ConnectInfo;
+use hyper::body::{Body as HttpBody, Frame, Incoming, SizeHint};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::server::conn::auto;
+use hyper_util::service::TowerToHyperService;
+use rustls::pki_types::pem::PemObject as _;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::{ClientHello, ResolvesServerCert};
+use rustls::sign::CertifiedKey;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
+use tokio::task::JoinSet;
+use tokio_rustls::TlsAcceptor;
+use tokio_util::sync::CancellationToken;
+use tower::ServiceExt as _;
+
+/// Time limits applied to every connection.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ConnLimits {
+    /// From TCP accept to a finished TLS handshake.
+    pub(crate) handshake: Duration,
+    /// hyper's HTTP/1 header read timeout, and the idle limit: a connection with
+    /// no request in flight for this long is closed. The idle limit covers what
+    /// hyper leaves unbounded: protocol detection before the first bytes arrive,
+    /// and HTTP/2, which has no header timer.
+    pub(crate) header_read: Duration,
+    pub(crate) h2_keep_alive_interval: Duration,
+    pub(crate) h2_keep_alive_timeout: Duration,
+    /// After shutdown is signalled, how long in-flight connections get to finish.
+    pub(crate) drain: Duration,
+}
+
+impl ConnLimits {
+    /// `drain` covers API Gateway's longest default integration timeout (30s), so
+    /// shutdown never cuts off a request that could still have completed.
+    pub(crate) const DEFAULT: Self = Self {
+        handshake: Duration::from_secs(5),
+        header_read: Duration::from_secs(10),
+        h2_keep_alive_interval: Duration::from_secs(20),
+        h2_keep_alive_timeout: Duration::from_secs(20),
+        drain: Duration::from_secs(30),
+    };
+}
+
+/// Server TLS for a listener. The certificate is read from PEM files and
+/// swapped in place when those files change, so rotation (cert-manager, certbot,
+/// a remounted secret) needs no restart.
+#[derive(Clone)]
+pub(crate) struct Tls {
+    acceptor: TlsAcceptor,
+    certs: Arc<CertStore>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TlsError {
+    #[error("failed to read certificate chain {path}: {source}")]
+    Certificates {
+        path: String,
+        source: rustls::pki_types::pem::Error,
+    },
+    #[error("{0} contains no certificates")]
+    NoCertificates(String),
+    #[error("failed to read private key {path}: {source}")]
+    PrivateKey {
+        path: String,
+        source: rustls::pki_types::pem::Error,
+    },
+    #[error("invalid TLS certificate or key: {0}")]
+    Config(#[from] rustls::Error),
+}
+
+/// Identifies one version of the PEM files on disk. `metadata` follows
+/// symlinks, so a Kubernetes secret's atomic symlink swap changes it too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileStamp(
+    Option<(std::time::SystemTime, u64)>,
+    Option<(std::time::SystemTime, u64)>,
+);
+
+impl FileStamp {
+    fn read(cert_path: &Path, key_path: &Path) -> Self {
+        let stamp = |path: &Path| {
+            std::fs::metadata(path)
+                .ok()
+                .and_then(|m| m.modified().ok().map(|modified| (modified, m.len())))
+        };
+        Self(stamp(cert_path), stamp(key_path))
+    }
+}
+
+#[derive(Debug)]
+struct CertStore {
+    cert_path: PathBuf,
+    key_path: PathBuf,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+    current: RwLock<(FileStamp, Arc<CertifiedKey>)>,
+}
+
+fn load_certified_key(
+    cert_path: &Path,
+    key_path: &Path,
+    provider: &rustls::crypto::CryptoProvider,
+) -> Result<CertifiedKey, TlsError> {
+    let certs = CertificateDer::pem_file_iter(cert_path)
+        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+        .map_err(|source| TlsError::Certificates {
+            path: cert_path.display().to_string(),
+            source,
+        })?;
+    if certs.is_empty() {
+        return Err(TlsError::NoCertificates(cert_path.display().to_string()));
+    }
+    let key = PrivateKeyDer::from_pem_file(key_path).map_err(|source| TlsError::PrivateKey {
+        path: key_path.display().to_string(),
+        source,
+    })?;
+    Ok(CertifiedKey::from_der(certs, key, provider)?)
+}
+
+impl CertStore {
+    fn load(&self) -> Result<CertifiedKey, TlsError> {
+        load_certified_key(&self.cert_path, &self.key_path, &self.provider)
+    }
+
+    fn current(&self) -> std::sync::RwLockReadGuard<'_, (FileStamp, Arc<CertifiedKey>)> {
+        self.current.read().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl ResolvesServerCert for CertStore {
+    fn resolve(&self, _client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        Some(Arc::clone(&self.current().1))
+    }
+}
+
+impl Tls {
+    /// Server TLS with aws-lc-rs from PEM files; HTTP/2 is offered via ALPN.
+    pub(crate) fn from_pem_files(cert_path: &Path, key_path: &Path) -> Result<Self, TlsError> {
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let stamp = FileStamp::read(cert_path, key_path);
+        let key = load_certified_key(cert_path, key_path, &provider)?;
+        let certs = Arc::new(CertStore {
+            cert_path: cert_path.to_owned(),
+            key_path: key_path.to_owned(),
+            provider: Arc::clone(&provider),
+            current: RwLock::new((stamp, Arc::new(key))),
+        });
+        let resolver: Arc<dyn ResolvesServerCert> = certs.clone();
+        let mut config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()?
+            .with_no_client_auth()
+            .with_cert_resolver(resolver);
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        Ok(Self {
+            acceptor: TlsAcceptor::from(Arc::new(config)),
+            certs,
+        })
+    }
+
+    /// Reloads the certificate if its files changed. A file that fails to load
+    /// leaves the previous certificate in place.
+    pub(crate) fn reload_if_changed(&self) -> Result<bool, TlsError> {
+        let stamp = FileStamp::read(&self.certs.cert_path, &self.certs.key_path);
+        if self.certs.current().0 == stamp {
+            return Ok(false);
+        }
+        let key = self.certs.load()?;
+        *self
+            .certs
+            .current
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = (stamp, Arc::new(key));
+        Ok(true)
+    }
+
+    /// Polls the PEM files every `interval` until `shutdown` is cancelled.
+    pub(crate) async fn watch(self, interval: Duration, shutdown: CancellationToken) {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                _ = ticker.tick() => {}
+            }
+            match self.reload_if_changed() {
+                Ok(true) => {
+                    tracing::info!(cert = %self.certs.cert_path.display(), "reloaded TLS certificate");
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    tracing::warn!(%err, "TLS certificate changed but failed to load; keeping the previous one");
+                }
+            }
+        }
+    }
+}
+
+/// Serve `app` on `listener` until `shutdown` is cancelled, then give open
+/// connections [`ConnLimits::drain`] to finish. At most `max_connections` are
+/// served at once; further clients wait in the kernel backlog.
+pub(crate) async fn serve(
+    listener: TcpListener,
+    tls: Tls,
+    app: Router,
+    limits: ConnLimits,
+    max_connections: usize,
+    shutdown: CancellationToken,
+) {
+    let slots = Arc::new(Semaphore::new(max_connections));
+    let mut conns = JoinSet::new();
+
+    loop {
+        let accepted = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            Some(_) = conns.join_next(), if !conns.is_empty() => continue,
+            accepted = listener.accept() => accepted,
+        };
+        let (tcp, peer) = match accepted {
+            Ok(conn) => conn,
+            Err(err) => {
+                handle_accept_error(err).await;
+                continue;
+            }
+        };
+        if let Err(err) = tcp.set_nodelay(true) {
+            tracing::trace!("failed to set TCP_NODELAY on incoming connection: {err:#}");
+        }
+        let slot = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            slot = Arc::clone(&slots).acquire_owned() => slot,
+        };
+        // The semaphore is never closed, so this branch cannot drop a connection.
+        let Ok(slot) = slot else { continue };
+        conns.spawn(serve_connection(
+            tcp,
+            peer,
+            slot,
+            tls.acceptor.clone(),
+            app.clone(),
+            limits,
+            shutdown.clone(),
+        ));
+    }
+
+    drop(listener);
+    let drained = tokio::time::timeout(limits.drain, async {
+        while conns.join_next().await.is_some() {}
+    })
+    .await;
+    if drained.is_err() {
+        tracing::warn!(
+            remaining = conns.len(),
+            "connections still open after the {}s drain timeout; closing them",
+            limits.drain.as_secs()
+        );
+        conns.shutdown().await;
+    }
+}
+
+/// Mirror `axum::serve`: per-connection errors are the client's business;
+/// anything else (for example `EMFILE`) backs off so the loop does not spin.
+async fn handle_accept_error(err: io::Error) {
+    if matches!(
+        err.kind(),
+        io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+    ) {
+        return;
+    }
+    tracing::error!("accept error: {err}");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+}
+
+/// Drive one connection from handshake to close. `_slot` holds the connection's
+/// place under the connection cap until it closes.
+async fn serve_connection(
+    tcp: TcpStream,
+    peer: SocketAddr,
+    _slot: OwnedSemaphorePermit,
+    tls: TlsAcceptor,
+    app: Router,
+    limits: ConnLimits,
+    shutdown: CancellationToken,
+) {
+    let handshake = tokio::time::timeout(limits.handshake, tls.accept(tcp));
+    let io = tokio::select! {
+        () = shutdown.cancelled() => return,
+        handshake = handshake => match handshake {
+            Ok(Ok(io)) => io,
+            Ok(Err(err)) => {
+                tracing::debug!(remote_addr = %peer, "handshake failed: {err}");
+                return;
+            }
+            Err(_) => {
+                tracing::debug!(remote_addr = %peer, "handshake timed out");
+                return;
+            }
+        },
+    };
+
+    let activity = Activity::default();
+    let idle = activity.subscribe();
+    let service =
+        TowerToHyperService::new(tower::service_fn(move |req: hyper::Request<Incoming>| {
+            let mut req = req.map(Body::new);
+            req.extensions_mut().insert(ConnectInfo(peer));
+            let in_flight = activity.begin();
+            let response = app.clone().oneshot(req);
+            async move {
+                let response = response.await?;
+                Ok::<_, Infallible>(response.map(|inner| TrackedBody {
+                    inner,
+                    _in_flight: in_flight,
+                }))
+            }
+        }));
+
+    let mut builder = auto::Builder::new(TokioExecutor::new());
+    builder
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(limits.header_read);
+    builder
+        .http2()
+        .timer(TokioTimer::new())
+        .keep_alive_interval(limits.h2_keep_alive_interval)
+        .keep_alive_timeout(limits.h2_keep_alive_timeout);
+    let conn = builder.serve_connection_with_upgrades(TokioIo::new(io), service);
+    tokio::pin!(conn);
+    let result = tokio::select! {
+        result = conn.as_mut() => result,
+        () = shutdown.cancelled() => {
+            conn.as_mut().graceful_shutdown();
+            conn.await
+        }
+        () = idle_for(idle, limits.header_read) => {
+            tracing::debug!(remote_addr = %peer, "closing idle connection");
+            // HTTP/2 graceful shutdown sends GOAWAY and then waits for the client
+            // to acknowledge a PING, which a stalling client never does; give it
+            // one more idle period, then drop.
+            conn.as_mut().graceful_shutdown();
+            tokio::time::timeout(limits.header_read, conn)
+                .await
+                .unwrap_or(Ok(()))
+        }
+    };
+    if let Err(err) = result {
+        tracing::trace!(remote_addr = %peer, "connection error: {err:#}");
+    }
+}
+
+/// Count of requests in flight on one connection, from dispatch until the
+/// response body has been sent.
+#[derive(Clone, Default)]
+struct Activity(Arc<watch::Sender<usize>>);
+
+impl Activity {
+    fn begin(&self) -> InFlight {
+        self.0.send_modify(|n| *n = n.saturating_add(1));
+        InFlight(Arc::clone(&self.0))
+    }
+
+    fn subscribe(&self) -> watch::Receiver<usize> {
+        self.0.subscribe()
+    }
+}
+
+struct InFlight(Arc<watch::Sender<usize>>);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.send_modify(|n| *n = n.saturating_sub(1));
+    }
+}
+
+/// Resolve once no request has been in flight for `idle`.
+async fn idle_for(mut in_flight: watch::Receiver<usize>, idle: Duration) {
+    loop {
+        let busy = *in_flight.borrow_and_update() > 0;
+        let changed = if busy {
+            in_flight.changed().await
+        } else {
+            tokio::select! {
+                () = tokio::time::sleep(idle) => return,
+                changed = in_flight.changed() => changed,
+            }
+        };
+        if changed.is_err() {
+            // Every sender is gone, so the connection is finishing on its own.
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// A response body that keeps its request counted as in flight until hyper has
+/// finished sending it.
+struct TrackedBody {
+    inner: Body,
+    _in_flight: InFlight,
+}
+
+impl HttpBody for TrackedBody {
+    type Data = <Body as HttpBody>::Data;
+    type Error = <Body as HttpBody>::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Pin::new(&mut self.get_mut().inner).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test helpers panic on broken setup")]
+pub(crate) mod test_tls {
+    //! A self-signed certificate for `localhost` and a client that trusts it.
+
+    use std::sync::Arc;
+
+    use std::path::PathBuf;
+
+    use rustls::pki_types::{CertificateDer, ServerName};
+    use tokio::net::TcpStream;
+    use tokio_rustls::TlsConnector;
+    use tokio_rustls::client::TlsStream;
+
+    use super::Tls;
+
+    pub(crate) struct TestCert {
+        cert: CertificateDer<'static>,
+        pub(crate) cert_pem: String,
+        pub(crate) key_pem: String,
+    }
+
+    pub(crate) fn generate() -> TestCert {
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        TestCert {
+            cert: certified.cert.der().clone(),
+            cert_pem: certified.cert.pem(),
+            key_pem: certified.signing_key.serialize_pem(),
+        }
+    }
+
+    impl TestCert {
+        /// Writes the PEM files to a fresh directory and returns their paths.
+        pub(crate) fn write(&self) -> (PathBuf, PathBuf) {
+            let dir = std::env::temp_dir().join(format!("apigw-tls-{}", uuid::Uuid::now_v7()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let (cert, key) = (dir.join("cert.pem"), dir.join("key.pem"));
+            std::fs::write(&cert, &self.cert_pem).unwrap();
+            std::fs::write(&key, &self.key_pem).unwrap();
+            (cert, key)
+        }
+
+        pub(crate) fn server(&self) -> Tls {
+            let (cert, key) = self.write();
+            Tls::from_pem_files(&cert, &key).unwrap()
+        }
+
+        pub(crate) async fn connect(&self, addr: std::net::SocketAddr) -> TlsStream<TcpStream> {
+            let mut roots = rustls::RootCertStore::empty();
+            roots.add(self.cert.clone()).unwrap();
+            let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+            let config = rustls::ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            let tcp = TcpStream::connect(addr).await.unwrap();
+            TlsConnector::from(Arc::new(config))
+                .connect(ServerName::try_from("localhost").unwrap(), tcp)
+                .await
+                .unwrap()
+        }
+
+        /// Sends one HTTP/1.1 request and returns the raw response.
+        pub(crate) async fn request(
+            &self,
+            addr: std::net::SocketAddr,
+            head: &str,
+            body: &[u8],
+        ) -> String {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            let mut stream = self.connect(addr).await;
+            stream.write_all(head.as_bytes()).await.unwrap();
+            stream.write_all(body).await.unwrap();
+            let mut out = Vec::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                stream.read_to_end(&mut out),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            String::from_utf8_lossy(&out).into_owned()
+        }
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "tests assert on known-good setup")]
+mod tests {
+    use axum::routing::get;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    use super::test_tls::{TestCert, generate};
+    use super::*;
+
+    const SHORT: ConnLimits = ConnLimits {
+        handshake: Duration::from_millis(300),
+        header_read: Duration::from_millis(300),
+        h2_keep_alive_interval: Duration::from_secs(20),
+        h2_keep_alive_timeout: Duration::from_secs(20),
+        drain: Duration::from_secs(5),
+    };
+    const BOUND: Duration = Duration::from_secs(10);
+    const GET_PEER: &str = "GET /peer HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n";
+
+    async fn start(
+        cert: &TestCert,
+        max_connections: usize,
+    ) -> (SocketAddr, CancellationToken, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/peer",
+            get(|ConnectInfo(peer): ConnectInfo<SocketAddr>| async move { peer.ip().to_string() }),
+        );
+        let shutdown = CancellationToken::new();
+        let handle = tokio::spawn(serve(
+            listener,
+            cert.server(),
+            app,
+            SHORT,
+            max_connections,
+            shutdown.clone(),
+        ));
+        (addr, shutdown, handle)
+    }
+
+    #[tokio::test]
+    async fn serves_requests_over_tls_with_connect_info() {
+        let cert = generate();
+        let (addr, shutdown, handle) = start(&cert, 8).await;
+        let response = cert.request(addr, GET_PEER, b"").await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.ends_with("127.0.0.1"), "{response}");
+        shutdown.cancel();
+        tokio::time::timeout(BOUND, handle).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_plaintext_http() {
+        let cert = generate();
+        let (addr, shutdown, _handle) = start(&cert, 8).await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream.write_all(GET_PEER.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        let read = tokio::time::timeout(BOUND, stream.read_to_end(&mut buf))
+            .await
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&buf).contains("HTTP/1.1 200"),
+            "{read:?}"
+        );
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn closes_connections_that_stall_the_handshake() {
+        let cert = generate();
+        let (addr, shutdown, _handle) = start(&cert, 8).await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let mut buf = Vec::new();
+        let read = tokio::time::timeout(BOUND, stream.read_to_end(&mut buf)).await;
+        assert!(read.is_ok(), "stalled handshake was not disconnected");
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn closes_connections_that_never_finish_headers() {
+        let cert = generate();
+        let (addr, shutdown, _handle) = start(&cert, 8).await;
+        let mut stream = cert.connect(addr).await;
+        stream.write_all(b"GET /peer HTTP/1.1\r\n").await.unwrap();
+        let mut buf = Vec::new();
+        let read = tokio::time::timeout(BOUND, stream.read_to_end(&mut buf)).await;
+        assert!(read.is_ok(), "slow client was not disconnected");
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn connection_cap_queues_extra_clients() {
+        let cert = std::sync::Arc::new(generate());
+        let (addr, shutdown, _handle) = start(&cert, 1).await;
+        let held = cert.connect(addr).await;
+        let waiting = {
+            let cert = std::sync::Arc::clone(&cert);
+            tokio::spawn(async move { cert.request(addr, GET_PEER, b"").await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !waiting.is_finished(),
+            "second client was served while the cap was held"
+        );
+        drop(held);
+        let response = tokio::time::timeout(BOUND, waiting).await.unwrap().unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        shutdown.cancel();
+    }
+
+    #[test]
+    fn rejects_missing_empty_and_mismatched_pem_files() {
+        let cert = generate();
+        let (cert_path, key_path) = cert.write();
+        let dir = cert_path.parent().unwrap();
+        let missing = dir.join("missing.pem");
+        assert!(matches!(
+            Tls::from_pem_files(&missing, &key_path),
+            Err(TlsError::Certificates { .. })
+        ));
+        assert!(matches!(
+            Tls::from_pem_files(&cert_path, &missing),
+            Err(TlsError::PrivateKey { .. })
+        ));
+        let empty = dir.join("empty.pem");
+        std::fs::write(&empty, b"").unwrap();
+        assert!(matches!(
+            Tls::from_pem_files(&empty, &key_path),
+            Err(TlsError::NoCertificates(_))
+        ));
+        let (_, other_key) = generate().write();
+        assert!(matches!(
+            Tls::from_pem_files(&cert_path, &other_key),
+            Err(TlsError::Config(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn reloads_certificates_when_files_change() {
+        let first = generate();
+        let (cert_path, key_path) = first.write();
+        let tls = Tls::from_pem_files(&cert_path, &key_path).unwrap();
+        assert!(!tls.reload_if_changed().unwrap());
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route("/peer", get(|| async { "ok" }));
+        let shutdown = CancellationToken::new();
+        tokio::spawn(serve(
+            listener,
+            tls.clone(),
+            app,
+            SHORT,
+            8,
+            shutdown.clone(),
+        ));
+        assert!(
+            first
+                .request(addr, GET_PEER, b"")
+                .await
+                .starts_with("HTTP/1.1 200")
+        );
+
+        // A broken write is ignored and the old certificate keeps serving.
+        std::fs::write(&cert_path, b"garbage").unwrap();
+        assert!(tls.reload_if_changed().is_err());
+        assert!(
+            first
+                .request(addr, GET_PEER, b"")
+                .await
+                .starts_with("HTTP/1.1 200")
+        );
+
+        let second = generate();
+        std::fs::write(&cert_path, &second.cert_pem).unwrap();
+        std::fs::write(&key_path, &second.key_pem).unwrap();
+        assert!(tls.reload_if_changed().unwrap());
+        assert!(
+            second
+                .request(addr, GET_PEER, b"")
+                .await
+                .starts_with("HTTP/1.1 200")
+        );
+        shutdown.cancel();
+    }
+}

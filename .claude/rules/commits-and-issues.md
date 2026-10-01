@@ -3,9 +3,8 @@
 This file is read by `rust-team`, `rust-code-reviewer`, and `/rust-agents:solve-issue`.
 Customize sections below for this project.
 
-> **Domain gates:** for any data-layer, crypto, or dependency change, the review gates in
-> [`code-standards.md`](code-standards.md) are mandatory — read it and the linked `docs/*.md`
-> before committing or reviewing.
+> **Review gates:** the gates in [`code-standards.md`](code-standards.md) are mandatory —
+> read it and the linked `docs/*.md` before committing or reviewing.
 
 ## Commit Message Format
 

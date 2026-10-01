@@ -1,82 +1,61 @@
 # Continuous Improvement
 
-Project-specific instructions for the continuous improvement cycle.
-This file is read by the `rust-ci-analyst` agent and the `/rust-agents:continuous-improvement` skill.
-Customize the sections below as the project grows.
+Project-specific instructions for the `rust-ci-analyst` agent and the
+`/rust-agents:continuous-improvement` skill.
 
 ## Test Configuration
 
-Run the server against an in-memory SQLite database (no external setup):
+Generate a local certificate once:
 
 ```bash
-DATABASE_URL="sqlite::memory:" cargo run --bin <server-crate>
+mkdir -p .local/testing && cd .local/testing && openssl req -x509 -newkey ec \
+  -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout key.pem -out cert.pem -days 30 \
+  -subj /CN=localhost -addext subjectAltName=DNS:localhost
 ```
 
-Against a local on-disk SQLite file:
+Run against an OpenAPI export on disk (no AWS access needed for configuration):
 
 ```bash
-DATABASE_URL="sqlite://.local/testing/data/dev.db?mode=rwc" cargo run --bin <server-crate>
+cargo run --bin apigw -- --openapi-file api.json --api-type rest \
+  --tls-cert .local/testing/cert.pem --tls-key .local/testing/key.pem \
+  --listen 127.0.0.1:8443 --admin-listen 127.0.0.1:9443 --log-format text
+curl --cacert .local/testing/cert.pem https://localhost:8443/<path>
+curl --cacert .local/testing/cert.pem https://localhost:9443/routes
 ```
 
-Against Aurora DSQL (production-like; requires AWS credentials in the environment):
+Against a real API (requires AWS credentials and `AWS_REGION`):
 
 ```bash
-DATABASE_URL="postgres://admin@<cluster>.dsql.<region>.on.aws/postgres" \
-  AWS_REGION="<region>" cargo run --bin <server-crate>
-```
-
-For debug output:
-
-```bash
-RUST_LOG=debug cargo run --bin <server-crate> 2>.local/testing/debug/session.log
+cargo run --bin apigw -- --rest-api-id <id> --stage <stage> --tls-cert ... --tls-key ...
 ```
 
 ## Project Subsystems
 
-Workspace members are auto-detected from `Cargo.toml`. Track these logical subsystems in
-`coverage-status.md` as crates are added:
-
-- **data layer** — pool/backend selection, sea-query translation, migrations
-- **DSQL integration** — IAM token generation and refresh, OCC retry, async indexes
-- **web/UI** — axum routing, rust-embed assets, fluent i18n, Tailwind
-- **crypto** — aws-lc-rs default provider installation
-
-## Interfaces
-
-- Web API: `cargo run --bin <server-crate>` then `curl http://localhost:<port>/...`
-- Embedded UI: same server, browser at `http://localhost:<port>/`
-- CLI (if added): `cargo run --bin <cli-crate> -- <args>`
+- **source** — API Gateway export download, stage variables, last-known-good cache
+- **spec** — OpenAPI + `x-amazon-apigateway-*` parsing, integration overrides
+- **router** — path translation, conflict handling, live swapping, admin routes
+- **integrations** — `HTTP_PROXY`, `AWS_PROXY` (Lambda), `MOCK`
+- **listener** — TLS accept loop, timeouts, certificate reload
 
 ## Critical Paths
 
-Features prone to silent breakage — live-test before any PR that touches them:
+Live-test before any PR that touches them:
 
-- Database migrations on **both** SQLite and Postgres/DSQL (DDL-per-transaction rules differ)
-- DSQL IAM auth token generation and the background refresh task
-- sea-query backend selection (`SqliteQueryBuilder` vs `PostgresQueryBuilder`)
-- OCC retry handling on SQLSTATE `40001` (`OC000`/`OC001`)
-- aws-lc-rs default crypto provider installed exactly once at startup
+- Route building from real exports: conflicting or unusual paths must be skipped, never crash
+- Refresh: a bad definition or override file keeps the current routes serving
+- Certificate reload after the PEM files change
+- Lambda payload 1.0/2.0 events and responses
+- Authorization gate: protected routes answer 401 by default
 
-The implementation rules behind these paths are the review gates in
-[`code-standards.md`](code-standards.md); the full stack patterns are the `docs/` table in
-[`README.md`](../../README.md). Read them before changing the code behind any path above.
-
-## Environment Setup
-
-- **SQLite**: no setup; file lives at `.local/testing/data/`
-- **Aurora DSQL**: AWS credentials via env/profile/role; cluster endpoint + region;
-  TLS is mandatory (rustls + aws-lc-rs)
-- **Tailwind**: `tailwindcss` CLI on PATH for `make css-build`
+The implementation rules are the review gates in [`code-standards.md`](code-standards.md).
 
 ## Reference Projects
 
-- **smoketurner/devbox** — Rust — workspace/lints/CI, aws-lc-rs crypto, DSQL via sqlx
-- **vouch-sh/vouch** — Rust — SQLite↔DSQL data layer, sea-query translation, axum +
-  rust-embed + fluent + Tailwind embedded UI
+- **vouch-sh/vouch** — the accept loop (`vouch-server/src/infra/accept.rs`) this listener follows
+- **Azure API Management self-hosted gateway** — the operating model (cloud control plane,
+  self-hosted data plane, config backup)
 
 ## Testing Notes
 
-- The template ships no crates; live testing applies once at least one crate exists.
-- DSQL cannot be run locally — exercise the Postgres path against a real cluster or a
-  vanilla Postgres for wire-compatible smoke tests, then verify DSQL-specific constraints
-  (see `docs/dsql.md`) separately.
+- Tests need no AWS access; the AWS SDK paths (`GetExport`, `ExportApi`, Lambda `Invoke`)
+  are only exercised against a real account.
