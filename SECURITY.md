@@ -24,4 +24,4 @@ Include where possible:
   [docs/crypto.md](docs/crypto.md).
 - **No secrets in the repo** — configuration via environment / `.env` (gitignored).
 - **Dependencies pinned and scanned** — exact versions in `Cargo.toml`, enforced by
-  `cargo-deny`, Dependabot, and dependency-review in CI.
+  `cargo-deny` in CI and Dependabot.
