@@ -4,6 +4,7 @@
 use crate::authz::{Authorizers, RouteAuthorizer};
 use crate::integration::{Integration, StageVariables};
 use crate::model::{ApiKind, Feature, MethodMatch, Operation, Protections, RouteKey, RoutePath};
+use crate::throttle::{RouteThrottle, ThrottleSettings};
 
 #[derive(Debug, Clone)]
 pub(crate) struct Route {
@@ -14,6 +15,7 @@ pub(crate) struct Route {
     pub(crate) protections: Protections,
     pub(crate) authorizer: RouteAuthorizer,
     pub(crate) unenforced: Vec<Feature>,
+    pub(crate) throttle: Option<RouteThrottle>,
 }
 
 impl Route {
@@ -22,6 +24,7 @@ impl Route {
         kind: ApiKind,
         variables: &StageVariables,
         authorizers: &Authorizers,
+        throttling: &ThrottleSettings,
     ) -> Self {
         Self {
             method: operation.method.clone(),
@@ -31,6 +34,7 @@ impl Route {
             protections: operation.protections.clone(),
             authorizer: authorizers.for_route(operation),
             unenforced: operation.unenforced(kind),
+            throttle: throttling.for_route(&operation.method, &operation.path),
         }
     }
 }

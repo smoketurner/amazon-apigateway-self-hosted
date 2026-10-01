@@ -22,6 +22,7 @@ use crate::integration::Integration;
 use crate::model::{ApiKind, ApiModel, Feature, MethodMatch, Protections, RouteKey, RoutePath};
 use crate::pipeline::Pipeline;
 use crate::route::Route;
+use crate::throttle::ThrottleSettings;
 
 /// A stage prefix such as `/prod` that every route is served under, as on an
 /// `execute-api` endpoint. Empty serves routes at the root, as on a custom domain.
@@ -171,10 +172,24 @@ pub(crate) fn build(
     base: &BasePath,
 ) -> (Router, Vec<RouteSummary>) {
     let authorizers = Authorizers::compile(model, &ctx.stage_variables);
+    let throttling = ThrottleSettings::new(
+        &ctx.api_id,
+        ctx.stage.as_deref(),
+        model.stage.clone(),
+        ctx.replicas,
+    );
     let routes: Vec<Route> = model
         .operations
         .iter()
-        .map(|operation| Route::compile(operation, model.kind, &ctx.stage_variables, &authorizers))
+        .map(|operation| {
+            Route::compile(
+                operation,
+                model.kind,
+                &ctx.stage_variables,
+                &authorizers,
+                &throttling,
+            )
+        })
         .collect();
     let mut summaries = Vec::with_capacity(routes.len());
     let mut default = None;
@@ -324,12 +339,21 @@ mod tests {
     use crate::gateway::{AuthorizationMode, Unsupported};
     use crate::gateway_response::GatewayResponses;
     use crate::model::{IntegrationOverrides, Protection, StageSettings};
+    use crate::model::{MethodSettings, SettingsScope};
+    use crate::state::{InMemory, InMemoryLimits, StateBackend};
+    use std::num::NonZeroU32;
 
     const STRICT: Enforcement = Enforcement {
         authorization: AuthorizationMode::Enforce,
         resource_policy: Unsupported::Reject,
         request_validation: Unsupported::Reject,
     };
+
+    fn test_state() -> Arc<StateBackend> {
+        Arc::new(StateBackend::InMemory(InMemory::new(
+            InMemoryLimits::default(),
+        )))
+    }
 
     fn aws() -> Arc<AwsClients> {
         let config = aws_config::SdkConfig::builder()
@@ -354,6 +378,8 @@ mod tests {
             stage: None,
             stage_variables: Arc::default(),
             responses,
+            state: test_state(),
+            replicas: NonZeroU32::MIN,
             enforcement,
             http: reqwest::Client::new(),
             aws: aws(),
@@ -391,13 +417,17 @@ mod tests {
         enforcement: Enforcement,
         base: &str,
     ) -> (Router, Vec<RouteSummary>) {
-        let model = ApiModel::import(
-            doc,
-            kind,
-            StageSettings::default(),
-            &IntegrationOverrides::default(),
-        )
-        .unwrap();
+        router_for_stage(doc, kind, enforcement, StageSettings::default(), base)
+    }
+
+    fn router_for_stage(
+        doc: &Value,
+        kind: ApiKind,
+        enforcement: Enforcement,
+        stage: StageSettings,
+        base: &str,
+    ) -> (Router, Vec<RouteSummary>) {
+        let model = ApiModel::import(doc, kind, stage, &IntegrationOverrides::default()).unwrap();
         let responses = GatewayResponses::compile(kind, &model.gateway_responses);
         build(
             &model,
@@ -428,6 +458,118 @@ mod tests {
                 "/key-and-validated": {"get": op(json!({"security": [{"api_key": []}], "x-amazon-apigateway-request-validator": "all"}))}
             }
         })
+    }
+
+    fn throttled_stage(entries: &[(SettingsScope, f64, i32)]) -> StageSettings {
+        let mut stage = StageSettings::default();
+        for (scope, rate, burst) in entries {
+            stage.method_settings.insert(
+                scope.clone(),
+                MethodSettings {
+                    throttling_rate_limit: Some(*rate),
+                    throttling_burst_limit: Some(*burst),
+                    ..MethodSettings::default()
+                },
+            );
+        }
+        stage
+    }
+
+    fn route_scope(path: &str, method: &str) -> SettingsScope {
+        SettingsScope::Method {
+            path: path.to_owned(),
+            method: method.to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn rest_method_throttling_answers_429_after_the_burst() {
+        let doc = json!({"paths": {
+            "/a": {"get": {"x-amazon-apigateway-integration": mock(200)}},
+            "/b": {"get": {"x-amazon-apigateway-integration": mock(200)}}
+        }});
+        let stage = throttled_stage(&[
+            (SettingsScope::All, 0.0, 2),
+            (route_scope("/b", "GET"), 0.0, 0),
+        ]);
+        let (rest, summaries) = router_for_stage(&doc, ApiKind::Rest, STRICT, stage, "");
+        assert!(summaries.iter().all(|s| s.problems.is_empty()));
+        for _ in 0..2 {
+            assert_eq!(call(&rest, Method::GET, "/a").await.0, StatusCode::OK);
+        }
+        let response = call_full(&rest, Method::GET, "/a").await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response.headers()["x-amzn-errortype"],
+            "ThrottlingException"
+        );
+        assert_eq!(response.body, r#"{"message":"Too Many Requests"}"#);
+        assert_eq!(
+            call(&rest, Method::GET, "/b").await.0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[tokio::test]
+    async fn http_route_throttling_answers_429_and_ignores_customization() {
+        let doc = json!({"paths": {
+            "/a": {"get": {"x-amazon-apigateway-integration": mock(200)}},
+            "/$default": {"x-amazon-apigateway-any-method": {"x-amazon-apigateway-integration": mock(200)}}
+        }});
+        let stage = throttled_stage(&[
+            (SettingsScope::All, 0.0, 100),
+            (route_scope("/a", "GET"), 0.0, 1),
+            (route_scope("$default", "*"), 0.0, 0),
+        ]);
+        let (http, _) = router_for_stage(&doc, ApiKind::Http, STRICT, stage, "");
+        assert_eq!(call(&http, Method::GET, "/a").await.0, StatusCode::OK);
+        assert_eq!(
+            call(&http, Method::GET, "/a").await,
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                r#"{"message":"Too Many Requests"}"#.to_owned()
+            )
+        );
+        assert_eq!(
+            call(&http, Method::GET, "/other").await.0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[tokio::test]
+    async fn throttled_responses_use_the_customized_gateway_response() {
+        let doc = json!({
+            "x-amazon-apigateway-gateway-responses": {"THROTTLED": {
+                "statusCode": "503",
+                "responseTemplates": {"application/json": "{\"retry\": true}"}
+            }},
+            "paths": {"/a": {"get": {"x-amazon-apigateway-integration": mock(200)}}}
+        });
+        let stage = throttled_stage(&[(SettingsScope::All, 0.0, 0)]);
+        let (rest, _) = router_for_stage(&doc, ApiKind::Rest, STRICT, stage, "");
+        assert_eq!(
+            call(&rest, Method::GET, "/a").await,
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                r#"{"retry": true}"#.to_owned()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn throttling_runs_before_the_body_is_read_and_after_refusals() {
+        let doc = json!({"paths": {"/key": {"get": {
+            "x-amazon-apigateway-integration": mock(200),
+            "security": [{"api_key": []}]
+        }}}, "components": {"securitySchemes": {
+            "api_key": {"type": "apiKey", "name": "x-api-key", "in": "header"}
+        }}});
+        let stage = throttled_stage(&[(SettingsScope::All, 0.0, 0)]);
+        let (rest, _) = router_for_stage(&doc, ApiKind::Rest, STRICT, stage, "");
+        assert_eq!(
+            call(&rest, Method::GET, "/key").await.0,
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[tokio::test]
@@ -572,6 +714,38 @@ mod tests {
         };
         let (rest, _) = router_with(&doc, ApiKind::Rest, ignore, "");
         assert_eq!(call(&rest, Method::GET, "/open").await.0, StatusCode::OK);
+    }
+
+    struct Reply {
+        status: StatusCode,
+        headers: axum::http::HeaderMap,
+        body: String,
+    }
+
+    impl Reply {
+        fn status(&self) -> StatusCode {
+            self.status
+        }
+
+        fn headers(&self) -> &axum::http::HeaderMap {
+            &self.headers
+        }
+    }
+
+    async fn call_full(router: &Router, method: Method, uri: &str) -> Reply {
+        let request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        let (parts, body) = response.into_parts();
+        let body = axum::body::to_bytes(body, 1 << 20).await.unwrap();
+        Reply {
+            status: parts.status,
+            headers: parts.headers,
+            body: String::from_utf8(body.to_vec()).unwrap(),
+        }
     }
 
     async fn call(router: &Router, method: Method, uri: &str) -> (StatusCode, String) {
@@ -835,6 +1009,8 @@ mod tests {
             stage: Some("prod".to_owned()),
             stage_variables: Arc::default(),
             responses: GatewayResponses::default(),
+            state: test_state(),
+            replicas: NonZeroU32::MIN,
             enforcement: STRICT,
             http: reqwest::Client::new(),
             aws,

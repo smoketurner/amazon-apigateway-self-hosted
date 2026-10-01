@@ -330,6 +330,8 @@ mod tests {
     use crate::observability::testing::MockAws;
     use crate::observability::{Delivery, LogGroup, MetricsNamespace, MetricsSettings, Settings};
     use crate::router::{BasePath, build};
+    use crate::state::{InMemory, InMemoryLimits, StateBackend};
+    use std::num::NonZeroU32;
 
     const ACCESS_GROUP: &str = "/aws/apigw/access";
     const EXECUTION_GROUP: &str = "API-Gateway-Execution-Logs_abc/prod";
@@ -408,6 +410,10 @@ mod tests {
             stage: Some("prod".to_owned()),
             stage_variables: Arc::default(),
             responses: GatewayResponses::default(),
+            state: Arc::new(StateBackend::InMemory(InMemory::new(
+                InMemoryLimits::default(),
+            ))),
+            replicas: NonZeroU32::MIN,
             enforcement: Enforcement {
                 authorization: AuthorizationMode::Enforce,
                 resource_policy: Unsupported::Reject,
