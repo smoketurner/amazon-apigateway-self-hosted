@@ -1,7 +1,7 @@
 # CI/CD
 
 - **`.github/workflows/ci.yml`** — `fmt`, `clippy` (`--locked -D warnings`), `test`
-  (`cargo test --locked`, Linux + macOS), `dependency-review` (PRs), and `license-check`
+  (`cargo test --locked`, Linux + macOS), and `license-check`
   (`cargo-deny check`, which also enforces the OpenSSL/`ring` bans). Toolchain from
   `rust-toolchain.toml`; actions SHA-pinned; `permissions: {}` top-level with per-job
   `contents: read`.
