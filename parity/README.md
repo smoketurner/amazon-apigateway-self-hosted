@@ -102,9 +102,9 @@ which is how they get confirmed or corrected. Recorded files carry `"source": "r
 
 ## Not covered yet
 
-- Lambda proxy event shapes. `apigw` invokes Lambda through the AWS SDK and has no per-function
-  endpoint override yet, so replay cannot point it at a local echo. Cases for them can be recorded
-  but not replayed until that override exists (milestone M1).
+- Lambda proxy event shapes. `apigw` can send a Lambda invocation to a plain HTTP endpoint
+  (`--lambda-endpoint`), but replay does not start one yet, so cases for `AWS_PROXY` routes can be
+  recorded but not replayed.
 - Authorizers, API keys, validators, resource policies, mapping templates, and parameter mapping are
   not implemented in `apigw`; the seed cases that exercise them are marked `known_gap`.
 - Time-dependent behavior (throttles, quotas, cache TTLs) is covered by property tests, not fixtures.
