@@ -497,6 +497,32 @@ mod tests {
     };
     use super::*;
 
+    #[test]
+    fn content_handling_is_reported_only_for_integrations_that_convert() {
+        use super::super::Feature;
+
+        for (integration_type, reported) in [
+            ("http", true),
+            ("aws", true),
+            ("mock", true),
+            ("http_proxy", false),
+            ("aws_proxy", false),
+        ] {
+            let doc = json!({"paths": {"/x": {"get": {"x-amazon-apigateway-integration": {
+                "type": integration_type,
+                "uri": "http://example.com/",
+                "contentHandling": "CONVERT_TO_BINARY"
+            }}}}});
+            let model = import(&doc, ApiKind::Rest);
+            let operation = by_path(&model)["/x"];
+            assert_eq!(
+                operation.unenforced() == vec![Feature::ContentHandling],
+                reported,
+                "{integration_type}"
+            );
+        }
+    }
+
     fn import(doc: &Value, kind: ApiKind) -> ApiModel {
         ApiModel::import(
             doc,
@@ -540,10 +566,7 @@ mod tests {
         );
         assert!(model.models.contains_key("Pet"));
         assert_eq!(model.authorizers.len(), 2);
-        assert_eq!(
-            model.unenforced(),
-            vec![Feature::BinaryMediaTypes, Feature::Compression]
-        );
+        assert_eq!(model.unenforced(), vec![Feature::ContentHandling]);
 
         let ops = by_path(&model);
         let pets = ops["/pets"];
@@ -664,7 +687,7 @@ mod tests {
             vec!["orders:write".to_owned()]
         );
         let items = ops["/items/{id}"];
-        assert_eq!(items.unenforced(), vec![Feature::IntegrationTlsConfig]);
+        assert!(items.unenforced().is_empty());
         assert!(
             items.protections.contains(Protection::Authorizer),
             "document-level security applies"

@@ -32,13 +32,16 @@ absolute-paths-allowed-crates = [
     "aws_sdk_cloudwatchlogs",
     "aws_sdk_firehose",
     "aws_sdk_lambda",
+    "aws_sdk_s3",
     "aws_sdk_xray",
     "axum",
     "base64",
     "clap",
     "fancy_regex",
+    "flate2",
     "hyper",
     "hyper_util",
+    "indexmap",
     "ipnet",
     "jiff",
     "jsonwebtoken",
@@ -59,14 +62,15 @@ absolute-paths-allowed-crates = [
     "tracing",
     "tracing_subscriber",
     "uuid",
+    "x509_parser",
 ]
 
 # Product names that are not code.
 doc-valid-idents = ["CloudWatch", "X-Ray", ".."]
 
 # Conventions from CLAUDE.md, enforced; opt out with
-# `#[expect(clippy::disallowed_methods, reason = "...")]`.
+# `#[expect(clippy::disallowed_methods, reason = "...")]`. UUID v4 needs no entry:
+# uuid's `v4` feature is never enabled, so `Uuid::new_v4` does not exist here.
 disallowed-methods = [
-    { path = "uuid::Uuid::new_v4", reason = "IDs are UUID v7: use `Uuid::now_v7()`" },
     { path = "std::time::SystemTime::now", reason = "date/time goes through jiff: use `jiff::Timestamp::now()`" },
 ]

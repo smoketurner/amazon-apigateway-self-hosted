@@ -2,6 +2,7 @@
 //! (payload format 1.0 for REST APIs, 1.0 or 2.0 for HTTP APIs), buffered
 //! (`Invoke`) or streamed (`InvokeWithResponseStream`).
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
@@ -16,9 +17,10 @@ use tokio::time::Instant as TokioInstant;
 use crate::authz::MethodArn;
 use crate::aws::AwsClients;
 use crate::gateway::GatewayError;
+use crate::header_policy::{Flavor, IamAuthorization};
 use crate::integration::{LambdaProxy, StageVariables};
 use crate::lambda_response::{PreludeError, ProxyResponse, StreamBody, StreamPrelude};
-use crate::model::{ApiKind, PayloadVersion, ResponseTransferMode};
+use crate::model::{ApiKind, PayloadVersion, Protection, ResponseTransferMode};
 use crate::pipeline::RequestContext;
 use crate::route::Route;
 
@@ -34,8 +36,14 @@ impl LambdaProxy {
         ctx: &mut RequestContext,
         stage_variables: &StageVariables,
     ) -> Result<Response, GatewayError> {
+        let iam = if route.protections.iter().any(|p| p == Protection::Iam) {
+            IamAuthorization::Used
+        } else {
+            IamAuthorization::NotUsed
+        };
         let event = ProxyEvent::new(ctx, stage_variables)
             .with_account(self.function.account().unwrap_or_default())
+            .with_header_table(iam)
             .render(self.payload)
             .to_string()
             .into_bytes();
@@ -90,10 +98,19 @@ impl LambdaProxy {
             tracing::error!(route = %route.key, function = %self.function, bytes = invocation.payload.len(), "Lambda response is larger than the invocation payload limit");
             return Err(GatewayError::IntegrationFailure);
         }
-        ProxyResponse::into_http(&invocation.payload, self.payload).map_err(|reason| {
+        let negotiation =
+            (ctx.api.kind == ApiKind::Rest).then(|| ctx.payload.negotiate(&ctx.headers));
+        let mut response = ProxyResponse::into_http(
+            &invocation.payload,
+            self.payload,
+            negotiation.as_ref(),
+        )
+        .map_err(|reason| {
             tracing::error!(route = %route.key, function = %self.function, reason, "malformed Lambda proxy response");
             GatewayError::IntegrationFailure
-        })
+        })?;
+        Self::remap_headers(ctx.api.kind, &mut response);
+        Ok(response)
     }
 
     /// Starts the invocation and answers as soon as the function has sent its
@@ -146,8 +163,16 @@ impl LambdaProxy {
             tracing::error!(route = %route.key, function = %self.function, reason, "invalid response metadata in Lambda stream");
             GatewayError::MalformedStreamingResponse
         })?;
+        Self::remap_headers(ctx.api.kind, &mut response);
         *response.body_mut() = StreamBody::spawn(stream, first, deadline);
         Ok(response)
+    }
+
+    /// REST APIs rename and drop some of the function's response headers.
+    fn remap_headers(kind: ApiKind, response: &mut Response) {
+        if kind == ApiKind::Rest {
+            Flavor::Lambda.remap_response(response.headers_mut());
+        }
     }
 
     fn stream_timeout(&self, route: &Route) -> GatewayError {
@@ -164,6 +189,32 @@ struct EventBody {
 }
 
 impl EventBody {
+    /// REST APIs send a body as base64 when its `Content-Type` is one of the API's
+    /// binary media types and as text otherwise; HTTP APIs base64-encode what
+    /// is not valid UTF-8.
+    fn for_request(ctx: &RequestContext) -> Self {
+        match ctx.api.kind {
+            ApiKind::Rest => Self::declared(&ctx.body, ctx.payload.request_is_binary(&ctx.headers)),
+            ApiKind::Http => Self::new(&ctx.body),
+        }
+    }
+
+    fn declared(body: &[u8], binary: bool) -> Self {
+        if body.is_empty() {
+            return Self::new(body);
+        }
+        if binary {
+            return Self {
+                body: Value::String(BASE64.encode(body)),
+                is_base64: true,
+            };
+        }
+        Self {
+            body: Value::String(String::from_utf8_lossy(body).into_owned()),
+            is_base64: false,
+        }
+    }
+
     fn new(body: &[u8]) -> Self {
         if body.is_empty() {
             return Self {
@@ -250,6 +301,9 @@ pub(crate) struct ProxyEvent<'a> {
     /// The account the event reports: API Gateway reports the API owner's,
     /// which a self-hosted gateway only knows from the function's ARN.
     account_id: &'a str,
+    /// REST proxy events carry the client's headers as API Gateway's header
+    /// table lets them through; `None` sends them all, as authorizer events do.
+    header_table: Option<IamAuthorization>,
 }
 
 impl<'a> ProxyEvent<'a> {
@@ -258,7 +312,14 @@ impl<'a> ProxyEvent<'a> {
             ctx,
             stage_variables,
             account_id: "",
+            header_table: None,
         }
+    }
+
+    /// Applies API Gateway's REST header table to the event's headers.
+    pub(crate) fn with_header_table(mut self, iam: IamAuthorization) -> Self {
+        self.header_table = Some(iam);
+        self
     }
 
     /// Reports `account_id` as the account in `requestContext`.
@@ -318,8 +379,14 @@ impl<'a> ProxyEvent<'a> {
     /// client's case, everything else is lower case.
     fn headers(&self) -> MultiValues {
         let keep_case = self.ctx.api.kind == ApiKind::Rest;
+        let allowed = match self.header_table {
+            Some(iam) if keep_case => {
+                Cow::Owned(Flavor::Lambda.request_headers(&self.ctx.headers, iam))
+            }
+            Some(_) | None => Cow::Borrowed(&self.ctx.headers),
+        };
         let mut headers = MultiValues::default();
-        for (name, value) in &self.ctx.headers {
+        for (name, value) in allowed.iter() {
             let name = if keep_case {
                 self.ctx.header_case.spelling(name.as_str())
             } else {
@@ -366,6 +433,11 @@ impl<'a> ProxyEvent<'a> {
             fields.insert("apiKey".to_owned(), json!(key.value()));
             fields.insert("apiKeyId".to_owned(), json!(key.id()));
         }
+        if let (Value::Object(fields), Some(cert)) =
+            (&mut identity, self.ctx.identity.client_cert())
+        {
+            fields.insert("clientCert".to_owned(), cert.to_json());
+        }
         identity
     }
 
@@ -373,7 +445,7 @@ impl<'a> ProxyEvent<'a> {
         let ctx = self.ctx;
         let (headers, multi_headers) = self.headers().single_and_multi();
         let (query, multi_query) = self.query().single_and_multi();
-        let body = EventBody::new(&ctx.body);
+        let body = EventBody::for_request(ctx);
         json!({
             "resource": ctx.resource_path,
             "path": ctx.path,
@@ -392,7 +464,7 @@ impl<'a> ProxyEvent<'a> {
                 "extendedRequestId": ctx.extended_request_id(),
                 "httpMethod": ctx.method.as_str(),
                 "identity": self.identity(),
-                "path": ctx.path,
+                "path": ctx.full_path,
                 "protocol": ctx.protocol(),
                 "requestId": ctx.request_id.to_string(),
                 "requestTime": ctx.request_time(),
@@ -420,11 +492,11 @@ impl<'a> ProxyEvent<'a> {
             .filter(|c| !c.is_empty())
             .map(str::to_owned)
             .collect();
-        let body = EventBody::new(&ctx.body);
+        let body = EventBody::for_request(ctx);
         let mut event = json!({
             "version": "2.0",
             "routeKey": ctx.route_key.as_str(),
-            "rawPath": ctx.path,
+            "rawPath": ctx.full_path,
             "rawQueryString": ctx.query.raw().unwrap_or_default(),
             "headers": headers.joined(),
             "requestContext": {
@@ -434,7 +506,7 @@ impl<'a> ProxyEvent<'a> {
                 "domainPrefix": ctx.domain_prefix(),
                 "http": {
                     "method": ctx.method.as_str(),
-                    "path": ctx.path,
+                    "path": ctx.full_path,
                     "protocol": ctx.protocol(),
                     "sourceIp": ctx.source_ip(),
                     "userAgent": ctx.header_str("user-agent"),
@@ -466,10 +538,16 @@ impl<'a> ProxyEvent<'a> {
                 let variables: StringFields = self.stage_variables.into_iter().collect();
                 fields.insert("stageVariables".to_owned(), Value::Object(variables.0));
             }
-            if let Some(authorizer) = ctx.authorizer.event_value(PayloadVersion::V2)
-                && let Some(Value::Object(request_context)) = fields.get_mut("requestContext")
-            {
-                request_context.insert("authorizer".to_owned(), authorizer);
+            if let Some(Value::Object(request_context)) = fields.get_mut("requestContext") {
+                if let Some(authorizer) = ctx.authorizer.event_value(PayloadVersion::V2) {
+                    request_context.insert("authorizer".to_owned(), authorizer);
+                }
+                if let Some(cert) = ctx.identity.client_cert() {
+                    request_context.insert(
+                        "authentication".to_owned(),
+                        json!({"clientCert": cert.to_json()}),
+                    );
+                }
             }
             if !body.body.is_null() {
                 fields.insert("body".to_owned(), body.body);
@@ -483,6 +561,7 @@ impl<'a> ProxyEvent<'a> {
 #[expect(clippy::unwrap_used, reason = "tests assert on known-good fixtures")]
 #[expect(clippy::indexing_slicing, reason = "tests index known JSON fields")]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use axum::body::Bytes;
@@ -492,9 +571,12 @@ mod tests {
     use super::*;
     use crate::authz::{RouteAuthorizer, RoutePolicy};
     use crate::aws::{CredentialsMode, FunctionArn, LambdaEndpoints};
+    use crate::client_cert::ClientCertDetails;
+    use crate::client_cert::tests::certificate;
     use crate::header_case::HeaderCase;
     use crate::integration::Integration;
     use crate::model::{MethodMatch, Protections, RouteKey, RoutePath};
+    use crate::payload::PayloadSettings;
     use crate::pipeline::context::tests::request;
     use crate::pipeline::context::{AuthorizerContext, QueryString};
     use crate::usage::RouteApiKey;
@@ -556,7 +638,8 @@ mod tests {
         assert_eq!(context["extendedRequestId"], ctx.extended_request_id());
         assert_ne!(context["extendedRequestId"], context["requestId"]);
         assert_eq!(context["protocol"], "HTTP/1.1");
-        assert_eq!(context["path"], "/pets/7");
+        assert_eq!(context["path"], "/prod/pets/7");
+        assert_eq!(event["path"], "/pets/7");
         assert!(context["resourceId"].is_null());
         assert_eq!(context["resourcePath"], "/pets/{petId}");
         let identity = context["identity"].as_object().unwrap();
@@ -602,8 +685,72 @@ mod tests {
     }
 
     #[test]
+    fn rest_events_apply_the_header_table_but_authorizer_events_do_not() {
+        let mut ctx = incoming(b"");
+        for (name, value) in [
+            ("expect", "100-continue"),
+            ("content-md5", "abc"),
+            ("via", "1.1 proxy"),
+            ("authorization", "Bearer t"),
+        ] {
+            ctx.headers.insert(name, HeaderValue::from_static(value));
+        }
+        let vars = variables();
+        let table = ProxyEvent::new(&ctx, &vars)
+            .with_header_table(IamAuthorization::NotUsed)
+            .render(PayloadVersion::V1);
+        assert!(table["headers"].get("expect").is_none());
+        assert!(table["headers"].get("content-md5").is_none());
+        assert_eq!(table["headers"]["via"], "1.1 proxy");
+        assert_eq!(table["headers"]["authorization"], "Bearer t");
+        let iam = ProxyEvent::new(&ctx, &vars)
+            .with_header_table(IamAuthorization::Used)
+            .render(PayloadVersion::V1);
+        assert!(iam["headers"].get("authorization").is_none());
+        let unfiltered = ProxyEvent::new(&ctx, &vars).render(PayloadVersion::V1);
+        assert_eq!(unfiltered["headers"]["expect"], "100-continue");
+    }
+
+    #[test]
+    fn rest_bodies_are_base64_only_for_binary_media_types() {
+        let mut ctx = incoming(&[0xff, 0x00, b'a']);
+        ctx.headers.insert(
+            "content-type",
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        let text = event(&ctx, PayloadVersion::V1);
+        assert_eq!(
+            text["body"], "\u{fffd}\0a",
+            "without binaryMediaTypes the body is text"
+        );
+        assert_eq!(text["isBase64Encoded"], false);
+
+        ctx.payload = Arc::new(PayloadSettings::new(
+            &["application/octet-stream".to_owned()],
+            None,
+        ));
+        let binary = event(&ctx, PayloadVersion::V1);
+        assert_eq!(binary["body"], "/wBh");
+        assert_eq!(binary["isBase64Encoded"], true);
+
+        ctx.headers
+            .insert("content-type", HeaderValue::from_static("application/json"));
+        ctx.body = Bytes::from_static(b"{\"a\":1}");
+        let json_body = event(&ctx, PayloadVersion::V1);
+        assert_eq!(json_body["body"], "{\"a\":1}");
+        assert_eq!(json_body["isBase64Encoded"], false);
+
+        ctx.payload = Arc::new(PayloadSettings::new(&["*/*".to_owned()], None));
+        assert_eq!(event(&ctx, PayloadVersion::V1)["isBase64Encoded"], true);
+        ctx.body = Bytes::new();
+        assert!(event(&ctx, PayloadVersion::V1)["body"].is_null());
+    }
+
+    #[test]
     fn v2_event_joins_values_and_extracts_cookies() {
-        let event = event(&incoming(&[0xff, 0x00]), PayloadVersion::V2);
+        let mut ctx = incoming(&[0xff, 0x00]);
+        ctx.api.kind = ApiKind::Http;
+        let event = event(&ctx, PayloadVersion::V2);
         assert_eq!(event["version"], "2.0");
         assert_eq!(event["routeKey"], "POST /pets/{petId}");
         assert_eq!(event["rawQueryString"], "q=1&q=2");
@@ -687,6 +834,7 @@ mod tests {
             policy: RoutePolicy::None,
             api_key: RouteApiKey::NotRequired,
             throttle: None,
+            cache: None,
             unenforced: Vec::new(),
         }
     }
@@ -785,13 +933,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rest_function_responses_are_remapped() {
+        let app = axum::Router::new().route(
+            "/ok",
+            post(|| async {
+                r#"{"statusCode":200,"headers":{"Server":"fn","Date":"d","WWW-Authenticate":"Basic","X-Ok":"1"},"body":"hi"}"#
+            }),
+        );
+        let base = serve(app).await;
+        let mut rest = incoming(b"");
+        let response = run(
+            ResponseTransferMode::Buffered,
+            &base.join("ok").unwrap(),
+            &mut rest,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.headers()["x-amzn-remapped-server"], "fn");
+        assert_eq!(response.headers()["x-amzn-remapped-date"], "d");
+        assert_eq!(
+            response.headers()["x-amzn-remapped-www-authenticate"],
+            "Basic"
+        );
+        assert_eq!(response.headers()["x-ok"], "1");
+        assert!(response.headers().get("server").is_none());
+
+        let mut http = incoming(b"");
+        http.api.kind = ApiKind::Http;
+        let response = run(
+            ResponseTransferMode::Buffered,
+            &base.join("ok").unwrap(),
+            &mut http,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.headers()["server"], "fn");
+    }
+
+    #[tokio::test]
     async fn streaming_invocations_answer_before_the_function_finishes() {
         let (release, released) = tokio::sync::oneshot::channel::<()>();
-        let released = std::sync::Arc::new(tokio::sync::Mutex::new(Some(released)));
+        let released = Arc::new(tokio::sync::Mutex::new(Some(released)));
         let app = axum::Router::new().route(
             "/stream",
             post(move || {
-                let released = std::sync::Arc::clone(&released);
+                let released = Arc::clone(&released);
                 async move {
                     let (sender, receiver) = tokio::sync::mpsc::channel::<
                         Result<Bytes, std::convert::Infallible>,
@@ -920,5 +1106,52 @@ mod tests {
 
     async fn next_data(body: &mut Body) -> Bytes {
         try_next_data(body).await.unwrap()
+    }
+
+    fn with_client_cert(mut ctx: RequestContext) -> RequestContext {
+        let (der, _) = certificate("mtls client");
+        ctx.identity = ctx
+            .identity
+            .with_verified_certificate(ClientCertDetails::from_der(der.as_ref()).unwrap());
+        ctx
+    }
+
+    #[test]
+    fn client_certificates_appear_where_each_payload_version_puts_them() {
+        let ctx = with_client_cert(incoming(b""));
+        let v1 = event(&ctx, PayloadVersion::V1);
+        let cert = &v1["requestContext"]["identity"]["clientCert"];
+        assert_eq!(cert["subjectDN"], "C=US,O=Acme,CN=mtls client");
+        assert!(
+            cert["clientCertPem"]
+                .as_str()
+                .unwrap()
+                .starts_with("-----BEGIN CERTIFICATE-----")
+        );
+        assert!(
+            cert["validity"]["notBefore"]
+                .as_str()
+                .unwrap()
+                .ends_with("GMT")
+        );
+        assert_eq!(
+            v1["requestContext"]["identity"].as_object().unwrap().len(),
+            13
+        );
+        let v2 = event(&ctx, PayloadVersion::V2);
+        assert_eq!(
+            v2["requestContext"]["authentication"]["clientCert"]["subjectDN"],
+            "C=US,O=Acme,CN=mtls client"
+        );
+        assert!(v2["requestContext"].get("identity").is_none());
+    }
+
+    #[test]
+    fn events_have_no_client_certificate_fields_without_one() {
+        let ctx = incoming(b"");
+        let v1 = event(&ctx, PayloadVersion::V1);
+        assert!(v1["requestContext"]["identity"].get("clientCert").is_none());
+        let v2 = event(&ctx, PayloadVersion::V2);
+        assert!(v2["requestContext"].get("authentication").is_none());
     }
 }

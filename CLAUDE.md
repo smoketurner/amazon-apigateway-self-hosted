@@ -22,6 +22,8 @@ runs as a container on Kubernetes (often behind Istio) on non-AWS clouds or on-p
 Cargo.toml            # virtual workspace: pinned deps + strict lints + profiles
 crates/apigw/src/     # the binary — module map in docs/architecture.md
 crates/apigw-regex/   # java.util.regex translator (library, pure)
+crates/apigw-vtl/     # Velocity 1.7 mapping templates + JSON paths (library, pure)
+fuzz/                 # detached cargo-fuzz crate (own workspace)
 tools/                # Docker-run Java oracles that generate test fixtures
 docs/                 # architecture, deployment (k8s/Istio), crypto, CI
 Dockerfile            # static musl build → distroless
@@ -35,7 +37,7 @@ Dockerfile            # static musl build → distroless
   narrowly with `#[expect(clippy::unwrap_used, reason = "...")]`.
 - **Dependencies are pinned** `=x.y.z` with `default-features = false` in
   `[workspace.dependencies]`; look up the current version when adding one.
-- The `apigw` binary crate keeps items `pub(crate)`; library crates (`apigw-regex`) expose a
+- The `apigw` binary crate keeps items `pub(crate)`; library crates (`apigw-regex`, `apigw-vtl`) expose a
   documented `pub` API.
 - Own-crate items are imported with `use`, not written as deep `crate::` paths
   (`clippy::absolute_paths`); a new workspace dependency also goes in `.clippy.toml`'s

@@ -13,8 +13,10 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::rules::Routing;
+use super::truststore::{Truststore, TruststoreRef, TruststoreSource};
 use super::{ApiMapping, ApiMappings, DomainName, MappingKey, RoutingMode, RoutingRule, StageRef};
 use crate::app::{ApiRuntime, Builder};
+use crate::listener::{ClientAuth, DomainTls};
 use crate::model::ApiKind;
 use crate::router::{LoadSummary, Loaded};
 use crate::source::Source;
@@ -46,13 +48,56 @@ pub(crate) enum Resolution {
     NoMatch,
 }
 
+/// Whether a domain requires client certificates (mutual TLS), and where its
+/// truststore is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Mtls {
+    Off,
+    Required(TruststoreRef),
+    /// The domain is configured for mutual TLS with a truststore this gateway
+    /// cannot use (a malformed `truststoreUri`): clients cannot be verified.
+    Invalid(String),
+}
+
+impl Mtls {
+    fn of(domain: &aws_sdk_apigatewayv2::operation::get_domain_name::GetDomainNameOutput) -> Self {
+        let Some(uri) = domain
+            .mutual_tls_authentication()
+            .and_then(|m| m.truststore_uri())
+            .filter(|uri| !uri.is_empty())
+        else {
+            return Self::Off;
+        };
+        let version = domain
+            .mutual_tls_authentication()
+            .and_then(|m| m.truststore_version());
+        match TruststoreRef::parse(uri, version) {
+            Ok(reference) => Self::Required(reference),
+            Err(err) => Self::Invalid(err.to_string()),
+        }
+    }
+}
+
+/// What a domain looks like in API Gateway.
+struct RemoteDomain {
+    routing: Routing,
+    mtls: Mtls,
+}
+
 /// The routing configuration of a domain and the APIs it serves.
 pub(crate) struct DomainState {
     routing: Routing,
     apis: BTreeMap<StageRef, watch::Receiver<Arc<Loaded>>>,
+    requires_client_certificate: bool,
 }
 
 impl DomainState {
+    /// Whether requests to the domain must come from clients that presented a
+    /// certificate in the TLS handshake.
+    pub(crate) fn requires_client_certificate(&self) -> bool {
+        self.requires_client_certificate
+    }
+
     pub(crate) fn resolve(&self, path: &str, headers: &HeaderMap) -> Resolution {
         let Some(routed) = self.routing.select(path, headers) else {
             return Resolution::NoMatch;
@@ -69,6 +114,7 @@ impl DomainState {
 pub(crate) struct DomainSummary {
     domain: String,
     routing_mode: &'static str,
+    mutual_tls: bool,
     mappings: Vec<MappingSummary>,
     rules: usize,
     apis: Vec<ApiSummary>,
@@ -104,6 +150,7 @@ impl DomainState {
         DomainSummary {
             domain: domain.to_string(),
             routing_mode: self.routing.mode.as_str(),
+            mutual_tls: self.requires_client_certificate,
             mappings: self
                 .routing
                 .mappings
@@ -169,7 +216,10 @@ pub(crate) struct DomainSupervisor {
     runtimes: BTreeMap<StageRef, ApiRuntime>,
     kinds: BTreeMap<String, ApiKind>,
     shutdown: CancellationToken,
-    published: Option<(Routing, BTreeSet<StageRef>)>,
+    published: Option<(Routing, BTreeSet<StageRef>, bool)>,
+    tls: Option<Arc<DomainTls>>,
+    truststores: TruststoreSource,
+    truststore: Option<Truststore>,
 }
 
 impl DomainSupervisor {
@@ -179,9 +229,13 @@ impl DomainSupervisor {
         sdk_config: &aws_config::SdkConfig,
         interval: Option<Duration>,
         shutdown: &CancellationToken,
+        tls: Option<Arc<DomainTls>>,
     ) -> Self {
         Self {
             domain,
+            truststores: TruststoreSource::new(sdk_config),
+            truststore: None,
+            tls,
             v2: aws_sdk_apigatewayv2::Client::new(sdk_config),
             rest: aws_sdk_apigateway::Client::new(sdk_config),
             builder,
@@ -203,8 +257,9 @@ impl DomainSupervisor {
     pub(crate) async fn start(
         mut self,
     ) -> Result<(watch::Receiver<Arc<DomainState>>, JoinHandle<()>), DomainError> {
-        let routing = self.fetch_routing().await?;
-        let state = self.reconcile(routing).await;
+        let remote = self.fetch_routing().await?;
+        self.apply_client_auth(&remote.mtls).await;
+        let state = self.reconcile(remote).await;
         let (publish, state) = watch::channel(Arc::new(state));
         let task = tokio::spawn(self.run(publish));
         Ok((state, task))
@@ -221,15 +276,16 @@ impl DomainSupervisor {
                 () = self.shutdown.cancelled() => break,
                 () = tokio::time::sleep(interval) => {}
             }
-            let routing = match self.fetch_routing().await {
-                Ok(routing) => routing,
+            let remote = match self.fetch_routing().await {
+                Ok(remote) => remote,
                 Err(err) => {
                     tracing::warn!(%err, domain = %self.domain, "domain refresh failed; keeping the current routing");
                     continue;
                 }
             };
+            self.apply_client_auth(&remote.mtls).await;
             let before = self.published.clone();
-            let state = self.reconcile(routing).await;
+            let state = self.reconcile(remote).await;
             if self.published != before {
                 publish.send_replace(Arc::new(state));
             }
@@ -243,7 +299,65 @@ impl DomainSupervisor {
         }
     }
 
-    async fn fetch_routing(&self) -> Result<Routing, DomainError> {
+    /// Makes the domain's TLS match its mutual TLS configuration. A truststore
+    /// that cannot be loaded leaves the previous one in force; with none, the
+    /// domain refuses connections rather than serve without verification.
+    async fn apply_client_auth(&mut self, mtls: &Mtls) {
+        let Some(tls) = self.tls.clone() else { return };
+        let auth = match *mtls {
+            Mtls::Off => {
+                self.truststore = None;
+                Some(ClientAuth::Open)
+            }
+            Mtls::Required(ref reference) => match self.truststores.load(reference).await {
+                Ok(store) => self.adopt(store),
+                Err(err) => {
+                    tracing::error!(%err, domain = %self.domain, "failed to load the mutual TLS truststore");
+                    self.without_truststore()
+                }
+            },
+            Mtls::Invalid(ref reason) => {
+                tracing::error!(reason, domain = %self.domain, "the domain's mutual TLS truststore cannot be used");
+                self.without_truststore()
+            }
+        };
+        if let Some(auth) = auth
+            && let Err(err) = tls.set_client_auth(auth)
+        {
+            tracing::error!(%err, domain = %self.domain, "failed to apply the domain's client authentication");
+        }
+    }
+
+    /// Starts verifying clients against `store`, unless it is the bundle already
+    /// in force.
+    fn adopt(&mut self, store: Truststore) -> Option<ClientAuth> {
+        if self
+            .truststore
+            .as_ref()
+            .is_some_and(|held| held.same_bundle(&store))
+        {
+            return None;
+        }
+        match store.verifier() {
+            Ok(verifier) => {
+                tracing::info!(domain = %self.domain, "loaded the mutual TLS truststore");
+                self.truststore = Some(store);
+                Some(ClientAuth::Required(verifier))
+            }
+            Err(err) => {
+                tracing::error!(%err, domain = %self.domain, "the mutual TLS truststore is unusable");
+                self.without_truststore()
+            }
+        }
+    }
+
+    /// What to do when a required truststore cannot be used: keep the one in
+    /// force, or refuse every client when there is none.
+    fn without_truststore(&self) -> Option<ClientAuth> {
+        self.truststore.is_none().then_some(ClientAuth::Unavailable)
+    }
+
+    async fn fetch_routing(&self) -> Result<RemoteDomain, DomainError> {
         let domain = self
             .v2
             .get_domain_name()
@@ -261,7 +375,10 @@ impl DomainSupervisor {
         } else {
             self.fetch_rules().await?
         };
-        Ok(Routing::new(mode, rules, mappings))
+        Ok(RemoteDomain {
+            routing: Routing::new(mode, rules, mappings),
+            mtls: Mtls::of(&domain),
+        })
     }
 
     async fn fetch_mappings(&self) -> Result<ApiMappings, DomainError> {
@@ -325,7 +442,9 @@ impl DomainSupervisor {
     /// Makes the running API stages the ones `routing` names: starts missing
     /// ones (a stage that fails to load is retried on the next refresh) and
     /// stops the ones no longer named.
-    async fn reconcile(&mut self, routing: Routing) -> DomainState {
+    async fn reconcile(&mut self, remote: RemoteDomain) -> DomainState {
+        let RemoteDomain { routing, mtls } = remote;
+        let requires_client_certificate = mtls != Mtls::Off;
         let wanted: BTreeSet<StageRef> = routing.targets();
         let stale: Vec<StageRef> = self
             .runtimes
@@ -353,8 +472,9 @@ impl DomainSupervisor {
             }
         }
         let running: BTreeSet<StageRef> = self.runtimes.keys().cloned().collect();
-        self.published = Some((routing.clone(), running));
+        self.published = Some((routing.clone(), running, requires_client_certificate));
         DomainState {
+            requires_client_certificate,
             routing,
             apis: self
                 .runtimes
@@ -517,6 +637,7 @@ mod tests {
             &aws.sdk_config(),
             interval,
             &shutdown,
+            None,
         );
         let (state, task) = supervisor.start().await.unwrap();
         (
@@ -756,6 +877,7 @@ mod tests {
             &aws.sdk_config(),
             None,
             &shutdown,
+            None,
         );
         assert!(supervisor.start().await.is_err());
     }
@@ -764,6 +886,7 @@ mod tests {
     fn registries_prefer_exact_names_over_wildcards() {
         let state = |mappings: Vec<ApiMapping>| {
             watch::channel(Arc::new(DomainState {
+                requires_client_certificate: false,
                 routing: Routing::new(
                     RoutingMode::ApiMappingOnly,
                     Vec::new(),
@@ -793,5 +916,212 @@ mod tests {
         assert_eq!(mappings("api.example.com"), Some(1));
         assert_eq!(mappings("other.example.com"), Some(0));
         assert_eq!(mappings("example.org"), None);
+    }
+
+    mod mutual_tls {
+        use super::*;
+        use crate::client_cert::ClientCertDetails;
+        use crate::client_cert::tests::{ca, certificate};
+        use crate::identity::ClientIdentity;
+        use crate::listener::Tls;
+        use crate::listener::test_tls::generate;
+
+        fn tls() -> Tls {
+            let cert = generate();
+            let (cert_path, key_path) = cert.write();
+            Tls::with_domains(&cert_path, &key_path, &[DOMAIN.parse().unwrap()], &[]).unwrap()
+        }
+
+        fn domain_with_truststore(aws: &MockAws, truststore: Option<&str>) {
+            let mtls = truststore.map_or_else(String::new, |uri| {
+                format!(r#","mutualTlsAuthentication":{{"truststoreUri":"{uri}","truststoreVersion":"v1"}}"#)
+            });
+            aws.reply(
+                &format!("/v2/domainnames/{DOMAIN}"),
+                Reply::json(&format!(
+                    r#"{{"domainName":"{DOMAIN}","routingMode":"API_MAPPING_ONLY"{mtls}}}"#
+                )),
+            );
+            aws.reply(
+                &format!("/v2/domainnames/{DOMAIN}/apimappings"),
+                Reply::json(r#"{"items":[]}"#),
+            );
+        }
+
+        async fn start(
+            aws: &MockAws,
+            tls: &Tls,
+        ) -> (DomainRegistry, CancellationToken, JoinHandle<()>) {
+            let shutdown = CancellationToken::new();
+            let name: DomainName = DOMAIN.parse().unwrap();
+            let supervisor = DomainSupervisor::new(
+                name.clone(),
+                Builder::for_tests(aws.sdk_config()),
+                &aws.sdk_config(),
+                Some(Duration::from_millis(50)),
+                &shutdown,
+                tls.domain(&name),
+            );
+            let (state, task) = supervisor.start().await.unwrap();
+            (DomainRegistry::new(vec![(name, state)]), shutdown, task)
+        }
+
+        #[tokio::test]
+        async fn a_domain_without_a_truststore_is_open() {
+            let aws = MockAws::start().await;
+            domain_with_truststore(&aws, None);
+            let tls = tls();
+            assert!(!tls.serves(DOMAIN), "closed until the domain has been read");
+            let (registry, shutdown, _task) = start(&aws, &tls).await;
+            assert!(tls.serves(DOMAIN));
+            assert!(!registry.find(DOMAIN).unwrap().requires_client_certificate());
+            shutdown.cancel();
+        }
+
+        #[tokio::test]
+        async fn a_truststore_from_s3_makes_the_domain_require_client_certificates() {
+            let aws = MockAws::start().await;
+            let authority = ca("trust me");
+            aws.reply("/trust/ca.pem", Reply::json(&authority.pem));
+            domain_with_truststore(&aws, Some("s3://trust/ca.pem"));
+            let tls = tls();
+            let (registry, shutdown, _task) = start(&aws, &tls).await;
+            assert!(tls.serves(DOMAIN));
+            assert!(registry.find(DOMAIN).unwrap().requires_client_certificate());
+            let summary = serde_json::to_value(registry.summaries()).unwrap();
+            assert_eq!(summary[0]["mutual_tls"], true);
+            let version_query = aws
+                .calls()
+                .into_iter()
+                .find(|c| c.target == "/trust/ca.pem")
+                .and_then(|c| c.query)
+                .unwrap();
+            assert!(version_query.contains("versionId=v1"), "{version_query}");
+            shutdown.cancel();
+        }
+
+        #[tokio::test]
+        async fn an_unreadable_truststore_closes_the_domain_instead_of_opening_it() {
+            let aws = MockAws::start().await;
+            aws.reply("/trust/ca.pem", Reply::error("NoSuchKey"));
+            domain_with_truststore(&aws, Some("s3://trust/ca.pem"));
+            let tls = tls();
+            let (registry, shutdown, _task) = start(&aws, &tls).await;
+            assert!(
+                !tls.serves(DOMAIN),
+                "no truststore, no verification: refuse"
+            );
+            assert!(registry.find(DOMAIN).unwrap().requires_client_certificate());
+
+            let authority = ca("now readable");
+            aws.reply("/trust/ca.pem", Reply::json(&authority.pem));
+            for _ in 0..100 {
+                if tls.serves(DOMAIN) {
+                    shutdown.cancel();
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            shutdown.cancel();
+            panic!("the truststore was never picked up");
+        }
+
+        #[tokio::test]
+        async fn enabling_mutual_tls_with_an_unreadable_truststore_closes_an_open_domain() {
+            let aws = MockAws::start().await;
+            domain_with_truststore(&aws, None);
+            let tls = tls();
+            let (_registry, shutdown, _task) = start(&aws, &tls).await;
+            assert!(tls.serves(DOMAIN), "open while it has no truststore");
+            aws.reply("/trust/ca.pem", Reply::error("NoSuchKey"));
+            domain_with_truststore(&aws, Some("s3://trust/ca.pem"));
+            for _ in 0..100 {
+                if !tls.serves(DOMAIN) {
+                    shutdown.cancel();
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            shutdown.cancel();
+            panic!("the domain kept serving clients it could not verify");
+        }
+
+        #[tokio::test]
+        async fn a_malformed_truststore_uri_closes_the_domain() {
+            let aws = MockAws::start().await;
+            domain_with_truststore(&aws, Some("https://not-s3/ca.pem"));
+            let tls = tls();
+            let (_registry, shutdown, _task) = start(&aws, &tls).await;
+            assert!(!tls.serves(DOMAIN));
+            shutdown.cancel();
+        }
+
+        #[tokio::test]
+        async fn removing_the_truststore_opens_the_domain_again() {
+            let aws = MockAws::start().await;
+            let authority = ca("trust me");
+            aws.reply("/trust/ca.pem", Reply::json(&authority.pem));
+            domain_with_truststore(&aws, Some("s3://trust/ca.pem"));
+            let tls = tls();
+            let (registry, shutdown, _task) = start(&aws, &tls).await;
+            assert!(registry.find(DOMAIN).unwrap().requires_client_certificate());
+            domain_with_truststore(&aws, None);
+            for _ in 0..100 {
+                if !registry.find(DOMAIN).unwrap().requires_client_certificate() {
+                    assert!(tls.serves(DOMAIN));
+                    shutdown.cancel();
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            shutdown.cancel();
+            panic!("mutual TLS was never switched off");
+        }
+
+        #[tokio::test]
+        async fn requests_to_a_mutual_tls_domain_need_a_certificate_verified_by_this_gateway() {
+            let (_tx, rx) = watch::channel(Arc::new(DomainState {
+                requires_client_certificate: true,
+                routing: Routing::new(
+                    RoutingMode::ApiMappingOnly,
+                    Vec::new(),
+                    ApiMappings::new(vec![ApiMapping {
+                        key: MappingKey::from("(none)"),
+                        target: StageRef {
+                            api_id: "unloaded".to_owned(),
+                            stage: "prod".to_owned(),
+                        },
+                    }]),
+                ),
+                apis: BTreeMap::new(),
+            }));
+            let registry = DomainRegistry::new(vec![(DOMAIN.parse().unwrap(), rx)]);
+            let send = |identity: ClientIdentity| {
+                let registry = registry.clone();
+                async move {
+                    let mut request = Request::builder()
+                        .uri("/x")
+                        .header("host", DOMAIN)
+                        .body(Body::empty())
+                        .unwrap();
+                    request.extensions_mut().insert(identity);
+                    domain_dispatcher(registry)
+                        .oneshot(request)
+                        .await
+                        .unwrap()
+                        .status()
+                        .as_u16()
+                }
+            };
+            assert_eq!(send(ClientIdentity::unknown()).await, 403);
+            let (der, _) = certificate("client");
+            let verified = ClientIdentity::unknown()
+                .with_verified_certificate(ClientCertDetails::from_der(der.as_ref()).unwrap());
+            assert_eq!(
+                send(verified).await,
+                503,
+                "past the gate; the mapped API is not loaded"
+            );
+        }
     }
 }

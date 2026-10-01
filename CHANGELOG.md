@@ -19,6 +19,31 @@ All notable changes to this project are documented here. The format follows
   `429`. Keys are read with their values, held only as SHA-256 hashes, and refreshed every
   `--usage-refresh-seconds` with paged reads paced for the control plane's rate limit. Authorizer
   results no longer hold the `usageIdentifierKey` in the cache.
+- REST binary media types: Lambda proxy events carry a request body as base64 when its
+  `Content-Type` matches `binaryMediaTypes` (exact, `type/*`, `*/*`) and as text otherwise, and a
+  function's base64 response is decoded only when the client's first `Accept` media type matches
+  (the response `Content-Type` when there is no `Accept`). `contentHandling` is no longer reported
+  for proxy integrations, where it has no effect.
+- REST payload compression: with `minimumCompressionSize`, buffered responses at least that large
+  are compressed for clients accepting `gzip` or `deflate` (the highest-weighted coding must be one
+  API Gateway supports), and `gzip`/`deflate` request bodies are decompressed before the
+  integration sees them. Adds the `flate2` dependency (pure Rust backend).
+
+- `crates/apigw-vtl`: an Apache Velocity 1.7 engine for mapping templates. It parses and renders
+  references, `#set`, `#if`/`#elseif`/`#else`, `#foreach` (1,000-iteration cap, `$foreach.*`,
+  `$velocityCount`), `#break`, `#stop`, comments, escaping, and Velocity's whitespace gobbling,
+  with a Java value model (`toString`, arithmetic, comparison) and the common `String`, `List`,
+  and `Map` methods. `$input` (`body`, `json()`, `path()`, `params()`), `$util`, `$context`
+  (including caller-readable `requestOverride`/`responseOverride`), and `$stageVariables` are
+  provided, with Jayway JsonPath semantics for paths. Output size, evaluation steps, and nesting
+  are bounded and reported as typed errors. Its tests replay about 960 templates rendered by
+  Apache Velocity 1.7 and Jayway JsonPath 2.9, and a cargo-fuzz target lives in `fuzz/`.
+- `tools/vtl-oracle`: a Docker-run Java oracle (Apache Velocity 1.7, Jayway JsonPath 2.9, pinned
+  by digest and checksum) with a committed corpus of about 9,500 templates and their expected
+  output. `apigw-vtl`'s `oracle` test replays it, and `.github/workflows/vtl-oracle.yml` re-renders
+  it weekly, replays fresh random templates, and fuzzes the template, JSON path, and regex
+  parsers.
+
 - Resource policies are evaluated as API Gateway evaluates them: an explicit `Deny` ends the request
   before authentication, then the policy is combined with the authorizer's decision per the
   authorization-flow tables (no authorizer, Lambda authorizer, Cognito user pool). `aws:SourceIp`
@@ -31,6 +56,21 @@ All notable changes to this project are documented here. The format follows
   timeout and 150 KB cap, cached for two hours, and refreshed at most every 30 s when a token names an
   unknown key. Issuer, audience, expiry, and scopes are checked, and claims reach `$context.authorizer`.
   `--issuer-endpoint` fetches an issuer's keys from a mirror instead.
+- REST header behavior from API Gateway's documented header table: request headers API Gateway
+  drops never reach `HTTP_PROXY` backends or Lambda, backend and Lambda response headers are
+  dropped or renamed to `X-Amzn-Remapped-*`, `X-HTTP-Method-Override` replaces the method before
+  routing, and `;` splits query strings. `HTTP_PROXY` requests gain `x-amzn-apigateway-api-id`,
+  a default `User-Agent`, `X-Forwarded-Proto`, and `X-Forwarded-Port`. HTTP APIs send `Forwarded`
+  in place of `X-Forwarded-*` and a `Content-Type` on body-less requests.
+- `HTTP_PROXY` `tlsConfig`: `insecureSkipVerification` and `serverNameToVerify` (verification and
+  SNI against that name, connecting to the integration's own host), with a client cached per
+  server name and address set. The unenforced-feature report no longer lists it.
+- Integration timeouts are bounded as API Gateway bounds them: at least 50 ms, REST not capped at 29
+  s, HTTP APIs at 30 s.
+- Request-size quotas: REST URLs over 10,240 characters answer `414` and REST headers over 20,480
+  bytes `431`; HTTP API request line plus headers over 10,240 bytes answer `431`. HTTP/2 header
+  lists up to 64 KiB reach the check instead of being refused by hyper at 16 KiB.
+
 - Lambda authorizers are evaluated. REST `TOKEN` (with `identityValidationExpression`) and `REQUEST`
   authorizers and HTTP API `REQUEST` authorizers (payload 1.0 and 2.0, simple responses) are invoked
   with the request's identity sources, their results are cached by identity source and TTL, and the
@@ -95,6 +135,25 @@ All notable changes to this project are documented here. The format follows
   on its own, and `/ping` and `/sping` answer 200 as on API Gateway. `--domain-cert-dir` serves
   each domain its own certificate by SNI, reloaded when the files change. `/routes` lists each
   domain's mappings and APIs.
+- Mutual TLS: a custom domain with a `mutualTlsAuthentication` truststore requires client
+  certificates. The CA bundle is read from S3 (`truststoreUri` at `truststoreVersion`) and
+  re-read on every refresh; clients must present a certificate chained to it, unexpired, in the
+  TLS handshake, and requests to the domain from a client that did not (for example one that asked
+  for a different name in SNI) are refused. A domain whose truststore cannot be loaded refuses
+  every connection rather than serving unverified. `$context.identity.clientCert.*` (access logs),
+  and `requestContext.identity.clientCert` and `requestContext.authentication.clientCert` in
+  Lambda events, carry `clientCertPem`, `subjectDN`, `issuerDN`, `serialNumber`, and `validity`;
+  a certificate reported by a trusted proxy in `X-Forwarded-Client-Cert` is described the same way.
+- Response caching: REST stages with `cacheClusterEnabled` cache responses of methods whose method
+  settings enable caching (`GET` methods through the stage-wide setting, other methods only through
+  their own), for the method's TTL (default 300 s, at most 3600 s, 0 off), in the state backend. Entries
+  are keyed by the method and the integration's `cacheKeyParameters` values, and responses over
+  1,048,576 bytes are not cached. `Cache-Control: max-age=0` follows
+  `requireAuthorizationForCacheControl` (default true) and
+  `unauthorizedCacheControlHeaderStrategy`; since this gateway cannot verify the IAM permission to
+  invalidate, every such request counts as unauthorized when authorization is required.
+  `CacheHitCount` and `CacheMissCount` are published with the other metrics. A canary release uses
+  the stage cache only with `useStageCache`, sharing entries only when it runs the same deployment.
 - Log delivery uses bounded queues that drop (and count) events instead of slowing requests,
   and flushes everything on shutdown.
 - REST gateway responses: every error the gateway generates (missing authentication token,

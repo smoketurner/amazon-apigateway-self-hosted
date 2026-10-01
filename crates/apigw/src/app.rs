@@ -19,6 +19,7 @@ use crate::aws::AwsClients;
 #[cfg(test)]
 use crate::aws::{CredentialsMode, LambdaEndpoints};
 use crate::backoff::Backoff;
+use crate::cache::CacheScope;
 use crate::canary::{CanaryRelease, CanaryStructure, CanarySummary, Release, TrafficShare};
 use crate::config::Config;
 use crate::cors::Cors;
@@ -28,9 +29,11 @@ use crate::gateway::{ApiContext, Enforcement};
 use crate::gateway::{AuthorizationMode, Unsupported};
 use crate::gateway_response::GatewayResponses;
 use crate::integration::StageVariables;
+use crate::integration_tls;
 use crate::listener::{self, ConnLimits, Edge, Tls};
 use crate::model::{ApiModel, Feature, IntegrationOverrides, StageSettings};
 use crate::observability::{Observability, StageObserver};
+use crate::payload::PayloadSettings;
 use crate::router::{self, BasePath, LoadSummary, Loaded, RouteSummary};
 use crate::source::{Fetch, Fetcher, Snapshot, Source, SourceError};
 use crate::state::{StateBackend, Valkey};
@@ -220,6 +223,16 @@ impl Builder {
                 release,
             ),
             release,
+            payload: Arc::new(PayloadSettings::new(
+                &model.settings.binary_media_types,
+                model.settings.minimum_compression_size,
+            )),
+            cache: CacheScope::of(
+                model.stage.cache_cluster_enabled,
+                release,
+                snapshot.stage_settings.canary.as_ref(),
+                snapshot.stamp.deployment_id.as_deref(),
+            ),
         });
         let (router, routes) = router::build(&model, &ctx, &self.base_path);
         Ok(BuiltRelease {
@@ -569,6 +582,7 @@ async fn serve_apis(
     builder: Builder,
     sdk_config: &aws_config::SdkConfig,
     aws: &Arc<AwsClients>,
+    tls: &Tls,
     shutdown: &CancellationToken,
     tasks: &mut JoinSet<()>,
 ) -> anyhow::Result<(Router, Router)> {
@@ -597,6 +611,7 @@ async fn serve_apis(
             sdk_config,
             config.refresh_interval(),
             shutdown,
+            tls.domain(domain),
         );
         tracing::info!(%domain, "loading custom domain");
         let (state, task) = supervisor
@@ -640,11 +655,15 @@ async fn connect_state(config: &Config) -> anyhow::Result<Arc<StateBackend>> {
 }
 
 pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
-    let tls = Tls::with_domains(&config.tls_cert, &config.tls_key, &config.domain_certs())
-        .context("failed to load the TLS certificates")?;
+    let tls = Tls::with_domains(
+        &config.tls_cert,
+        &config.tls_key,
+        &config.domain_names,
+        &config.domain_certs(),
+    )
+    .context("failed to load the TLS certificates")?;
     let sdk_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-    let http = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
+    let http = integration_tls::client_builder()
         .build()
         .context("failed to build the HTTP client")?;
     let aws = Arc::new(AwsClients::new(
@@ -683,8 +702,16 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
     builder.enforcement.warn_if_relaxed();
     let shutdown = CancellationToken::new();
     let mut tasks = JoinSet::new();
-    let (app, admin_app) =
-        serve_apis(&config, builder, &sdk_config, &aws, &shutdown, &mut tasks).await?;
+    let (app, admin_app) = serve_apis(
+        &config,
+        builder,
+        &sdk_config,
+        &aws,
+        &tls,
+        &shutdown,
+        &mut tasks,
+    )
+    .await?;
     let listener = TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("failed to bind {}", config.listen))?;
@@ -829,19 +856,15 @@ mod tests {
     #[tokio::test]
     async fn unenforced_features_are_summarized() {
         let mut snapshot = snapshot();
-        snapshot.openapi =
-            json!({"x-amazon-apigateway-binary-media-types": ["image/png"], "paths": {}});
-        snapshot.stage_settings.cache_cluster_enabled = true;
+        snapshot.openapi = json!({"paths": {"/x": {"get": {"x-amazon-apigateway-integration": {
+            "type": "mock", "contentHandling": "CONVERT_TO_TEXT"}}}}});
         let inputs = Inputs {
             snapshot,
             overrides: IntegrationOverrides::default(),
         };
         let loaded = builder(None).build(&inputs).unwrap();
         let rendered = serde_json::to_value(&loaded.summary).unwrap();
-        assert_eq!(
-            rendered["unenforced"],
-            json!(["binary_media_types", "response_caching"])
-        );
+        assert_eq!(rendered["unenforced"], json!(["content_handling"]));
     }
 
     #[tokio::test]

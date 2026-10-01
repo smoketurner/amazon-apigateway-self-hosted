@@ -17,10 +17,12 @@ use uuid::Uuid;
 
 use crate::authz::{Authorizers, ResourcePolicies};
 use crate::aws::{AwsClients, RoleArn, RoleStatus};
+use crate::cache::CacheSettings;
 use crate::canary::{CanaryRelease, CanarySummary};
 use crate::domain::{DomainName, DomainRegistry, DomainSummary, Resolution};
-use crate::gateway::{ApiContext, Enforcement, RequestId};
+use crate::gateway::{ApiContext, Enforcement, GatewayError, RequestId};
 use crate::http_routes::{HttpRoutes, PathPattern};
+use crate::identity::ClientIdentity;
 use crate::integration::Integration;
 use crate::model::{ApiKind, ApiModel, Feature, MethodMatch, Protections, RouteKey, RoutePath};
 use crate::pipeline::Pipeline;
@@ -54,7 +56,7 @@ impl BasePath {
                 let ctx = Arc::clone(&ctx);
                 async move {
                     let pending = ctx.observer.begin(&ctx, &mut request, None);
-                    let response = ctx.reject_unrouted(request);
+                    let response = ctx.reject(request, GatewayError::NoRoute);
                     ctx.observer.finish(pending, response)
                 }
             })
@@ -173,12 +175,14 @@ impl PathRoutes {
     }
 
     async fn handle(&self, mut request: Request) -> Response {
+        self.ctx.kind.override_method(&mut request);
         let route = self.select(request.method());
         let pending = self.ctx.observer.begin(&self.ctx, &mut request, route);
-        let response = match route {
+        let response = match (self.ctx.kind.request_limits().check(&request), route) {
+            (Err(exceeded), _) => self.ctx.reject(request, exceeded.into()),
             // The pipeline future holds whole SDK calls; box it once here.
-            Some(route) => Box::pin(Pipeline::new(&self.ctx, route).run(request)).await,
-            None => self.ctx.reject_unrouted(request),
+            (Ok(()), Some(route)) => Box::pin(Pipeline::new(&self.ctx, route).run(request)).await,
+            (Ok(()), None) => self.ctx.reject(request, GatewayError::NoRoute),
         };
         self.ctx.observer.finish(pending, response)
     }
@@ -198,13 +202,14 @@ impl HttpHandler {
             self.ctx
                 .observer
                 .begin(&self.ctx, &mut request, selection.as_ref().map(|s| s.route));
-        let response = match selection {
-            Some(selection) => {
+        let response = match (self.ctx.kind.request_limits().check(&request), selection) {
+            (Err(exceeded), _) => self.ctx.reject(request, exceeded.into()),
+            (Ok(()), Some(selection)) => {
                 let pipeline =
                     Pipeline::new(&self.ctx, selection.route).with_path_params(selection.params);
                 Box::pin(pipeline.run(request)).await
             }
-            None => self.ctx.reject_unrouted(request),
+            (Ok(()), None) => self.ctx.reject(request, GatewayError::NoRoute),
         };
         self.ctx.observer.finish(pending, response)
     }
@@ -234,7 +239,7 @@ fn axum_path(path: &str) -> Result<String, String> {
     Ok(out)
 }
 
-/// Compiles every operation of the model into a runtime route.
+/// Compiles every operation of `model` into a route of the release `ctx` serves.
 fn compile_routes(model: &ApiModel, ctx: &ApiContext) -> Vec<Route> {
     let authorizers = Authorizers::compile(model, &ctx.stage_variables);
     let policies = ResourcePolicies::compile(model, &ctx.api_id);
@@ -250,18 +255,26 @@ fn compile_routes(model: &ApiModel, ctx: &ApiContext) -> Vec<Route> {
         model.stage.clone(),
         ctx.replicas,
     );
+    let caching = CacheSettings::new(
+        &ctx.api_id,
+        ctx.stage.as_deref(),
+        model.stage.clone(),
+        ctx.cache.clone(),
+    );
     model
         .operations
         .iter()
         .map(|operation| {
-            Route::compile(
+            let mut route = Route::compile(
                 operation,
                 model.kind,
                 &ctx.stage_variables,
                 &access,
                 &throttling,
                 &ctx.vpc_links,
-            )
+            );
+            route.cache = caching.for_route(operation);
+            route
         })
         .collect()
 }
@@ -456,6 +469,20 @@ pub(crate) fn domain_dispatcher(domains: DomainRegistry) -> Router {
             let Some(state) = domains.find(&host) else {
                 return CustomDomain::error(StatusCode::FORBIDDEN, "Forbidden");
             };
+            if state.requires_client_certificate()
+                && !request
+                    .extensions()
+                    .get::<ClientIdentity>()
+                    .is_some_and(ClientIdentity::has_verified_certificate)
+            {
+                // A client that asked for a different name in its TLS handshake
+                // than in `Host` was not asked for a certificate.
+                tracing::warn!(
+                    host,
+                    "refused a request to a mutual TLS domain without a verified client certificate"
+                );
+                return CustomDomain::error(StatusCode::FORBIDDEN, "Forbidden");
+            }
             match state.resolve(&path, request.headers()) {
                 Resolution::Matched(loaded, routed_path) => {
                     if CustomDomain::rewrite_path(&mut request, &routed_path).is_err() {
@@ -534,12 +561,14 @@ mod tests {
     use super::*;
     use crate::authz::KeyStore;
     use crate::aws::{CredentialsMode, LambdaEndpoints};
+    use crate::cache::CacheScope;
     use crate::cors::Cors;
     use crate::gateway::{AuthorizationMode, Unsupported};
     use crate::gateway_response::GatewayResponses;
     use crate::model::{IntegrationOverrides, Protection, StageSettings};
     use crate::model::{MethodSettings, SettingsScope};
     use crate::observability::StageObserver;
+    use crate::payload::PayloadSettings;
     use crate::state::{InMemoryLimits, StateBackend};
     use crate::vpc_link::VpcLinks;
     use std::num::NonZeroU32;
@@ -588,6 +617,8 @@ mod tests {
             usage: None,
             observer: StageObserver::disabled(),
             release: None,
+            payload: Arc::default(),
+            cache: CacheScope::Off,
         })
     }
 
@@ -634,11 +665,12 @@ mod tests {
         let model = ApiModel::import(doc, kind, stage, &IntegrationOverrides::default()).unwrap();
         let responses = GatewayResponses::compile(kind, &model.gateway_responses);
         let cors = model.settings.cors.as_ref().map(Cors::compile);
-        build(
-            &model,
-            &ctx(kind, enforcement, responses, cors),
-            &base.parse().unwrap(),
-        )
+        let mut context = ctx(kind, enforcement, responses, cors);
+        Arc::get_mut(&mut context).unwrap().payload = Arc::new(PayloadSettings::new(
+            &model.settings.binary_media_types,
+            model.settings.minimum_compression_size,
+        ));
+        build(&model, &context, &base.parse().unwrap())
     }
 
     fn protected_doc() -> Value {
@@ -1090,6 +1122,253 @@ mod tests {
         );
     }
 
+    async fn status_with(
+        router: &Router,
+        method: Method,
+        uri: &str,
+        headers: &[(&str, String)],
+    ) -> StatusCode {
+        let mut builder = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            builder = builder.header(*name, value);
+        }
+        let request = builder.body(Body::empty()).unwrap();
+        router.clone().oneshot(request).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn rest_apis_honor_method_override_and_enforce_request_limits() {
+        let (rest, _) = router(&sample(), ApiKind::Rest, AuthorizationMode::Enforce, "");
+        assert_eq!(
+            status_with(&rest, Method::POST, "/pets", &[]).await,
+            StatusCode::ACCEPTED
+        );
+        let override_get = [("x-http-method-override", "GET".to_owned())];
+        assert_eq!(
+            status_with(&rest, Method::POST, "/pets", &override_get).await,
+            StatusCode::OK,
+            "the header replaces the method before routing"
+        );
+
+        let at_limit = format!("/pets?q={}", "a".repeat(10_240 - "/pets?q=".len()));
+        assert_eq!(
+            status_with(&rest, Method::GET, &at_limit, &[]).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status_with(&rest, Method::GET, &format!("{at_limit}a"), &[]).await,
+            StatusCode::URI_TOO_LONG
+        );
+        let big_header = [("x-pad", "a".repeat(20_480 - "x-pad: \r\n".len()))];
+        assert_eq!(
+            status_with(&rest, Method::GET, "/pets", &big_header).await,
+            StatusCode::OK
+        );
+        let bigger = [("x-pad", "a".repeat(20_481 - "x-pad: \r\n".len()))];
+        assert_eq!(
+            status_with(&rest, Method::GET, "/pets", &bigger).await,
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+        );
+        assert_eq!(
+            status_with(&rest, Method::GET, "/missing", &bigger).await,
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+            "unrouted requests are measured too"
+        );
+
+        let (http, _) = router(&sample(), ApiKind::Http, AuthorizationMode::Enforce, "");
+        assert_eq!(
+            status_with(&http, Method::POST, "/pets", &override_get).await,
+            StatusCode::ACCEPTED,
+            "HTTP APIs ignore the override header"
+        );
+        let http_limit = [(
+            "x-pad",
+            "a".repeat(10_240 - "GET /pets HTTP/1.1\r\nx-pad: \r\n".len()),
+        )];
+        assert_eq!(
+            status_with(&http, Method::GET, "/pets", &http_limit).await,
+            StatusCode::OK
+        );
+        let http_over = [(
+            "x-pad",
+            "a".repeat(10_241 - "GET /pets HTTP/1.1\r\nx-pad: \r\n".len()),
+        )];
+        assert_eq!(
+            status_with(&http, Method::GET, "/pets", &http_over).await,
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+        );
+    }
+
+    async fn exchange(
+        router: &Router,
+        method: Method,
+        uri: &str,
+        headers: &[(&str, &str)],
+        body: Vec<u8>,
+    ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        let mut builder = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let request = builder.body(Body::from(body)).unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        let (parts, body) = response.into_parts();
+        let body = axum::body::to_bytes(body, 1 << 20).await.unwrap();
+        (parts.status, parts.headers, body.to_vec())
+    }
+
+    async fn echo_backend() -> std::net::SocketAddr {
+        let app = Router::new().fallback(|request: Request| async move {
+            let (parts, body) = request.into_parts();
+            let body = axum::body::to_bytes(body, 1 << 20).await.unwrap();
+            let encoding = parts
+                .headers
+                .get("content-encoding")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("-")
+                .to_owned();
+            format!("{encoding}|{}", String::from_utf8_lossy(&body))
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
+    #[tokio::test]
+    async fn rest_apis_compress_responses_and_decompress_requests() {
+        use std::io::{Read as _, Write as _};
+
+        let backend = echo_backend().await;
+        let body = "{\"hello\": \"world, world, world, world\"}";
+        let doc = json!({
+            "x-amazon-apigateway-minimum-compression-size": 20,
+            "paths": {
+                "/small": {"get": {"x-amazon-apigateway-integration": {"type": "mock",
+                    "requestTemplates": {"application/json": "{\"statusCode\": 200}"},
+                    "responses": {"default": {"statusCode": "200",
+                        "responseTemplates": {"application/json": "tiny"}}}}}},
+                "/big": {"get": {"x-amazon-apigateway-integration": {"type": "mock",
+                    "requestTemplates": {"application/json": "{\"statusCode\": 200}"},
+                    "responses": {"default": {"statusCode": "200",
+                        "responseTemplates": {"application/json": body}}}}}},
+                "/echo": {"post": {"x-amazon-apigateway-integration": {"type": "http_proxy",
+                    "httpMethod": "POST", "uri": format!("http://{backend}/echo")}}}
+            }
+        });
+        let (rest, _) = router(&doc, ApiKind::Rest, AuthorizationMode::Enforce, "");
+
+        let (status, headers, plain) = exchange(&rest, Method::GET, "/big", &[], Vec::new()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(headers.get("content-encoding").is_none());
+        assert_eq!(plain, body.as_bytes());
+
+        let (_, headers, packed) = exchange(
+            &rest,
+            Method::GET,
+            "/big",
+            &[("accept-encoding", "gzip;q=1.0, identity;q=0.5")],
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(headers.get("content-encoding").unwrap(), "gzip");
+        let mut unpacked = String::new();
+        flate2::read::GzDecoder::new(packed.as_slice())
+            .read_to_string(&mut unpacked)
+            .unwrap();
+        assert_eq!(unpacked, body);
+
+        let (_, headers, small) = exchange(
+            &rest,
+            Method::GET,
+            "/small",
+            &[("accept-encoding", "gzip")],
+            Vec::new(),
+        )
+        .await;
+        assert!(
+            headers.get("content-encoding").is_none(),
+            "below the minimum size"
+        );
+        assert_eq!(small, b"tiny");
+
+        let (_, headers, unsupported) = exchange(
+            &rest,
+            Method::GET,
+            "/big",
+            &[("accept-encoding", "br, gzip;q=0.5")],
+            Vec::new(),
+        )
+        .await;
+        assert!(headers.get("content-encoding").is_none());
+        assert_eq!(unsupported, body.as_bytes());
+
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(b"squeezed request").unwrap();
+        let (status, _, echoed) = exchange(
+            &rest,
+            Method::POST,
+            "/echo",
+            &[("content-encoding", "gzip")],
+            encoder.finish().unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            String::from_utf8(echoed).unwrap(),
+            "-|squeezed request",
+            "the backend gets the decompressed body without Content-Encoding"
+        );
+
+        let (status, _, _) = exchange(
+            &rest,
+            Method::POST,
+            "/echo",
+            &[("content-encoding", "gzip")],
+            b"definitely not gzip".to_vec(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (http, _) = router(&doc, ApiKind::Http, AuthorizationMode::Enforce, "");
+        let (_, headers, _) = exchange(
+            &http,
+            Method::GET,
+            "/big",
+            &[("accept-encoding", "gzip")],
+            Vec::new(),
+        )
+        .await;
+        assert!(
+            headers.get("content-encoding").is_none(),
+            "HTTP APIs have no compression"
+        );
+    }
+
+    #[tokio::test]
+    async fn streamed_responses_are_never_compressed() {
+        let backend = echo_backend().await;
+        let doc = json!({
+            "x-amazon-apigateway-minimum-compression-size": 0,
+            "paths": {"/echo": {"post": {"x-amazon-apigateway-integration": {
+                "type": "http_proxy", "httpMethod": "POST",
+                "responseTransferMode": "STREAM",
+                "uri": format!("http://{backend}/echo")}}}}
+        });
+        let (rest, _) = router(&doc, ApiKind::Rest, AuthorizationMode::Enforce, "");
+        let (status, headers, body) = exchange(
+            &rest,
+            Method::POST,
+            "/echo",
+            &[("accept-encoding", "gzip")],
+            b"streamed".to_vec(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(headers.get("content-encoding").is_none());
+        assert_eq!(body, b"-|streamed");
+    }
+
     struct Reply {
         status: StatusCode,
         headers: axum::http::HeaderMap,
@@ -1413,6 +1692,8 @@ mod tests {
             usage: None,
             observer: StageObserver::disabled(),
             release: None,
+            payload: Arc::default(),
+            cache: CacheScope::Off,
         });
         let (router, _) = build(&model, &api, &BasePath::default());
         let request = Request::builder()

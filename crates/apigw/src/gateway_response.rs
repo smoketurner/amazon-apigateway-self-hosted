@@ -164,6 +164,11 @@ pub(crate) struct Failure {
 }
 
 impl Failure {
+    #[cfg(test)]
+    pub(crate) fn status(&self) -> StatusCode {
+        self.status
+    }
+
     /// A failure of `response_type` with API Gateway's default status and message.
     pub(crate) fn new(response_type: ResponseType) -> Self {
         Self {
@@ -507,6 +512,31 @@ mod tests {
         ctx.headers
             .insert("origin", HeaderValue::from_static("https://app.example"));
         ctx
+    }
+
+    #[tokio::test]
+    async fn request_size_errors_are_not_customizable_gateway_responses() {
+        for (error, kind, status, message) in [
+            (
+                GatewayError::UrlTooLong,
+                ApiKind::Rest,
+                414,
+                "Request-URI Too Large",
+            ),
+            (
+                GatewayError::HeadersTooLarge,
+                ApiKind::Http,
+                431,
+                "Request Header Fields Too Large",
+            ),
+        ] {
+            let response = GatewayResponses::default().render(&error.failure(kind), &request(kind));
+            assert_eq!(response.status().as_u16(), status);
+            assert_eq!(
+                body(response).await,
+                json!({ "message": message }).to_string()
+            );
+        }
     }
 
     #[tokio::test]

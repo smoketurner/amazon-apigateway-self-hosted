@@ -2,6 +2,7 @@
 //! executes.
 
 use crate::authz::{Authorizers, ResourcePolicies, RouteAuthorizer, RoutePolicy};
+use crate::cache::RouteCache;
 use crate::integration::{Integration, StageVariables};
 use crate::model::{ApiKind, Feature, MethodMatch, Operation, Protections, RouteKey, RoutePath};
 use crate::throttle::{RouteThrottle, ThrottleSettings};
@@ -20,6 +21,7 @@ pub(crate) struct Route {
     pub(crate) api_key: RouteApiKey,
     pub(crate) unenforced: Vec<Feature>,
     pub(crate) throttle: Option<RouteThrottle>,
+    pub(crate) cache: Option<RouteCache>,
 }
 
 /// What decides who may call the routes of one API definition.
@@ -64,6 +66,7 @@ impl Route {
             api_key: access.api_keys.for_route(operation),
             unenforced: operation.unenforced(),
             throttle: throttling.for_route(&operation.method, &operation.path),
+            cache: None,
         }
     }
 }

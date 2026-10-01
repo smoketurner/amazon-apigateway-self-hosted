@@ -7,6 +7,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use axum::body::Bytes;
+use axum::extract::OriginalUri;
 use axum::extract::Request;
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, Version, header};
@@ -22,6 +23,7 @@ use crate::identity::ClientIdentity;
 use crate::integration::StageVariables;
 use crate::model::{ApiKind, PayloadVersion, ResponseTransferMode, RouteKey};
 use crate::observability::Trace;
+use crate::payload::PayloadSettings;
 use crate::route::Route;
 
 /// The API and stage a request was received on.
@@ -48,6 +50,17 @@ pub(crate) struct QueryString(Option<String>);
 impl QueryString {
     pub(crate) fn new(raw: Option<&str>) -> Self {
         Self(raw.filter(|q| !q.is_empty()).map(str::to_owned))
+    }
+
+    /// The query string of a request to an API of this type. REST APIs split
+    /// the data on `;` as they do on `&` ("The semicolon character (`;`) is not
+    /// supported for any request URL query string and results in the data being
+    /// split"), so `a=1;b=2` is two parameters.
+    pub(crate) fn for_api(kind: ApiKind, raw: Option<&str>) -> Self {
+        match kind {
+            ApiKind::Rest => Self::new(raw.map(|query| query.replace(';', "&")).as_deref()),
+            ApiKind::Http => Self::new(raw),
+        }
     }
 
     pub(crate) fn raw(&self) -> Option<&str> {
@@ -227,7 +240,11 @@ pub(crate) struct RequestContext {
     pub(crate) request_id: Uuid,
     pub(crate) received: jiff::Timestamp,
     pub(crate) method: Method,
+    /// The request path within the API (`/pets/7`).
     pub(crate) path: String,
+    /// The path as the client sent it, including a stage prefix served with
+    /// `--base-path` (`/prod/pets/7`): `$context.path`, and HTTP APIs' `rawPath`.
+    pub(crate) full_path: String,
     pub(crate) query: QueryString,
     pub(crate) headers: HeaderMap,
     /// The client's spelling of header names, known for HTTP/1 requests.
@@ -239,6 +256,8 @@ pub(crate) struct RequestContext {
     pub(crate) authorizer: AuthorizerContext,
     pub(crate) api_key: Option<ApiKeyIdentity>,
     pub(crate) stage_variables: Arc<StageVariables>,
+    /// The API's binary media types and compression settings.
+    pub(crate) payload: Arc<PayloadSettings>,
     /// This request's place in an X-Ray trace, when the stage traces.
     pub(crate) trace: Option<Trace>,
     pub(crate) integration: IntegrationOutcome,
@@ -329,6 +348,10 @@ impl RequestContext {
             tracing::warn!("request reached the pipeline without a client identity");
             ClientIdentity::unknown()
         });
+        let full_path = extensions
+            .get::<OriginalUri>()
+            .map_or_else(|| uri.path(), |original| original.0.path())
+            .to_owned();
         let (route_key, resource_path) = match route {
             Some(route) => (route.key.clone(), route.path.to_string()),
             None => (RouteKey::from(""), uri.path().to_owned()),
@@ -346,7 +369,8 @@ impl RequestContext {
             received: jiff::Timestamp::now(),
             method,
             path: uri.path().to_owned(),
-            query: QueryString::new(uri.query()),
+            full_path,
+            query: QueryString::for_api(api.kind, uri.query()),
             headers,
             header_case,
             version,
@@ -356,6 +380,7 @@ impl RequestContext {
             authorizer: AuthorizerContext::default(),
             api_key: None,
             stage_variables: Arc::clone(&api.stage_variables),
+            payload: Arc::clone(&api.payload),
             trace,
             integration: IntegrationOutcome::default(),
         }
@@ -443,7 +468,7 @@ impl RequestContext {
                 "apiKey": self.api_key.as_ref().and_then(ApiKeyIdentity::value),
                 "apiKeyId": self.api_key.as_ref().map(ApiKeyIdentity::id),
             },
-            "path": self.path,
+            "path": self.full_path,
             "protocol": self.protocol(),
             "requestId": self.request_id.to_string(),
             "requestTime": self.request_time(),
@@ -455,6 +480,11 @@ impl RequestContext {
         });
         if let (Value::Object(fields), Some(trace)) = (&mut context, self.trace) {
             fields.insert("xrayTraceId".to_owned(), json!(trace.id().to_string()));
+        }
+        if let Some(cert) = self.identity.client_cert()
+            && let Some(Value::Object(identity)) = context.get_mut("identity")
+        {
+            identity.insert("clientCert".to_owned(), cert.to_json());
         }
         if let (Value::Object(fields), Some(release)) = (&mut context, self.api.release) {
             fields.insert("isCanaryRequest".to_owned(), json!(release.is_canary()));
@@ -491,6 +521,8 @@ pub(crate) mod tests {
     use axum::http::HeaderValue;
 
     use super::*;
+    use crate::client_cert::ClientCertDetails;
+    use crate::client_cert::tests::certificate;
     use crate::identity::TrustedProxies;
 
     /// A request from 192.0.2.1 to `POST /pets/7` on `POST /pets/{petId}`.
@@ -513,6 +545,7 @@ pub(crate) mod tests {
             received: jiff::Timestamp::from_second(1_700_000_000).unwrap(),
             method: Method::POST,
             path: "/pets/7".to_owned(),
+            full_path: "/prod/pets/7".to_owned(),
             query: QueryString::new(Some("q=1&q=2")),
             headers,
             header_case: HeaderCase::default(),
@@ -524,6 +557,7 @@ pub(crate) mod tests {
             api_key: None,
             trace: None,
             stage_variables: Arc::default(),
+            payload: Arc::default(),
             integration: IntegrationOutcome::default(),
         }
     }
@@ -535,6 +569,24 @@ pub(crate) mod tests {
         assert_eq!(FormEncoded("%zz%4").decode(), "%zz%4");
         assert_eq!(FormEncoded("%E2%9C%93").decode(), "\u{2713}");
         assert_eq!(FormEncoded("%FF").decode(), "\u{FFFD}");
+    }
+
+    #[test]
+    fn rest_query_strings_split_on_semicolons_and_http_apis_do_not() {
+        let rest = QueryString::for_api(ApiKind::Rest, Some("a=1;b=2&c=3"));
+        assert_eq!(rest.raw(), Some("a=1&b=2&c=3"));
+        assert_eq!(
+            rest.pairs(),
+            vec![
+                ("a".to_owned(), "1".to_owned()),
+                ("b".to_owned(), "2".to_owned()),
+                ("c".to_owned(), "3".to_owned()),
+            ]
+        );
+        let http = QueryString::for_api(ApiKind::Http, Some("a=1;b=2"));
+        assert_eq!(http.raw(), Some("a=1;b=2"));
+        assert_eq!(http.pairs(), vec![("a".to_owned(), "1;b=2".to_owned())]);
+        assert_eq!(QueryString::for_api(ApiKind::Rest, None).raw(), None);
     }
 
     #[test]
@@ -637,5 +689,25 @@ pub(crate) mod tests {
             release: None,
         };
         assert_eq!(info.stage_name(), "$default");
+    }
+
+    #[test]
+    fn the_client_certificate_is_a_context_variable_only_when_there_is_one() {
+        let mut ctx = request(ApiKind::Rest);
+        assert!(ctx.variables()["identity"].get("clientCert").is_none());
+        let (der, _) = certificate("mtls client");
+        ctx.identity = ctx
+            .identity
+            .with_verified_certificate(ClientCertDetails::from_der(der.as_ref()).unwrap());
+        let vars = ctx.variables();
+        assert_eq!(
+            vars["identity"]["clientCert"]["subjectDN"],
+            "C=US,O=Acme,CN=mtls client"
+        );
+        assert_eq!(vars["identity"]["sourceIp"], "192.0.2.1");
+        assert_eq!(
+            ctx.context_value("identity.clientCert.issuerDN").as_deref(),
+            Some("C=US,O=Acme,CN=mtls client")
+        );
     }
 }
