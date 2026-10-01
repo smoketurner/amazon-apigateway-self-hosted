@@ -33,7 +33,7 @@ impl Route {
             integration: Integration::compile(operation.integration.as_ref(), kind, variables),
             protections: operation.protections.clone(),
             authorizer: authorizers.for_route(operation),
-            unenforced: operation.unenforced(kind),
+            unenforced: operation.unenforced(),
             throttle: throttling.for_route(&operation.method, &operation.path),
         }
     }

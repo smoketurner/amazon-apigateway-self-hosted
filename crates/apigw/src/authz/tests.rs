@@ -215,6 +215,7 @@ impl Harness {
                 request_validation: Unsupported::Reject,
             },
             responses: GatewayResponses::default(),
+            cors: None,
             state: Arc::new(StateBackend::InMemory(InMemory::new(
                 InMemoryLimits::default(),
             ))),

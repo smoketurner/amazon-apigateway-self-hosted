@@ -51,7 +51,6 @@ cases:
     api: http
     path: /mapped/42
     query: {q: "1"}
-    known_gap: "#19"
     compare:
       body: ignore
       echo: {headers: [x-appended]}
