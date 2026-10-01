@@ -1,0 +1,37 @@
+[package]
+name    = "apigw-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+apigw-regex    = { path = "../crates/apigw-regex" }
+apigw-vtl      = { path = "../crates/apigw-vtl" }
+arbitrary      = { version = "=1.4.2", features = ["derive"] }
+libfuzzer-sys  = "=0.4.13"
+
+[workspace]
+
+[[bin]]
+name  = "render"
+path  = "fuzz_targets/render.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name  = "json_path"
+path  = "fuzz_targets/json_path.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name  = "java_regex"
+path  = "fuzz_targets/java_regex.rs"
+test  = false
+doc   = false
+bench = false

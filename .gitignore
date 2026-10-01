@@ -23,3 +23,8 @@
 # Claude Code local state
 .claude/settings.local.json
 .claude/worktrees/
+
+# cargo-fuzz corpus and crash artifacts
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/target/

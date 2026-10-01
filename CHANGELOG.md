@@ -7,6 +7,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `crates/apigw-vtl`: an Apache Velocity 1.7 engine for mapping templates. It parses and renders
+  references, `#set`, `#if`/`#elseif`/`#else`, `#foreach` (1,000-iteration cap, `$foreach.*`,
+  `$velocityCount`), `#break`, `#stop`, comments, escaping, and Velocity's whitespace gobbling,
+  with a Java value model (`toString`, arithmetic, comparison) and the common `String`, `List`,
+  and `Map` methods. `$input` (`body`, `json()`, `path()`, `params()`), `$util`, `$context`
+  (including caller-readable `requestOverride`/`responseOverride`), and `$stageVariables` are
+  provided, with Jayway JsonPath semantics for paths. Output size, evaluation steps, and nesting
+  are bounded and reported as typed errors. Its tests replay about 960 templates rendered by
+  Apache Velocity 1.7 and Jayway JsonPath 2.9, and a cargo-fuzz target lives in `fuzz/`.
 - Resource policies are evaluated as API Gateway evaluates them: an explicit `Deny` ends the request
   before authentication, then the policy is combined with the authorizer's decision per the
   authorization-flow tables (no authorizer, Lambda authorizer, Cognito user pool). `aws:SourceIp`

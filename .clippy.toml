@@ -39,6 +39,7 @@ absolute-paths-allowed-crates = [
     "fancy_regex",
     "hyper",
     "hyper_util",
+    "indexmap",
     "ipnet",
     "jiff",
     "jsonwebtoken",
