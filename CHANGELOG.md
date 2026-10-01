@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Lambda authorizers are evaluated. REST `TOKEN` (with `identityValidationExpression`) and `REQUEST`
+  authorizers and HTTP API `REQUEST` authorizers (payload 1.0 and 2.0, simple responses) are invoked
+  with the request's identity sources, their results are cached by identity source and TTL, and the
+  returned IAM policy is evaluated against each method ARN, including `*` and `?` wildcards. A
+  missing identity source answers `401`, a denying policy `403`, a failing or invalid authorizer
+  `500`; `principalId` and `context` reach `$context.authorizer` and Lambda events. Cognito and JWT
+  authorizers still answer `401`.
 - `crates/apigw-regex`: a `java.util.regex` translator for `fancy-regex` covering whole-string
   `matches`, ASCII `\w \d \s \b`, Java line terminators for `.` `^` `$`, flags, `\Q..\E`, POSIX
   classes, replacement strings with greedy `$n` and `${name}`, and `split` limits. Constructs

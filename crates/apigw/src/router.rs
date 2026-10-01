@@ -15,6 +15,7 @@ use tokio::sync::watch;
 use tower::ServiceExt as _;
 use uuid::Uuid;
 
+use crate::authz::Authorizers;
 use crate::aws::{AwsClients, RoleArn, RoleStatus};
 use crate::gateway::{ApiContext, Enforcement, RequestId};
 use crate::integration::Integration;
@@ -84,7 +85,7 @@ impl RouteSummary {
     fn new(route: &Route, enforcement: Enforcement) -> Self {
         let mut problems: Vec<String> = enforcement
             .refusals(route)
-            .map(|protection| protection.refusal_reason().to_owned())
+            .map(|protection| protection.refusal_reason(route))
             .collect();
         let target = match route.integration {
             Integration::HttpProxy(ref proxy) => Some(proxy.uri.clone()),
@@ -170,6 +171,7 @@ pub(crate) fn build(
     ctx: &Arc<ApiContext>,
     base: &BasePath,
 ) -> (Router, Vec<RouteSummary>) {
+    let authorizers = Authorizers::compile(model, &ctx.stage_variables);
     let throttling = ThrottleSettings::new(
         &ctx.api_id,
         ctx.stage.as_deref(),
@@ -179,7 +181,15 @@ pub(crate) fn build(
     let routes: Vec<Route> = model
         .operations
         .iter()
-        .map(|operation| Route::compile(operation, model.kind, &ctx.stage_variables, &throttling))
+        .map(|operation| {
+            Route::compile(
+                operation,
+                model.kind,
+                &ctx.stage_variables,
+                &authorizers,
+                &throttling,
+            )
+        })
         .collect();
     let mut summaries = Vec::with_capacity(routes.len());
     let mut default = None;
