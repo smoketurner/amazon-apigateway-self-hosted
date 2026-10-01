@@ -6,64 +6,50 @@
 //! route settings for HTTP). Account-level and usage-plan throttles are not
 //! applied here.
 
-use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 
-use crate::model::{MethodMatch, MethodSettings, RoutePath, SettingsScope};
+use crate::model::{MethodMatch, RoutePath, StageSettings};
 use crate::state::{Admission, BucketLimits, StateBackend, StateKey};
-
-impl MethodSettings {
-    /// The rate and burst this entry sets. API Gateway reports an unset value
-    /// as -1.
-    fn throttle_rate(&self) -> Option<f64> {
-        self.throttling_rate_limit.filter(|rate| *rate >= 0.0)
-    }
-
-    fn throttle_burst(&self) -> Option<f64> {
-        self.throttling_burst_limit
-            .filter(|burst| *burst >= 0)
-            .map(f64::from)
-    }
-}
 
 /// How the stage's throttle settings apply to its routes.
 #[derive(Debug, Clone)]
 pub(crate) struct ThrottleSettings {
-    settings: BTreeMap<SettingsScope, MethodSettings>,
+    stage: StageSettings,
     replicas: NonZeroU32,
     key_prefix: String,
 }
 
 impl ThrottleSettings {
-    /// `api_id` and `stage` keep buckets of different APIs apart in a shared
-    /// backend; `replicas` is how many gateways serve the API.
+    /// `api_id` and `stage_name` keep buckets of different APIs apart in a
+    /// shared backend; `replicas` is how many gateways serve the API.
     pub(crate) fn new(
         api_id: &str,
-        stage: Option<&str>,
-        settings: BTreeMap<SettingsScope, MethodSettings>,
+        stage_name: Option<&str>,
+        stage: StageSettings,
         replicas: NonZeroU32,
     ) -> Self {
         Self {
-            settings,
+            stage,
             replicas,
-            key_prefix: format!("{api_id}:{}", stage.unwrap_or("$default")),
+            key_prefix: format!("{api_id}:{}", stage_name.unwrap_or("$default")),
         }
     }
 
-    /// The throttle for a route, or `None` when no setting limits it.
+    /// The throttle for a route, or `None` when no setting limits it. The
+    /// route's settings are the stage default overridden field by field by the
+    /// more specific entries ([`StageSettings::settings_for`]).
     pub(crate) fn for_route(
         &self,
         method: &MethodMatch,
         path: &RoutePath,
     ) -> Option<RouteThrottle> {
-        let own = self.settings.get(&SettingsScope::for_route(method, path));
-        let default = self.settings.get(&SettingsScope::All);
-        let rate = own
-            .and_then(MethodSettings::throttle_rate)
-            .or_else(|| default.and_then(MethodSettings::throttle_rate));
-        let burst = own
-            .and_then(MethodSettings::throttle_burst)
-            .or_else(|| default.and_then(MethodSettings::throttle_burst));
+        let settings = self.stage.settings_for(method, path);
+        // API Gateway reports an unset limit as -1.
+        let rate = settings.throttling_rate_limit.filter(|rate| *rate >= 0.0);
+        let burst = settings
+            .throttling_burst_limit
+            .filter(|burst| *burst >= 0)
+            .map(f64::from);
         // ASSUMPTION: API Gateway always sets rate and burst together; if only
         // one is given the other is taken to be equal to it.
         let (rate, burst) = match (rate, burst) {
@@ -111,6 +97,7 @@ mod tests {
     use axum::http::Method;
 
     use super::*;
+    use crate::model::{MethodSettings, SettingsScope};
     use crate::state::{InMemory, InMemoryLimits};
 
     fn settings(rate: f64, burst: i32) -> MethodSettings {
@@ -129,10 +116,14 @@ mod tests {
         entries: impl IntoIterator<Item = (SettingsScope, MethodSettings)>,
         replicas: u32,
     ) -> ThrottleSettings {
+        let stage = StageSettings {
+            method_settings: entries.into_iter().collect(),
+            ..StageSettings::default()
+        };
         ThrottleSettings::new(
             "abc",
             Some("prod"),
-            entries.into_iter().collect(),
+            stage,
             NonZeroU32::new(replicas).unwrap(),
         )
     }

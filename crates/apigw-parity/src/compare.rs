@@ -148,6 +148,20 @@ impl EchoCompare {
         if self.compares(EchoField::Query) && want.query != got.query {
             mismatches.push(Mismatch::new("echo.query", &want.query, &got.query));
         }
+        if self.compares(EchoField::Resource) && want.resource != got.resource {
+            mismatches.push(Mismatch::new(
+                "echo.resource",
+                format!("{:?}", want.resource),
+                format!("{:?}", got.resource),
+            ));
+        }
+        if self.compares(EchoField::PathParameters) && want.path_parameters != got.path_parameters {
+            mismatches.push(Mismatch::new(
+                "echo.path_parameters",
+                format!("{:?}", want.path_parameters),
+                format!("{:?}", got.path_parameters),
+            ));
+        }
         if self.compares(EchoField::Body) && want.body != got.body {
             mismatches.push(Mismatch::new(
                 "echo.body",
@@ -226,7 +240,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
                 .collect::<BTreeMap<_, _>>(),
-            body: None,
+            ..EchoReceived::default()
         }
     }
 
@@ -315,6 +329,41 @@ mod tests {
             ..Compare::default()
         };
         assert!(ignore.diff(&a, &b).is_empty());
+    }
+
+    #[test]
+    fn resource_and_path_parameters_are_compared_when_selected() {
+        let compare = Compare {
+            echo: Some(EchoCompare {
+                fields: vec![EchoField::Resource, EchoField::PathParameters],
+                headers: Vec::new(),
+            }),
+            ..Compare::default()
+        };
+        let mut want = observation(200, &[], "");
+        want.echo = Some(EchoReceived {
+            resource: Some("/a/{p}".to_owned()),
+            path_parameters: BTreeMap::from([("p".to_owned(), "1".to_owned())]),
+            ..echo("/a/1", &[])
+        });
+        let mut got = want.clone();
+        assert!(compare.diff(&want, &got).is_empty());
+        if let Some(ref mut echoed) = got.echo {
+            echoed.resource = None;
+            echoed.path_parameters.clear();
+        }
+        let fields: Vec<String> = compare
+            .diff(&want, &got)
+            .iter()
+            .map(|m| {
+                m.to_string()
+                    .split(':')
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(fields, ["echo.resource", "echo.path_parameters"]);
     }
 
     #[test]

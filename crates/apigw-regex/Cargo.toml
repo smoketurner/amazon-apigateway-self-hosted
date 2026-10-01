@@ -1,0 +1,20 @@
+[package]
+name                   = "apigw-regex"
+description            = "java.util.regex semantics on top of fancy-regex for API Gateway mapping templates and selection patterns"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+publish                = false
+
+[lints]
+workspace = true
+
+[dependencies]
+fancy-regex = { workspace = true, features = ["std", "unicode", "perf", "variable-lookbehinds"] }
+thiserror   = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+proptest   = { workspace = true, features = ["std"] }
+serde      = { workspace = true, features = ["std", "derive"] }
+serde_json = { workspace = true, features = ["std"] }

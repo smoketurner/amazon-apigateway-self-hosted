@@ -11,6 +11,7 @@ mod integration;
 mod lambda;
 mod listener;
 mod model;
+mod observability;
 mod pipeline;
 mod proxy;
 mod route;
