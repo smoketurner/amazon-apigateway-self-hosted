@@ -6,16 +6,19 @@ use std::time::Duration;
 
 use clap::{ArgGroup, Parser, ValueEnum};
 
+use crate::authz::IssuerEndpoint;
 use crate::aws::{CredentialsMode, LambdaEndpoint, LambdaEndpoints};
+use crate::domain::DomainName;
 use crate::gateway::{AuthorizationMode, Enforcement, Unsupported};
 use crate::identity::{TrustedProxies, TrustedProxy};
-use crate::listener::{Edge, ProxyProtocol};
+use crate::listener::{DomainCert, Edge, ProxyProtocol};
 use crate::model::ApiKind;
 use crate::observability::{
     Delivery, LogGroup, MetricsNamespace, MetricsSettings, Settings, StreamName, TraceDelivery,
 };
 use crate::router::BasePath;
 use crate::source::Source;
+use crate::vpc_link::{VpcLinkTarget, VpcLinks};
 
 const STAGE_VARIABLE_ENV_PREFIX: &str = "APIGW_STAGE_VARIABLE_";
 
@@ -23,7 +26,7 @@ const STAGE_VARIABLE_ENV_PREFIX: &str = "APIGW_STAGE_VARIABLE_";
 /// self-hosted container, refreshing them as the API changes.
 #[derive(Debug, Parser)]
 #[command(version, about)]
-#[command(group(ArgGroup::new("api").required(true).args(["rest_api_id", "http_api_id", "openapi_file"])))]
+#[command(group(ArgGroup::new("api").required(true).args(["rest_api_id", "http_api_id", "openapi_file", "domain_names"])))]
 pub(crate) struct Config {
     /// REST API (v1) to mirror. Requires --stage.
     #[arg(long, env = "APIGW_REST_API_ID", requires = "stage")]
@@ -32,6 +35,25 @@ pub(crate) struct Config {
     /// HTTP API (v2) to mirror. Requires --stage.
     #[arg(long, env = "APIGW_HTTP_API_ID", requires = "stage")]
     pub(crate) http_api_id: Option<String>,
+
+    /// Serve every API mapped to this custom domain name (repeatable), choosing
+    /// the API by the request's `Host` and path from the domain's API mappings
+    /// and routing rules. Use `*.example.com` for a wildcard domain. Needs no
+    /// `--stage`; the stages come from the mappings.
+    #[arg(
+        long = "domain-name",
+        env = "APIGW_DOMAIN_NAMES",
+        value_delimiter = ',',
+        value_name = "NAME",
+        conflicts_with_all = ["stage", "base_path", "integration_overrides", "cache", "canary_export_stage"]
+    )]
+    pub(crate) domain_names: Vec<DomainName>,
+
+    /// Directory with one `NAME/tls.crt` and `NAME/tls.key` per --domain-name,
+    /// served to clients that ask for that name (SNI); the files are reloaded
+    /// when they change. Without it every domain uses --tls-cert.
+    #[arg(long, env = "APIGW_DOMAIN_CERT_DIR")]
+    pub(crate) domain_cert_dir: Option<PathBuf>,
 
     /// Serve an `OpenAPI` export from disk instead of downloading one.
     #[arg(long, env = "APIGW_OPENAPI_FILE")]
@@ -98,6 +120,19 @@ pub(crate) struct Config {
     )]
     pub(crate) lambda_endpoints: Vec<LambdaEndpoint>,
 
+    /// Fetch the signing keys of a token issuer from URL instead of from the
+    /// issuer (repeatable; `ISSUER` is the issuer string tokens carry as `iss`).
+    /// For an in-cluster mirror of an identity provider; the keys are read from
+    /// `URL/.well-known/openid-configuration` (JWT authorizers) or
+    /// `URL/.well-known/jwks.json` (Cognito user pools). Use `https` URLs.
+    #[arg(
+        long = "issuer-endpoint",
+        value_name = "ISSUER=URL",
+        env = "APIGW_ISSUER_ENDPOINTS",
+        value_delimiter = ','
+    )]
+    pub(crate) issuer_endpoints: Vec<IssuerEndpoint>,
+
     /// What to do with routes under a resource policy, which this gateway does
     /// not evaluate yet: `reject` answers 403, `ignore` serves them unrestricted.
     /// Not affected by --insecure-skip-authorization.
@@ -134,6 +169,19 @@ pub(crate) struct Config {
     /// --trusted-proxies only; its source address is the client.
     #[arg(long, env = "APIGW_PROXY_PROTOCOL", requires = "trusted_proxies")]
     pub(crate) proxy_protocol: bool,
+
+    /// Serve a VPC link's integrations from an in-cluster URL (repeatable;
+    /// `CONNECTION_ID` is the VPC link's ID as in the integration's
+    /// `connectionId`). REST routes keep the integration URI's host as the `Host`
+    /// header; HTTP API routes send the request path to the URL. Routes whose VPC
+    /// link has no mapping answer 501.
+    #[arg(
+        long = "vpc-link",
+        value_name = "CONNECTION_ID=URL",
+        env = "APIGW_VPC_LINKS",
+        value_delimiter = ','
+    )]
+    pub(crate) vpc_links: Vec<VpcLinkTarget>,
 
     /// How many gateway replicas serve this API. Throttle limits are divided by
     /// this count because each replica keeps its own buckets, so the API-wide rate
@@ -231,6 +279,25 @@ impl Config {
                 stage: self.stage.clone(),
             },
         }
+    }
+
+    /// The certificate files of each custom domain, under `--domain-cert-dir`.
+    pub(crate) fn domain_certs(&self) -> Vec<DomainCert> {
+        let Some(ref dir) = self.domain_cert_dir else {
+            return Vec::new();
+        };
+        self.domain_names
+            .iter()
+            .map(|name| DomainCert {
+                name: name.clone(),
+                cert: dir.join(name.as_str()).join("tls.crt"),
+                key: dir.join(name.as_str()).join("tls.key"),
+            })
+            .collect()
+    }
+
+    pub(crate) fn vpc_links(&self) -> VpcLinks {
+        VpcLinks::new(self.vpc_links.clone())
     }
 
     pub(crate) fn lambda_endpoints(&self) -> LambdaEndpoints {
@@ -367,6 +434,54 @@ mod tests {
     }
 
     #[test]
+    fn custom_domains_are_an_api_source_of_their_own() {
+        let config = parse(&["--domain-name", "api.example.com,*.example.org"]).unwrap();
+        let names: Vec<&str> = config.domain_names.iter().map(DomainName::as_str).collect();
+        assert_eq!(names, ["api.example.com", "*.example.org"]);
+        assert!(
+            parse(&[
+                "--domain-name",
+                "api.example.com",
+                "--domain-name",
+                "b.example.com"
+            ])
+            .is_ok()
+        );
+        for conflicting in [
+            &["--rest-api-id", "a", "--stage", "s"][..],
+            &["--http-api-id", "a", "--stage", "s"],
+            &["--openapi-file", "x.json"],
+            &["--stage", "prod"],
+            &["--base-path", "/prod"],
+            &["--integration-overrides", "o.json"],
+            &["--config-cache", "c.json"],
+        ] {
+            let mut args = vec!["--domain-name", "api.example.com"];
+            args.extend_from_slice(conflicting);
+            assert!(parse(&args).is_err(), "{conflicting:?}");
+        }
+        assert!(parse(&["--domain-name", "not a domain"]).is_err());
+    }
+
+    #[test]
+    fn domain_certificates_live_under_a_directory_per_domain() {
+        let config = parse(&[
+            "--domain-name",
+            "api.example.com",
+            "--domain-cert-dir",
+            "/certs",
+        ])
+        .unwrap();
+        let certs = config.domain_certs();
+        assert_eq!(certs.len(), 1);
+        let cert = certs.first().unwrap();
+        assert_eq!(cert.cert, PathBuf::from("/certs/api.example.com/tls.crt"));
+        assert_eq!(cert.key, PathBuf::from("/certs/api.example.com/tls.key"));
+        let without = parse(&["--domain-name", "api.example.com"]).unwrap();
+        assert!(without.domain_certs().is_empty());
+    }
+
+    #[test]
     fn http_api_requires_stage() {
         assert!(parse(&["--http-api-id", "a"]).is_err());
     }
@@ -422,6 +537,41 @@ mod tests {
         let config = parse(&["--http-api-id", "a", "--stage", "s", "--replicas", "3"]).unwrap();
         assert_eq!(config.replicas.get(), 3);
         assert!(parse(&["--http-api-id", "a", "--stage", "s", "--replicas", "0"]).is_err());
+    }
+
+    #[test]
+    fn vpc_links_are_repeatable_and_validated() {
+        let config = parse(&[
+            "--http-api-id",
+            "a",
+            "--stage",
+            "s",
+            "--vpc-link",
+            "vl1=http://pets.svc:8080",
+            "--vpc-link",
+            "vl2=https://api.internal/base",
+        ])
+        .unwrap();
+        let links = config.vpc_links();
+        assert_eq!(links.base("vl1").as_deref(), Some("http://pets.svc:8080"));
+        assert_eq!(
+            links.base("vl2").as_deref(),
+            Some("https://api.internal/base")
+        );
+        for bad in [
+            "vl1",
+            "=http://x",
+            "vl1=ftp://x",
+            "vl1=not a url",
+            "vl1=http://x?q=1",
+        ] {
+            assert!(
+                parse(&["--http-api-id", "a", "--stage", "s", "--vpc-link", bad]).is_err(),
+                "{bad}"
+            );
+        }
+        let none = parse(&["--http-api-id", "a", "--stage", "s"]).unwrap();
+        assert_eq!(none.vpc_links().base("vl1"), None);
     }
 
     #[test]

@@ -111,6 +111,8 @@ pub(crate) enum AuthorizerSource {
     #[default]
     None,
     Lambda,
+    /// Verified token claims (and, for HTTP APIs, scopes).
+    Claims,
 }
 
 /// `$context.authorizer.*`: what the request's authorizer produced.
@@ -129,6 +131,14 @@ impl AuthorizerContext {
         }
     }
 
+    /// A token authorizer's `claims` (and `scopes`).
+    pub(crate) fn claims(values: Map<String, Value>) -> Self {
+        Self {
+            values,
+            source: AuthorizerSource::Claims,
+        }
+    }
+
     pub(crate) fn values(&self) -> &Map<String, Value> {
         &self.values
     }
@@ -138,7 +148,7 @@ impl AuthorizerContext {
     pub(crate) fn event_value(&self, version: PayloadVersion) -> Option<Value> {
         match (self.source, version) {
             (AuthorizerSource::None, _) => None,
-            (AuthorizerSource::Lambda, PayloadVersion::V1) => {
+            (AuthorizerSource::Lambda | AuthorizerSource::Claims, PayloadVersion::V1) => {
                 Some(Value::Object(self.values.clone()))
             }
             (AuthorizerSource::Lambda, PayloadVersion::V2) => {
@@ -146,6 +156,7 @@ impl AuthorizerContext {
                 context.remove("principalId");
                 Some(json!({ "lambda": context }))
             }
+            (AuthorizerSource::Claims, PayloadVersion::V2) => Some(json!({ "jwt": self.values })),
         }
     }
 }

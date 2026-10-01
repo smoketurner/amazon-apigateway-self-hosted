@@ -436,6 +436,7 @@ mod tests {
     use tower::ServiceExt as _;
 
     use super::*;
+    use crate::authz::KeyStore;
     use crate::aws::{AwsClients, CredentialsMode, LambdaEndpoints};
     use crate::gateway::{ApiContext, AuthorizationMode, Enforcement, RequestId, Unsupported};
     use crate::gateway_response::GatewayResponses;
@@ -448,6 +449,7 @@ mod tests {
     };
     use crate::router::{BasePath, build};
     use crate::state::{InMemory, InMemoryLimits, StateBackend};
+    use crate::vpc_link::VpcLinks;
     use std::num::NonZeroU32;
 
     const ACCESS_GROUP: &str = "/aws/apigw/access";
@@ -543,6 +545,7 @@ mod tests {
                 InMemoryLimits::default(),
             ))),
             replicas: NonZeroU32::MIN,
+            vpc_links: VpcLinks::default(),
             enforcement: Enforcement {
                 authorization: AuthorizationMode::Enforce,
                 resource_policy: Unsupported::Reject,
@@ -550,6 +553,7 @@ mod tests {
             },
             http: reqwest::Client::new(),
             aws: clients,
+            keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
             observer: StageObserver::new(&observability, &model, "abc", Some("prod"), None),
             release: None,
         });

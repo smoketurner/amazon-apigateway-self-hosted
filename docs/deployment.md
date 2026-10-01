@@ -69,6 +69,12 @@ own principal does the calling, so:
   role when the authorizer has one (same trust policy requirement as above), otherwise as the
   gateway's principal. An authorizer that cannot be invoked or answers in an invalid format
   answers `500`, as API Gateway does; check the gateway's logs.
+- **Cognito and JWT authorizers** call no AWS API. The gateway fetches the issuer's signing keys over
+  HTTPS (`https://cognito-idp.<region>.amazonaws.com/<pool>/.well-known/jwks.json` for Cognito,
+  the issuer's `/.well-known/openid-configuration` and the key set it names for JWT authorizers), so
+  egress to the identity provider must be allowed. Keys are cached for two hours and a fetch is
+  abandoned after 1.5 seconds or 150 KB. To reach the provider through a mirror, pass
+  `--issuer-endpoint <issuer>=<url>`.
 - **Lambda functions without a role**: grant the gateway's principal `lambda:InvokeFunction`
   (identity policy, or the function's resource policy for cross-account functions).
 - **Caller passthrough** (`arn:aws:iam::*:user/*`) needs IAM-authenticated callers and cannot
@@ -92,6 +98,33 @@ image can run as a Deployment unchanged:
 is the function's payload; an `X-Amz-Function-Error` header marks a function error, as with Lambda.
 The SDK also honors `AWS_ENDPOINT_URL_LAMBDA` (and `AWS_ENDPOINT_URL`) for LocalStack-style
 emulators that implement the full Lambda API.
+
+## VPC links
+
+A VPC link's load balancer or Cloud Map service is private to the VPC and cannot be reached
+from outside AWS, so routes with `connectionType: VPC_LINK` answer `501` (the reason is on
+`/routes`) until their connection ID is mapped to an in-cluster URL that serves the same
+backend:
+
+```bash
+--vpc-link abc123=http://pets.default.svc:8080
+```
+
+`--vpc-link CONNECTION_ID=URL` is repeatable, or comma-separated in `APIGW_VPC_LINKS`. The ID
+is the integration's `connectionId`; a `${stageVariables.name}` connection ID is resolved first.
+How the URL is used follows API Gateway:
+
+- **REST APIs** (NLB): the integration URI's host is only the `Host` header on API Gateway, and
+  traffic goes to the load balancer. Here the request goes to the mapped URL, keeping the
+  URI's path and query, and the URI's host (and port) is sent as the `Host` header.
+- **HTTP APIs** (ALB, NLB, or Cloud Map): the integration URI is a listener or service ARN.
+  The request path is sent to the mapped URL, preceded by the stage name unless the stage is
+  `$default`, as API Gateway does; `overwrite:path` parameter mapping can change that.
+
+An `https` URL is verified against its own host name. Only `HTTP_PROXY` integrations can use a
+VPC link. NLB/ALB DNS names and Cloud Map instances are not resolved automatically: those names
+and the addresses `DiscoverInstances` returns are private to the VPC, so resolving them from
+another network fails or reaches the wrong place; the explicit mapping cannot.
 
 ## Kubernetes
 
@@ -229,7 +262,7 @@ Gateway answers a caller who fails that check, and lists each one per route on `
 |---|---|---|
 | Resource policy (any statement) | `403 Forbidden` | `--unsupported-resource-policy=ignore` |
 | IAM (`AWS_IAM`) | REST `403 Missing Authentication Token`, HTTP `403 Forbidden` | `--insecure-skip-authorization` |
-| Cognito or JWT authorizer, or a Lambda authorizer that cannot be evaluated (see `/routes`) | `401 Unauthorized` | `--insecure-skip-authorization` |
+| An authorizer that cannot be evaluated (see `/routes`) | `401 Unauthorized` | `--insecure-skip-authorization` |
 | API key | `403 Forbidden` | `--insecure-skip-authorization` |
 | Request validator | `501` | `--unsupported-validation=ignore` |
 

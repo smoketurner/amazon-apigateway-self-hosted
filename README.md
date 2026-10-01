@@ -28,12 +28,13 @@ Management's
 | `MOCK` integrations | Status, literal response headers, and response template returned (templates are not evaluated as VTL) |
 | Stage variables | Read from the stage and substituted into integration URIs; overridable locally |
 | Lambda authorizers | `TOKEN` and `REQUEST` (REST), `REQUEST` with payload 1.0/2.0 and simple responses (HTTP): invoked, cached by identity source, and the returned policy evaluated per method; `--insecure-skip-authorization` skips them |
-| Cognito/JWT authorizers | **Not evaluated yet.** Answer `401` unless `--insecure-skip-authorization` is set |
+| Cognito user pool authorizers (REST), JWT authorizers (HTTP) | Tokens are verified against the issuer's published keys, fetched over HTTPS (the gateway needs outbound access to the identity provider); claims and scopes are checked as API Gateway checks them; `--insecure-skip-authorization` skips them |
 | API keys | **Not checked yet.** Answer `403 Forbidden` unless `--insecure-skip-authorization` is set |
 | IAM (`AWS_IAM`) auth | Cannot be verified outside AWS. REST answers `403 Missing Authentication Token`, HTTP `403 Forbidden`, unless `--insecure-skip-authorization` is set |
 | Resource policies | **Not evaluated yet.** Every route of an API with a policy answers `403` unless `--unsupported-resource-policy=ignore` (not affected by `--insecure-skip-authorization`) |
 | Request validators | **Not run yet.** Validated routes answer `501` unless `--unsupported-validation=ignore` |
-| `AWS`/`HTTP` (non-proxy, VTL mapping templates), VPC links | Answer `501`; listed with the reason on `/routes` |
+| `AWS`/`HTTP` (non-proxy, VTL mapping templates) | Answer `501`; listed with the reason on `/routes` |
+| VPC links (`HTTP_PROXY`) | Served from an in-cluster URL with `--vpc-link`; a link with no mapping answers `501` with the reason on `/routes` |
 | Unknown route | REST: `403 {"message":"Missing Authentication Token"}`; HTTP: `404 {"message":"Not Found"}` |
 
 The full feature matrix, with an issue link for every gap, is in [docs/parity.md](docs/parity.md).
@@ -70,6 +71,8 @@ Every flag has an environment variable (`apigw --help` lists them). The main one
 | `--integration-overrides` | `APIGW_INTEGRATION_OVERRIDES` | none | Re-point individual routes (below) |
 | `--insecure-skip-authorization` | `APIGW_INSECURE_SKIP_AUTHORIZATION` | off | Serve authorizer, API key, and IAM routes without checking credentials |
 | `--integration-credentials` | `APIGW_INTEGRATION_CREDENTIALS` | `assume` | `assume` runs integrations as their `credentials` role; `gateway` uses the gateway's own credentials |
+| `--vpc-link CONNECTION_ID=URL` | `APIGW_VPC_LINKS` | none | Serve a VPC link's integrations from an in-cluster URL (repeatable; [VPC links](docs/deployment.md#vpc-links)) |
+| `--issuer-endpoint ISSUER=URL` | `APIGW_ISSUER_ENDPOINTS` | none | Fetch a token issuer's signing keys from URL instead of from the issuer (an in-cluster mirror of the identity provider); plain `http` URLs are allowed and logged as a warning |
 | `--lambda-endpoint FUNCTION=URL` | `APIGW_LAMBDA_ENDPOINTS` | none | Invoke a function at a URL speaking Lambda's Invoke protocol (e.g. the Runtime Interface Emulator in-cluster) |
 | `--unsupported-resource-policy` | `APIGW_UNSUPPORTED_RESOURCE_POLICY` | `reject` | `ignore` serves APIs with resource policies unrestricted |
 | `--unsupported-validation` | `APIGW_UNSUPPORTED_VALIDATION` | `reject` | `ignore` forwards requests without running request validators |
@@ -83,6 +86,8 @@ Every flag has an environment variable (`apigw --help` lists them). The main one
 | `--metrics-namespace` | `APIGW_METRICS_NAMESPACE` | `ApiGatewaySelfHosted` | CloudWatch namespace for the metrics (`AWS/` is reserved) |
 | `--tracing` | `APIGW_TRACING` | `aws` | `aws` sends X-Ray segments for stages with tracing enabled and propagates trace headers; `off` does neither |
 | `--xray-sampling-percent` | `APIGW_XRAY_SAMPLING_PERCENT` | `5` | Percentage of requests traced after the first request each second, when the caller made no sampling decision |
+| `--domain-name NAME` | `APIGW_DOMAIN_NAMES` | none | Serve every API mapped to this custom domain (repeatable or comma-separated; `*.example.com` allowed) instead of one API ([Custom domains](#custom-domains)) |
+| `--domain-cert-dir DIR` | `APIGW_DOMAIN_CERT_DIR` | none | `DIR/{domain}/tls.crt` and `tls.key` per domain, served by SNI and reloaded on change; without it `--tls-cert` serves every domain |
 | `--canary-export-stage` | `APIGW_CANARY_EXPORT_STAGE` | none | REST stage that holds the canary deployment of `--stage`, exported to build the canary release ([Canary releases](#canary-releases)) |
 | `--log-stream` | `APIGW_LOG_STREAM` | `{HOSTNAME}/{start time}/{suffix}` | Log stream this process writes to in every log group |
 
@@ -115,6 +120,33 @@ HTTP route:
 
 The file is re-read on every refresh. A key that names no route rejects the whole update (the
 previous routes keep serving), so a typo never goes unnoticed.
+
+## Custom domains
+
+`--domain-name api.example.com` replaces `--rest-api-id`/`--http-api-id`: the process serves every
+API stage mapped to that custom domain in API Gateway, reading the domain's API mappings (and, for
+domains in a routing rule mode, its routing rules) and keeping them current every
+`--refresh-seconds`. The request's `Host` selects the domain; unknown hosts and requests no mapping
+matches answer `403 {"message":"Forbidden"}`.
+
+- **API mappings** are matched as API Gateway documents: with only single-level keys a request
+  goes to the mapping named by its first path segment, else the `(none)` mapping; when any key has
+  several levels, the longest matching prefix wins (`/ordersandmore` goes to `orders`). The matched
+  key is removed from the path, so `/orders/shop/5/hats` reaches the API as `/hats`.
+- **Routing rules** (`ROUTING_RULE_ONLY`, `ROUTING_RULE_THEN_API_MAPPING`) are evaluated by
+  ascending priority: header conditions (name case-insensitive, value case-sensitive, a `*`
+  wildcard at the start and/or end), a base path condition, and `stripBasePath`. A rule or mapping
+  whose API fails to load answers 503 until it loads.
+- **`/ping` and `/sping`** are reserved on every domain and answer `200` with `healthy`.
+- **REST and HTTP APIs** can be mapped to the same domain. Mappings do not say which kind an API
+  is, so each API ID is looked up as a REST API first.
+- **Certificates:** a client that asks for a domain name (SNI) gets that domain's certificate from
+  `--domain-cert-dir`, exact names before wildcards; everything else gets `--tls-cert`.
+- **Not supported with `--domain-name`:** `--stage`, `--base-path`, `--integration-overrides`,
+  `--config-cache`, and `--canary-export-stage` (each API serves its stage's deployment; a
+  stage with a canary serves both releases as in single-API mode).
+
+`/routes` lists each domain's mode, mappings, and loaded APIs.
 
 ## Canary releases
 
@@ -207,6 +239,7 @@ are flushed every 5 seconds, when a batch is full, and at shutdown.
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/restapis/<id>/stages/<stage>/exports/oas30`, `.../restapis/<id>/stages/<stage>` | REST APIs |
 | `apigateway:GET` | the same two resources for the stage named by `--canary-export-stage` | canary releases from a shadow stage |
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/apis/<id>/exports/OAS30`, `.../apis/<id>/stages/<stage>` | HTTP APIs |
+| `apigateway:GET` | `arn:aws:apigateway:<region>::/v2/domainnames/<domain>`, `.../apimappings`, `.../routingrules`, `arn:aws:apigateway:<region>::/restapis/<id>` | `--domain-name` |
 | `lambda:InvokeFunction` | each integrated function (and its aliases) and each Lambda authorizer function | `AWS_PROXY` routes and Lambda authorizers; the same action covers `InvokeWithResponseStream` for streaming routes |
 | `sts:AssumeRole` | each integration `credentials` and each `authorizerCredentials` role | integrations and authorizers with a role, unless `--integration-credentials=gateway` |
 | `logs:CreateLogStream`, `logs:PutLogEvents` | each access log group, the metrics log group, and `arn:aws:logs:<region>:<account>:log-group:API-Gateway-Execution-Logs_<id>/<stage>:*` | access logs, metrics, execution logs |

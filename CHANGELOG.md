@@ -16,6 +16,11 @@ All notable changes to this project are documented here. The format follows
   provided, with Jayway JsonPath semantics for paths. Output size, evaluation steps, and nesting
   are bounded and reported as typed errors. Its tests replay about 960 templates rendered by
   Apache Velocity 1.7 and Jayway JsonPath 2.9, and a cargo-fuzz target lives in `fuzz/`.
+- Cognito user pool authorizers (REST) and JWT authorizers (HTTP APIs) are evaluated. Tokens are
+  verified (RS256/RS384/RS512) against the issuer's published keys, fetched over HTTPS with a 1.5 s
+  timeout and 150 KB cap, cached for two hours, and refreshed at most every 30 s when a token names an
+  unknown key. Issuer, audience, expiry, and scopes are checked, and claims reach `$context.authorizer`.
+  `--issuer-endpoint` fetches an issuer's keys from a mirror instead.
 - Lambda authorizers are evaluated. REST `TOKEN` (with `identityValidationExpression`) and `REQUEST`
   authorizers and HTTP API `REQUEST` authorizers (payload 1.0 and 2.0, simple responses) are invoked
   with the request's identity sources, their results are cached by identity source and TTL, and the
@@ -72,6 +77,14 @@ All notable changes to this project are documented here. The format follows
   `{log group}/Canary` access and execution log groups and counted under `Stage` `{stage}/Canary`.
   `--canary-export-stage` names a stage holding the canary deployment, whose export builds the
   canary's routes; `/routes` reports the canary release.
+- Custom domains: `--domain-name` (repeatable, wildcards allowed) serves every API stage mapped to
+  a custom domain from one process. The `Host` picks the domain; the domain's routing mode picks
+  how: API mappings (single- and multi-level keys, longest prefix, the `(none)` mapping) and/or
+  routing rules (header and base path conditions, priorities, `stripBasePath`). The matched
+  prefix is removed from the path. REST and HTTP APIs can share a domain, each API refreshes
+  on its own, and `/ping` and `/sping` answer 200 as on API Gateway. `--domain-cert-dir` serves
+  each domain its own certificate by SNI, reloaded when the files change. `/routes` lists each
+  domain's mappings and APIs.
 - Log delivery uses bounded queues that drop (and count) events instead of slowing requests,
   and flushes everything on shutdown.
 - REST gateway responses: every error the gateway generates (missing authentication token,
@@ -112,13 +125,19 @@ All notable changes to this project are documented here. The format follows
   including `overwrite:statuscode`, with `$request.*`, `$response.*`, `$context.*`,
   `$stageVariables.*`, and static sources.
 
+- `--vpc-link CONNECTION_ID=URL` (`APIGW_VPC_LINKS`, repeatable) serves `HTTP_PROXY`
+  integrations that use a VPC link from an in-cluster URL; REST routes send the integration
+  URI's host as the `Host` header, HTTP API routes send the request path (with the stage prefix
+  API Gateway adds). Routes whose link has no mapping still answer `501`, now naming the flag.
+
 ### Changed
 
 - HTTP API route selection takes the method into account: a route that matches the path but
   not the method is skipped for a less specific route that serves it, as in API Gateway's
   documented priorities. Previously such requests fell through to `$default`.
 - HTTP APIs never run request validation, even if a hand-written definition names a validator.
-
+- Lambda authorizer results are cached in the state backend under a SHA-256 hash of the identity
+  sources instead of in a private cache that held the caller's token.
 - An `HTTP_PROXY` backend that cannot be reached now answers REST clients 504 `Network error
   communicating with endpoint` (`INTEGRATION_FAILURE`) instead of 502; an invalid integration URI
   answers 500 (`API_CONFIGURATION_ERROR`).
