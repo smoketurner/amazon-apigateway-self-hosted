@@ -9,6 +9,7 @@ use tokio::process::{Child, Command};
 
 use crate::case::ApiName;
 use crate::client::Requester;
+use crate::echo::LAMBDA_INVOKE_PATH;
 use crate::error::{ParityError, Result};
 use crate::export::ExportRecord;
 use crate::fixture::write_json;
@@ -109,7 +110,8 @@ impl ApigwProcess {
             .arg(scratch.join("tls.key"))
             .args(["--listen", &format!("127.0.0.1:{listen}")])
             .args(["--admin-listen", &format!("127.0.0.1:{admin}")])
-            .args(["--refresh-seconds", "0", "--log-format", "text"]);
+            .args(["--refresh-seconds", "0", "--log-format", "text"])
+            .args(["--integration-credentials", "gateway"]);
         for (name, value) in &export.stage_variables {
             if name != ECHO_VARIABLE {
                 command
@@ -120,6 +122,11 @@ impl ApigwProcess {
         command
             .arg("--stage-variable")
             .arg(format!("{ECHO_VARIABLE}={echo_authority}"));
+        for function in export.lambda_functions() {
+            command.arg("--lambda-endpoint").arg(format!(
+                "{function}=http://{echo_authority}{LAMBDA_INVOKE_PATH}"
+            ));
+        }
         if !overrides.is_empty() {
             command
                 .arg("--integration-overrides")

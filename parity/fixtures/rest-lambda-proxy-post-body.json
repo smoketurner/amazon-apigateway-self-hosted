@@ -1,0 +1,20 @@
+{
+  "name": "rest-lambda-proxy-post-body",
+  "source": "hand_written",
+  "api": "rest",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    }
+  },
+  "echo": {
+    "method": "POST",
+    "path": "/lambda-proxy/items",
+    "query": "",
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": "{\"name\":\"widget\"}"
+  }
+}

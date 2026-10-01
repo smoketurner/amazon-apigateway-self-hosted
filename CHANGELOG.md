@@ -43,7 +43,9 @@ All notable changes to this project are documented here. The format follows
 - `crates/apigw-parity`, a dev tool with `record` (capture the reference APIs' behavior as
   normalized, redacted fixtures) and `replay` (serve the recorded export with `apigw` and diff
   its answers). Seed cases and hand-written fixtures live in `parity/`; CI runs `replay`, and
-  `.github/workflows/parity.yml` re-records nightly and opens an issue on drift.
+  `.github/workflows/parity.yml` re-records nightly and opens an issue on drift. Replay serves
+  `AWS_PROXY` routes through an in-process Lambda endpoint (`--lambda-endpoint`), so Lambda event
+  shapes for payload formats 1.0 and 2.0 are covered.
 
 ### Fixed
 

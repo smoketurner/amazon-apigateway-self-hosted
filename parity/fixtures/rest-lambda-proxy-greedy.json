@@ -1,0 +1,21 @@
+{
+  "name": "rest-lambda-proxy-greedy",
+  "source": "hand_written",
+  "api": "rest",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    }
+  },
+  "echo": {
+    "method": "GET",
+    "path": "/lambda-proxy/a/b",
+    "query": "x=1&y=2",
+    "headers": {},
+    "resource": "/lambda-proxy/{proxy+}",
+    "path_parameters": {
+      "proxy": "a/b"
+    }
+  }
+}

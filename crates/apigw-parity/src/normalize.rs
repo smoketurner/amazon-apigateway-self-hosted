@@ -337,6 +337,9 @@ impl Normalizer {
         received.headers = headers;
         received.body = received.body.map(|body| self.redactor.redact(&body));
         received.query = self.redactor.redact(&received.query);
+        for value in received.path_parameters.values_mut() {
+            *value = self.redactor.redact(value);
+        }
         Ok(received)
     }
 }
