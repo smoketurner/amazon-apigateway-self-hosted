@@ -284,9 +284,6 @@ impl StageSettings {
         if self.cache_cluster_enabled {
             features.push(Feature::ResponseCaching);
         }
-        if self.tracing_enabled {
-            features.push(Feature::Tracing);
-        }
         if self
             .canary
             .as_ref()
@@ -515,7 +512,7 @@ mod tests {
         );
         assert_eq!(
             settings.unenforced(),
-            vec![Feature::ResponseCaching, Feature::Tracing, Feature::Canary]
+            vec![Feature::ResponseCaching, Feature::Canary]
         );
         assert_eq!(
             DeploymentStamp::from(&stage),

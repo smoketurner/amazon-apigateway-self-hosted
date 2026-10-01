@@ -11,7 +11,7 @@ use crate::gateway::{AuthorizationMode, Enforcement, Unsupported};
 use crate::identity::{TrustedProxies, TrustedProxy};
 use crate::listener::{Edge, ProxyProtocol};
 use crate::model::ApiKind;
-use crate::observability::{Delivery, LogGroup, MetricsNamespace, StreamName};
+use crate::observability::{Delivery, LogGroup, MetricsNamespace, StreamName, TraceDelivery};
 use crate::router::BasePath;
 use crate::source::Source;
 
@@ -174,6 +174,17 @@ pub(crate) struct Config {
     #[arg(long, env = "APIGW_METRICS_NAMESPACE", default_value_t = MetricsNamespace::default(), value_parser = clap::value_parser!(MetricsNamespace))]
     pub(crate) metrics_namespace: MetricsNamespace,
 
+    /// What stage tracing does: `aws` sends X-Ray segments for stages with
+    /// tracing enabled and propagates `X-Amzn-Trace-Id` and `traceparent` to
+    /// integrations; `off` does neither.
+    #[arg(long, env = "APIGW_TRACING", value_enum, default_value_t = TraceDelivery::Aws)]
+    pub(crate) tracing: TraceDelivery,
+
+    /// Percentage of requests X-Ray traces after the first request each second,
+    /// when the caller made no sampling decision (X-Ray's default rule is 5).
+    #[arg(long, env = "APIGW_XRAY_SAMPLING_PERCENT", default_value_t = 5, value_parser = clap::value_parser!(u8).range(..=100))]
+    pub(crate) xray_sampling_percent: u8,
+
     /// Log stream this process writes to in each CloudWatch Logs log group.
     /// Defaults to `{HOSTNAME}/{start time}/{random suffix}`, unique per process.
     #[arg(long, env = "APIGW_LOG_STREAM")]
@@ -242,6 +253,8 @@ impl Config {
                     namespace: self.metrics_namespace.clone(),
                 }
             }),
+            tracing: self.tracing,
+            sampling_percent: self.xray_sampling_percent,
             stream: StreamName::for_pod(
                 self.log_stream.as_deref(),
                 hostname,
