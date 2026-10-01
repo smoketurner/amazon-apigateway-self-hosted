@@ -290,6 +290,7 @@ impl StageObserver {
             status: integration_ms.map(|_| status),
             latency_ms: integration_ms,
             error: None,
+            ..IntegrationOutcome::default()
         };
         if let Some(logging) = settings
             .and_then(|s| s.execution_logging)
@@ -435,6 +436,7 @@ mod tests {
     use tower::ServiceExt as _;
 
     use super::*;
+    use crate::authz::KeyStore;
     use crate::aws::{AwsClients, CredentialsMode, LambdaEndpoints};
     use crate::gateway::{ApiContext, AuthorizationMode, Enforcement, RequestId, Unsupported};
     use crate::gateway_response::GatewayResponses;
@@ -537,6 +539,7 @@ mod tests {
             stage: Some("prod".to_owned()),
             stage_variables: Arc::default(),
             responses: GatewayResponses::default(),
+            cors: None,
             state: Arc::new(StateBackend::InMemory(InMemory::new(
                 InMemoryLimits::default(),
             ))),
@@ -548,6 +551,7 @@ mod tests {
             },
             http: reqwest::Client::new(),
             aws: clients,
+            keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
             observer: StageObserver::new(&observability, &model, "abc", Some("prod"), None),
             release: None,
         });

@@ -20,7 +20,7 @@ impl HttpProxy {
         route: &Route,
         ctx: &mut RequestContext,
     ) -> Result<Response, GatewayError> {
-        let url = match self.target_url(&route.path, ctx) {
+        let mut url = match self.target_url(&route.path, ctx) {
             Ok(url) => url,
             Err(err) => {
                 tracing::error!(route = %route.key, uri = self.uri, %err, "invalid integration URI");
@@ -58,6 +58,8 @@ impl HttpProxy {
                 }
             }
         }
+        self.request_mapping.apply(ctx, &mut headers, &mut url);
+        ctx.integration.transfer_mode = Some(self.transfer);
         let started = Instant::now();
         let result = client
             .request(method, url)
@@ -77,10 +79,13 @@ impl HttpProxy {
                 return Err(GatewayError::IntegrationUnreachable);
             }
         };
+        let headers_after = u64::try_from(started.elapsed().as_millis()).ok();
+        ctx.integration.status = Some(upstream.status().as_u16());
+        ctx.integration.time_to_all_headers_ms = headers_after;
         tracing::debug!(
             route = %route.key,
             status = upstream.status().as_u16(),
-            latency_ms = started.elapsed().as_millis(),
+            latency_ms = headers_after,
             "integration responded"
         );
         let mut response = Response::new(Body::empty());
@@ -90,7 +95,21 @@ impl HttpProxy {
                 response.headers_mut().append(name.clone(), value.clone());
             }
         }
-        *response.body_mut() = Body::from_stream(upstream.bytes_stream());
+        let Some(mapping) = self.response_mapping.for_status(upstream.status()) else {
+            *response.body_mut() = Body::from_stream(upstream.bytes_stream());
+            return Ok(response);
+        };
+        if mapping.reads_body() {
+            let body = upstream.bytes().await.map_err(|err| {
+                tracing::warn!(route = %route.key, err = %err, "integration response could not be read");
+                GatewayError::IntegrationFailure
+            })?;
+            mapping.apply(ctx, Some(&body), &mut response);
+            *response.body_mut() = Body::from(body);
+        } else {
+            mapping.apply(ctx, None, &mut response);
+            *response.body_mut() = Body::from_stream(upstream.bytes_stream());
+        }
         Ok(response)
     }
 
@@ -174,10 +193,19 @@ impl RoutePath {
 }
 
 /// A query string being assembled from `name=value` pairs.
-struct QueryBuilder(String);
+#[derive(Default)]
+pub(crate) struct QueryBuilder(String);
 
 impl QueryBuilder {
-    fn append(&mut self, pair: &str) {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(crate) fn append(&mut self, pair: &str) {
         if pair.is_empty() {
             return;
         }
@@ -189,7 +217,7 @@ impl QueryBuilder {
 }
 
 /// Percent-encodes into a buffer, leaving only RFC 3986 unreserved bytes bare.
-struct UrlEncoder<'a>(&'a mut String);
+pub(crate) struct UrlEncoder<'a>(pub(crate) &'a mut String);
 
 impl UrlEncoder<'_> {
     fn path_value(&mut self, value: &str, keep_slashes: bool) {
@@ -202,7 +230,7 @@ impl UrlEncoder<'_> {
         }
     }
 
-    fn component(&mut self, value: &str) {
+    pub(crate) fn component(&mut self, value: &str) {
         for byte in value.bytes() {
             self.byte(byte);
         }
@@ -235,7 +263,8 @@ mod tests {
     use super::*;
     use crate::authz::RouteAuthorizer;
     use crate::integration::Integration;
-    use crate::model::{ApiKind, MethodMatch, Protections, RouteKey};
+    use crate::mapping::{RequestMapping, ResponseMapping};
+    use crate::model::{ApiKind, MethodMatch, Protections, ResponseTransferMode, RouteKey};
     use crate::pipeline::context::QueryString;
     use crate::pipeline::context::tests::request;
 
@@ -259,7 +288,10 @@ mod tests {
             path_params: BTreeMap::new(),
             query_params: BTreeMap::new(),
             headers: BTreeMap::new(),
+            request_mapping: RequestMapping::default(),
+            response_mapping: ResponseMapping::default(),
             timeout: Duration::from_secs(1),
+            transfer: ResponseTransferMode::Buffered,
         }
     }
 
@@ -463,6 +495,60 @@ mod tests {
             .unwrap();
         let echoed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(echoed["method"], "PUT");
+    }
+
+    #[tokio::test]
+    async fn http_api_parameter_mappings_change_the_request_and_response() {
+        let addr = upstream().await;
+        let mut target = proxy(&format!("http://{addr}/echo/x"));
+        target.request_mapping = RequestMapping::compile(&BTreeMap::from([
+            (
+                "append:header.x-from".to_owned(),
+                "$request.header.x-tenant".to_owned(),
+            ),
+            ("remove:header.x-tenant".to_owned(), String::new()),
+            (
+                "append:querystring.added".to_owned(),
+                "$context.stage".to_owned(),
+            ),
+        ]));
+        target.response_mapping = ResponseMapping::compile(&BTreeMap::from([(
+            "200".to_owned(),
+            BTreeMap::from([
+                ("overwrite:statuscode".to_owned(), "202".to_owned()),
+                (
+                    "append:header.x-method".to_owned(),
+                    "${response.body.method}".to_owned(),
+                ),
+                ("remove:header.x-upstream".to_owned(), String::new()),
+            ]),
+        )]));
+        let response = send(target, "/x", incoming(&[], Some("q=1")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(response.headers()["x-method"], "GET");
+        assert!(response.headers().get("x-upstream").is_none());
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let echoed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(echoed["headers"]["x-from"], "acme");
+        assert!(echoed["headers"].get("x-tenant").is_none());
+        assert_eq!(echoed["uri"], "/echo/x?q=1&added=prod");
+    }
+
+    #[tokio::test]
+    async fn responses_without_a_mapping_for_their_status_stream_unchanged() {
+        let addr = upstream().await;
+        let mut target = proxy(&format!("http://{addr}/echo/x"));
+        target.response_mapping = ResponseMapping::compile(&BTreeMap::from([(
+            "500".to_owned(),
+            BTreeMap::from([("overwrite:statuscode".to_owned(), "403".to_owned())]),
+        )]));
+        let response = send(target, "/x", incoming(&[], None)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-upstream"], "yes");
     }
 
     #[tokio::test]

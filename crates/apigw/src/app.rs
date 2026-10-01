@@ -14,11 +14,13 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+use crate::authz::KeyStore;
 use crate::aws::AwsClients;
 #[cfg(test)]
 use crate::aws::{CredentialsMode, LambdaEndpoints};
 use crate::canary::{CanaryRelease, CanaryStructure, CanarySummary, Release, TrafficShare};
 use crate::config::Config;
+use crate::cors::Cors;
 use crate::domain::{DomainRegistry, DomainSupervisor};
 use crate::gateway::{ApiContext, Enforcement};
 #[cfg(test)]
@@ -43,6 +45,7 @@ pub(crate) struct Builder {
     overrides_path: Option<PathBuf>,
     http: reqwest::Client,
     aws: Arc<AwsClients>,
+    keys: Arc<KeyStore>,
     state: Arc<StateBackend>,
     replicas: NonZeroU32,
     observability: Arc<Observability>,
@@ -74,6 +77,7 @@ impl Builder {
                 LambdaEndpoints::default(),
                 reqwest::Client::new(),
             )),
+            keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
         }
     }
 }
@@ -128,11 +132,13 @@ impl Builder {
             stage: snapshot.stage.clone(),
             stage_variables: Arc::new(StageVariables::new(model.stage.variables.clone())),
             responses: GatewayResponses::compile(model.kind, &model.gateway_responses),
+            cors: model.settings.cors.as_ref().map(Cors::compile),
             state: Arc::clone(&self.state),
             replicas: self.replicas,
             enforcement: self.enforcement,
             http: self.http.clone(),
             aws: Arc::clone(&self.aws),
+            keys: Arc::clone(&self.keys),
             observer: StageObserver::new(
                 &self.observability,
                 &model,
@@ -589,6 +595,13 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         config.lambda_endpoints(),
         http.clone(),
     ));
+    for endpoint in config.issuer_endpoints.iter().filter(|e| e.is_plaintext()) {
+        tracing::warn!(?endpoint, "token signing keys are fetched over plain HTTP");
+    }
+    let keys = Arc::new(KeyStore::new(
+        http.clone(),
+        config.issuer_endpoints.iter().cloned(),
+    ));
     let observability = Observability::start(
         sdk_config.clone(),
         config.observability(std::env::var("HOSTNAME").ok().as_deref()),
@@ -600,6 +613,7 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         stage_variable_overrides: config.stage_variable_overrides(std::env::vars()),
         overrides_path: config.integration_overrides.clone(),
         aws: Arc::clone(&aws),
+        keys,
         http,
         state: Arc::new(StateBackend::InMemory(InMemory::new(
             InMemoryLimits::default(),
@@ -697,6 +711,7 @@ mod tests {
                 LambdaEndpoints::default(),
                 reqwest::Client::new(),
             )),
+            keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
         }
     }
 
@@ -729,6 +744,7 @@ mod tests {
                 Source::File {
                     path,
                     kind: ApiKind::Rest,
+                    stage: None,
                 },
                 &sdk_config(),
             ),

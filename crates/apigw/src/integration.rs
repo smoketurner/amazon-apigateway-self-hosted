@@ -1,22 +1,29 @@
 //! Integrations compiled from the model into the form requests execute against.
 
 use std::collections::BTreeMap;
+use std::str::FromStr;
 use std::time::Duration;
 
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use serde_json::Value;
 
 use crate::aws::{FunctionArn, IntegrationCredentials, RoleArn};
+use crate::mapping::{RequestMapping, ResponseMapping};
 use crate::model::{
     ApiKind, ConnectionType, IntegrationSpec, IntegrationType, PayloadVersion, ResponseTransferMode,
 };
 
+/// The longest a streamed response may take, and the default timeout of
+/// streaming integrations.
+pub(crate) const STREAM_LIMIT: Duration = Duration::from_mins(15);
+
 impl ApiKind {
     /// API Gateway's integration timeout when the integration sets none.
-    fn default_integration_timeout(self) -> Duration {
-        match self {
-            Self::Rest => Duration::from_secs(29),
-            Self::Http => Duration::from_secs(30),
+    fn default_integration_timeout(self, transfer: ResponseTransferMode) -> Duration {
+        match (self, transfer) {
+            (_, ResponseTransferMode::Stream) => STREAM_LIMIT,
+            (Self::Rest, ResponseTransferMode::Buffered) => Duration::from_secs(29),
+            (Self::Http, ResponseTransferMode::Buffered) => Duration::from_secs(30),
         }
     }
 }
@@ -111,17 +118,33 @@ impl Integration {
         if spec.connection_type == Some(ConnectionType::VpcLink) {
             return Err("VPC link integrations are only reachable from inside AWS".to_owned());
         }
-        if spec.response_transfer_mode == Some(ResponseTransferMode::Stream) {
-            return Err("response streaming is not supported yet".to_owned());
+        let transfer = spec
+            .response_transfer_mode
+            .unwrap_or(ResponseTransferMode::Buffered);
+        if transfer == ResponseTransferMode::Stream
+            && !matches!(
+                spec.integration_type,
+                IntegrationType::HttpProxy | IntegrationType::AwsProxy
+            )
+        {
+            return Err(format!(
+                "response streaming applies to proxy integrations, not {}",
+                spec.integration_type
+            ));
         }
-        let timeout = spec
-            .timeout_in_millis
-            .map_or_else(|| kind.default_integration_timeout(), Duration::from_millis);
+        let timeout = spec.timeout_in_millis.map_or_else(
+            || kind.default_integration_timeout(transfer),
+            Duration::from_millis,
+        );
+        let timeout = match transfer {
+            ResponseTransferMode::Stream => timeout.min(STREAM_LIMIT),
+            ResponseTransferMode::Buffered => timeout,
+        };
         let uri = spec.uri.as_deref().map(|uri| variables.substitute(uri));
         match spec.integration_type {
             IntegrationType::HttpProxy => {
                 let uri = uri.ok_or("HTTP_PROXY integration has no uri")?;
-                HttpProxy::compile(spec, uri, timeout).map(Self::HttpProxy)
+                HttpProxy::compile(spec, uri, timeout, transfer, kind).map(Self::HttpProxy)
             }
             IntegrationType::Mock => MockResponse::compile(spec).map(Self::Mock),
             IntegrationType::AwsProxy if spec.subtype.is_some() => Err(format!(
@@ -129,11 +152,17 @@ impl Integration {
                 spec.subtype.as_deref().unwrap_or_default()
             )),
             IntegrationType::AwsProxy => {
-                let function = uri
+                let target = uri
                     .as_deref()
-                    .and_then(LambdaProxy::function_arn)
-                    .ok_or("AWS_PROXY integration is not a Lambda function")?
-                    .parse::<FunctionArn>()?;
+                    .and_then(|uri| uri.parse::<LambdaTarget>().ok())
+                    .ok_or("AWS_PROXY integration is not a Lambda function")?;
+                if target.streaming != (transfer == ResponseTransferMode::Stream) {
+                    return Err(match transfer {
+                        ResponseTransferMode::Stream => "responseTransferMode STREAM needs the response-streaming-invocations integration URI".to_owned(),
+                        ResponseTransferMode::Buffered => "a response-streaming-invocations integration URI needs responseTransferMode STREAM".to_owned(),
+                    });
+                }
+                let function = target.function.parse::<FunctionArn>()?;
                 let credentials = match spec.credentials.as_deref().map(str::parse).transpose()? {
                     None => None,
                     Some(IntegrationCredentials::Role(role)) => Some(role),
@@ -150,6 +179,7 @@ impl Integration {
                     credentials,
                     payload,
                     timeout,
+                    transfer,
                 }))
             }
             IntegrationType::Http | IntegrationType::Aws => Err(format!(
@@ -175,11 +205,22 @@ pub(crate) struct HttpProxy {
     pub(crate) path_params: BTreeMap<String, ParamSource>,
     pub(crate) query_params: BTreeMap<String, ParamSource>,
     pub(crate) headers: BTreeMap<String, ParamSource>,
+    /// HTTP API `requestParameters` (`append:header.x`, `overwrite:path`, ...).
+    pub(crate) request_mapping: RequestMapping,
+    /// HTTP API `responseParameters`, by backend status code.
+    pub(crate) response_mapping: ResponseMapping,
     pub(crate) timeout: Duration,
+    pub(crate) transfer: ResponseTransferMode,
 }
 
 impl HttpProxy {
-    fn compile(spec: &IntegrationSpec, uri: String, timeout: Duration) -> Result<Self, String> {
+    fn compile(
+        spec: &IntegrationSpec,
+        uri: String,
+        timeout: Duration,
+        transfer: ResponseTransferMode,
+        kind: ApiKind,
+    ) -> Result<Self, String> {
         let method = match spec.http_method.as_deref() {
             None => None,
             Some(m) if m.eq_ignore_ascii_case("ANY") => None,
@@ -192,6 +233,9 @@ impl HttpProxy {
         let mut query_params = BTreeMap::new();
         let mut headers = BTreeMap::new();
         for (target, source) in &spec.request_parameters {
+            if kind == ApiKind::Http && target.contains(':') {
+                continue;
+            }
             let Some(source) = ParamSource::parse(source) else {
                 tracing::warn!(
                     target,
@@ -216,7 +260,10 @@ impl HttpProxy {
             path_params,
             query_params,
             headers,
+            request_mapping: RequestMapping::compile(&spec.request_parameters),
+            response_mapping: ResponseMapping::compile(&spec.response_parameters),
             timeout,
+            transfer,
         })
     }
 }
@@ -350,19 +397,54 @@ pub(crate) struct LambdaProxy {
     pub(crate) credentials: Option<RoleArn>,
     pub(crate) payload: PayloadVersion,
     pub(crate) timeout: Duration,
+    /// `Stream` invokes with `InvokeWithResponseStream` and streams the output.
+    pub(crate) transfer: ResponseTransferMode,
 }
 
-impl LambdaProxy {
-    /// Extracts the function ARN from a Lambda integration URI. REST APIs use the
-    /// `arn:aws:apigateway:{region}:lambda:path/2015-03-31/functions/{arn}/invocations`
-    /// form; HTTP APIs may also give the function ARN directly.
-    pub(crate) fn function_arn(uri: &str) -> Option<String> {
-        if let Some((_, rest)) = uri.split_once(":lambda:path/") {
-            let (_, functions) = rest.split_once("/functions/")?;
-            let function = functions.strip_suffix("/invocations").unwrap_or(functions);
-            return (!function.is_empty()).then(|| function.to_owned());
+/// A Lambda integration URI split into the function and how it is invoked.
+///
+/// REST APIs use
+/// `arn:aws:apigateway:{region}:lambda:path/2015-03-31/functions/{arn}/invocations`,
+/// or `.../2021-11-15/functions/{arn}/response-streaming-invocations` for
+/// streaming; HTTP APIs may also give the function ARN directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LambdaTarget {
+    pub(crate) function: String,
+    pub(crate) streaming: bool,
+}
+
+impl FromStr for LambdaTarget {
+    type Err = String;
+
+    fn from_str(uri: &str) -> Result<Self, Self::Err> {
+        let Some((_, rest)) = uri.split_once(":lambda:path/") else {
+            return if uri.contains(":lambda:") {
+                Ok(Self {
+                    function: uri.to_owned(),
+                    streaming: false,
+                })
+            } else {
+                Err(format!("{uri:?} is not a Lambda integration URI"))
+            };
+        };
+        let (_, functions) = rest
+            .split_once("/functions/")
+            .ok_or_else(|| format!("{uri:?} has no /functions/ segment"))?;
+        let (function, streaming) = match functions.strip_suffix("/response-streaming-invocations")
+        {
+            Some(function) => (function, true),
+            None => (
+                functions.strip_suffix("/invocations").unwrap_or(functions),
+                false,
+            ),
+        };
+        if function.is_empty() {
+            return Err(format!("{uri:?} names no function"));
         }
-        uri.contains(":lambda:").then(|| uri.to_owned())
+        Ok(Self {
+            function: function.to_owned(),
+            streaming,
+        })
     }
 }
 
@@ -460,21 +542,34 @@ mod tests {
     }
 
     #[test]
-    fn lambda_function_arn_rejects_non_lambda_uris() {
+    fn lambda_target_uris_split_function_and_invocation_mode() {
+        let target = |uri: &str| uri.parse::<LambdaTarget>();
         assert_eq!(
-            LambdaProxy::function_arn("arn:aws:apigateway:us-east-1:sqs:path/q"),
-            None
-        );
-        assert_eq!(
-            LambdaProxy::function_arn(
-                "arn:aws:apigateway:r:lambda:path/2015-03-31/functions//invocations"
+            target(
+                "arn:aws:apigateway:r:lambda:path/2015-03-31/functions/arn:aws:lambda:r:1:function:f:live/invocations"
             ),
-            None
+            Ok(LambdaTarget {
+                function: "arn:aws:lambda:r:1:function:f:live".to_owned(),
+                streaming: false
+            })
         );
         assert_eq!(
-            LambdaProxy::function_arn("arn:aws:apigateway:r:lambda:path/nofunctions"),
-            None
+            target(
+                "arn:aws:apigateway:r:lambda:path/2021-11-15/functions/arn:aws:lambda:r:1:function:f/response-streaming-invocations"
+            ),
+            Ok(LambdaTarget {
+                function: "arn:aws:lambda:r:1:function:f".to_owned(),
+                streaming: true
+            })
         );
+        assert!(target("arn:aws:apigateway:us-east-1:sqs:path/q").is_err());
+        assert!(
+            target("arn:aws:apigateway:r:lambda:path/2015-03-31/functions//invocations").is_err()
+        );
+        assert!(
+            target("arn:aws:apigateway:r:lambda:path/2021-11-15/functions//response-streaming-invocations").is_err()
+        );
+        assert!(target("arn:aws:apigateway:r:lambda:path/nofunctions").is_err());
         let integration = compile(
             json!({"type": "aws_proxy", "uri": "arn:aws:apigateway:us-east-1:sqs:path/q"}),
             ApiKind::Rest,
@@ -543,6 +638,8 @@ mod tests {
             json!({"type": "http_proxy"}),
             json!({"type": "http_proxy", "httpMethod": "GE T", "uri": "http://x"}),
             json!({"type": "aws_proxy", "responseTransferMode": "STREAM", "uri": "arn:aws:lambda:us-east-1:1:function:f"}),
+            json!({"type": "aws_proxy", "uri": "arn:aws:apigateway:us-east-1:lambda:path/2021-11-15/functions/arn:aws:lambda:us-east-1:1:function:f/response-streaming-invocations"}),
+            json!({"type": "mock", "responseTransferMode": "STREAM"}),
             json!({"type": "aws_proxy", "integrationSubtype": "SQS-SendMessage"}),
         ];
         for case in cases {
@@ -556,6 +653,32 @@ mod tests {
             Integration::compile(None, ApiKind::Rest, &StageVariables::default()),
             Integration::Unsupported { .. }
         ));
+    }
+
+    #[test]
+    fn streaming_integrations_compile_with_the_stream_timeout() {
+        let lambda = compile(
+            json!({"type": "aws_proxy", "responseTransferMode": "STREAM",
+                "uri": "arn:aws:apigateway:us-east-1:lambda:path/2021-11-15/functions/arn:aws:lambda:us-east-1:1:function:f:live/response-streaming-invocations"}),
+            ApiKind::Rest,
+        );
+        let Integration::Lambda(lambda) = lambda else {
+            panic!("expected Lambda");
+        };
+        assert_eq!(lambda.transfer, ResponseTransferMode::Stream);
+        assert_eq!(lambda.timeout, STREAM_LIMIT);
+        assert_eq!(lambda.function.qualifier(), Some("live"));
+
+        let http = compile(
+            json!({"type": "http_proxy", "responseTransferMode": "STREAM", "uri": "http://x/",
+                "timeoutInMillis": 3_600_000}),
+            ApiKind::Rest,
+        );
+        let Integration::HttpProxy(http) = http else {
+            panic!("expected HTTP proxy");
+        };
+        assert_eq!(http.transfer, ResponseTransferMode::Stream);
+        assert_eq!(http.timeout, STREAM_LIMIT, "streams stop at 15 minutes");
     }
 
     #[test]

@@ -46,6 +46,7 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 
 use crate::domain::DomainName;
+use crate::header_case::{HeaderCaseQueue, HeaderCaseTap};
 use crate::identity::TrustedProxies;
 
 /// Time limits applied to every connection.
@@ -583,11 +584,16 @@ async fn serve_connection(
 
     let activity = Activity::default();
     let idle = activity.subscribe();
+    let header_case = HeaderCaseQueue::default();
+    let io = HeaderCaseTap::new(io, header_case.clone());
     let service =
         TowerToHyperService::new(tower::service_fn(move |req: hyper::Request<Incoming>| {
             let mut req = req.map(Body::new);
             let identity = edge.trusted.identify(peer, req.headers_mut());
             req.extensions_mut().insert(identity);
+            if let Some(spelling) = header_case.pop() {
+                req.extensions_mut().insert(spelling);
+            }
             let in_flight = activity.begin();
             let response = app.clone().oneshot(req);
             async move {
@@ -847,9 +853,10 @@ pub(crate) mod test_tls {
 mod tests {
     use axum::Extension;
     use axum::http::HeaderMap;
-    use axum::routing::get;
+    use axum::routing::{any, get};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+    use crate::header_case::HeaderCase;
     use crate::identity::ClientIdentity;
 
     use super::test_tls::{TestCert, generate, generate_for};
@@ -880,6 +887,16 @@ mod tests {
                             .map_or_else(|| "unknown".to_owned(), |ip| ip.to_string())
                     },
                 ),
+            )
+            .route(
+                "/spelling",
+                any(|request: axum::extract::Request| async move {
+                    request
+                        .extensions()
+                        .get::<HeaderCase>()
+                        .map_or("none", |case| case.spelling("x-mixed-case"))
+                        .to_owned()
+                }),
             )
             .route(
                 "/forwarded",
@@ -1060,6 +1077,20 @@ mod tests {
         std::fs::write(&key_path, &second.key_pem).unwrap();
         assert!(tls.reload_if_changed().unwrap());
         assert!(!tls.reload_if_changed().unwrap());
+    }
+
+    #[tokio::test]
+    async fn http1_requests_keep_the_clients_header_spelling_across_a_keep_alive_connection() {
+        let cert = generate();
+        let (addr, shutdown, handle) = start(&cert, 8).await;
+        let requests = "POST /spelling HTTP/1.1\r\nhost: localhost\r\nX-Mixed-Case: x\r\ncontent-length: 5\r\n\r\nX: y!\
+GET /spelling HTTP/1.1\r\nhost: localhost\r\nx-MIXED-case: x\r\nconnection: close\r\n\r\n";
+        let response = cert.request(addr, requests, b"").await;
+        let first = response.find("X-Mixed-Case").unwrap_or(usize::MAX);
+        let second = response.find("x-MIXED-case").unwrap_or(usize::MAX);
+        assert!(first < second, "{response}");
+        shutdown.cancel();
+        tokio::time::timeout(BOUND, handle).await.unwrap().unwrap();
     }
 
     #[tokio::test]

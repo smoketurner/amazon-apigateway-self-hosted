@@ -7,6 +7,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Cognito user pool authorizers (REST) and JWT authorizers (HTTP APIs) are evaluated. Tokens are
+  verified (RS256/RS384/RS512) against the issuer's published keys, fetched over HTTPS with a 1.5 s
+  timeout and 150 KB cap, cached for two hours, and refreshed at most every 30 s when a token names an
+  unknown key. Issuer, audience, expiry, and scopes are checked, and claims reach `$context.authorizer`.
+  `--issuer-endpoint` fetches an issuer's keys from a mirror instead.
 - Lambda authorizers are evaluated. REST `TOKEN` (with `identityValidationExpression`) and `REQUEST`
   authorizers and HTTP API `REQUEST` authorizers (payload 1.0 and 2.0, simple responses) are invoked
   with the request's identity sources, their results are cached by identity source and TTL, and the
@@ -81,6 +86,20 @@ All notable changes to this project are documented here. The format follows
   `$context`, `$stageVariables`, and `$method.request.*` substitution (no VTL), with
   `DEFAULT_4XX`/`DEFAULT_5XX` fallback. Error responses carry `x-amzn-ErrorType` and
   `x-amz-apigw-id`. The 413 response is not customizable. HTTP APIs keep fixed messages.
+- Lambda proxy events match API Gateway's `requestContext`: `accountId` (from the function
+  ARN), `extendedRequestId`, `resourceId`, the full `identity` block, and `protocol`
+  (REST reports `HTTP/1.1` as API Gateway documents; HTTP APIs report the client's version).
+  REST payload 1.0 keeps the client's header name case (recovered from the HTTP/1 request
+  head, because hyper keeps it private); HTTP/2 clients and HTTP APIs get lower case.
+- Lambda integrations reject requests and buffered responses over Lambda's 6 MB limit with
+  `502`, merge `headers` and `multiValueHeaders` as API Gateway does, tolerate `null` response
+  fields, and drop `Content-Length`/hop-by-hop headers set by the function.
+- `--lambda-endpoint` accepts `name:alias`, a function ARN with or without its qualifier, or the
+  bare name, most specific first.
+- REST response streaming: `responseTransferMode: STREAM` with Lambda
+  (`InvokeWithResponseStream`, `/response-streaming-invocations` URIs) and `HTTP_PROXY`, with
+  the 15 minute limit, a 5 minute idle limit, and `$context.integration.responseTransferMode`
+  / `timeToAllHeaders`. Output that doesn't follow the streaming format answers `500`.
 
 - Stage throttling: REST `methodSettings` (including the `*/*` default) and HTTP API route
   settings (including the default route settings) limit each method or route with a token
@@ -89,8 +108,22 @@ All notable changes to this project are documented here. The format follows
 - A `StateBackend` (in-memory, bounded, with LRU eviction) holding token buckets, calendar-aligned
   day/week/month quota counters, and a TTL cache, for usage plans and response caching to use.
 
+- HTTP API CORS: preflight requests are answered with `204` from the configured CORS rules
+  without calling the integration (after the route's own protections), and allowed origins get
+  the CORS response headers; the backend's own CORS headers are dropped.
+- HTTP API parameter mapping for `HTTP_PROXY` integrations: `append:`, `overwrite:`, and
+  `remove:` for headers, query strings, and the path, and per-status response mappings
+  including `overwrite:statuscode`, with `$request.*`, `$response.*`, `$context.*`,
+  `$stageVariables.*`, and static sources.
+
 ### Changed
 
+- HTTP API route selection takes the method into account: a route that matches the path but
+  not the method is skipped for a less specific route that serves it, as in API Gateway's
+  documented priorities. Previously such requests fell through to `$default`.
+- HTTP APIs never run request validation, even if a hand-written definition names a validator.
+- Lambda authorizer results are cached in the state backend under a SHA-256 hash of the identity
+  sources instead of in a private cache that held the caller's token.
 - An `HTTP_PROXY` backend that cannot be reached now answers REST clients 504 `Network error
   communicating with endpoint` (`INTEGRATION_FAILURE`) instead of 502; an invalid integration URI
   answers 500 (`API_CONFIGURATION_ERROR`).

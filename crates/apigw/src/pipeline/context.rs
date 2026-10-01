@@ -8,7 +8,7 @@ use std::sync::Arc;
 use axum::body::Bytes;
 use axum::extract::Request;
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, Method};
+use axum::http::{HeaderMap, HeaderValue, Method, Version, header};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Map, Value, json};
@@ -16,9 +16,10 @@ use uuid::Uuid;
 
 use crate::canary::Release;
 use crate::gateway::{ApiContext, RequestId};
+use crate::header_case::HeaderCase;
 use crate::identity::ClientIdentity;
 use crate::integration::StageVariables;
-use crate::model::{ApiKind, PayloadVersion, RouteKey};
+use crate::model::{ApiKind, PayloadVersion, ResponseTransferMode, RouteKey};
 use crate::observability::Trace;
 use crate::route::Route;
 
@@ -110,6 +111,8 @@ pub(crate) enum AuthorizerSource {
     #[default]
     None,
     Lambda,
+    /// Verified token claims (and, for HTTP APIs, scopes).
+    Claims,
 }
 
 /// `$context.authorizer.*`: what the request's authorizer produced.
@@ -128,6 +131,14 @@ impl AuthorizerContext {
         }
     }
 
+    /// A token authorizer's `claims` (and `scopes`).
+    pub(crate) fn claims(values: Map<String, Value>) -> Self {
+        Self {
+            values,
+            source: AuthorizerSource::Claims,
+        }
+    }
+
     pub(crate) fn values(&self) -> &Map<String, Value> {
         &self.values
     }
@@ -137,7 +148,7 @@ impl AuthorizerContext {
     pub(crate) fn event_value(&self, version: PayloadVersion) -> Option<Value> {
         match (self.source, version) {
             (AuthorizerSource::None, _) => None,
-            (AuthorizerSource::Lambda, PayloadVersion::V1) => {
+            (AuthorizerSource::Lambda | AuthorizerSource::Claims, PayloadVersion::V1) => {
                 Some(Value::Object(self.values.clone()))
             }
             (AuthorizerSource::Lambda, PayloadVersion::V2) => {
@@ -145,6 +156,7 @@ impl AuthorizerContext {
                 context.remove("principalId");
                 Some(json!({ "lambda": context }))
             }
+            (AuthorizerSource::Claims, PayloadVersion::V2) => Some(json!({ "jwt": self.values })),
         }
     }
 }
@@ -155,6 +167,20 @@ pub(crate) struct IntegrationOutcome {
     pub(crate) status: Option<u16>,
     pub(crate) latency_ms: Option<u64>,
     pub(crate) error: Option<String>,
+    pub(crate) transfer_mode: Option<ResponseTransferMode>,
+    /// Streaming integrations: time from connecting to having every response
+    /// header (`$context.integration.timeToAllHeaders`).
+    pub(crate) time_to_all_headers_ms: Option<u64>,
+}
+
+impl ResponseTransferMode {
+    /// The value `$context.integration.responseTransferMode` reports.
+    fn context_name(self) -> &'static str {
+        match self {
+            Self::Buffered => "BUFFERED",
+            Self::Stream => "STREAMED",
+        }
+    }
 }
 
 /// One request: what the client sent, plus everything API Gateway records
@@ -171,6 +197,9 @@ pub(crate) struct RequestContext {
     pub(crate) path: String,
     pub(crate) query: QueryString,
     pub(crate) headers: HeaderMap,
+    /// The client's spelling of header names, known for HTTP/1 requests.
+    pub(crate) header_case: HeaderCase,
+    pub(crate) version: Version,
     pub(crate) path_params: Vec<(String, String)>,
     pub(crate) identity: ClientIdentity,
     pub(crate) body: Bytes,
@@ -246,10 +275,18 @@ impl RequestContext {
         let Parts {
             method,
             uri,
-            headers,
+            version,
+            mut headers,
             mut extensions,
             ..
         } = parts;
+        if !headers.contains_key(header::HOST)
+            && let Some(authority) = uri.authority()
+            && let Ok(host) = HeaderValue::from_str(authority.as_str())
+        {
+            headers.insert(header::HOST, host);
+        }
+        let header_case = extensions.remove::<HeaderCase>().unwrap_or_default();
         let request_id = extensions
             .get::<RequestId>()
             .map_or_else(Uuid::now_v7, |id| id.0);
@@ -277,6 +314,8 @@ impl RequestContext {
             path: uri.path().to_owned(),
             query: QueryString::new(uri.query()),
             headers,
+            header_case,
+            version,
             path_params,
             identity,
             body: Bytes::new(),
@@ -299,6 +338,22 @@ impl RequestContext {
                 .copied()
                 .collect::<Vec<u8>>(),
         )
+    }
+
+    /// `$context.protocol`. REST APIs report `HTTP/1.1` even to HTTP/2 clients
+    /// (the REST `$context.protocol` documentation says so); HTTP APIs report
+    /// the client's version.
+    pub(crate) fn protocol(&self) -> &'static str {
+        if self.api.kind == ApiKind::Rest {
+            return "HTTP/1.1";
+        }
+        match self.version {
+            Version::HTTP_09 => "HTTP/0.9",
+            Version::HTTP_10 => "HTTP/1.0",
+            Version::HTTP_2 => "HTTP/2.0",
+            Version::HTTP_3 => "HTTP/3.0",
+            _ => "HTTP/1.1",
+        }
     }
 
     pub(crate) fn context_value(&self, path: &str) -> Option<String> {
@@ -352,7 +407,7 @@ impl RequestContext {
                 "userAgent": self.header_str("user-agent"),
             },
             "path": self.path,
-            "protocol": "HTTP/1.1",
+            "protocol": self.protocol(),
             "requestId": self.request_id.to_string(),
             "requestTime": self.request_time(),
             "requestTimeEpoch": self.received.as_millisecond(),
@@ -376,6 +431,12 @@ impl RequestContext {
         }
         if let Some(ref error) = self.integration.error {
             integration.insert("error", json!(error));
+        }
+        if let Some(mode) = self.integration.transfer_mode {
+            integration.insert("responseTransferMode", json!(mode.context_name()));
+        }
+        if let Some(time) = self.integration.time_to_all_headers_ms {
+            integration.insert("timeToAllHeaders", json!(time));
         }
         if let Value::Object(ref mut fields) = context {
             fields.insert("integration".to_owned(), json!(integration));
@@ -417,6 +478,8 @@ pub(crate) mod tests {
             path: "/pets/7".to_owned(),
             query: QueryString::new(Some("q=1&q=2")),
             headers,
+            header_case: HeaderCase::default(),
+            version: Version::HTTP_11,
             path_params: vec![("petId".to_owned(), "7".to_owned())],
             identity,
             body: Bytes::new(),
@@ -459,6 +522,8 @@ pub(crate) mod tests {
             status: Some(200),
             latency_ms: Some(12),
             error: None,
+            transfer_mode: Some(ResponseTransferMode::Stream),
+            time_to_all_headers_ms: Some(5),
         };
         request.authorizer = AuthorizerContext::lambda(Map::from_iter([
             ("principalId".to_owned(), json!("user-1")),
@@ -475,8 +540,30 @@ pub(crate) mod tests {
         assert_eq!(vars["requestTime"], "14/Nov/2023:22:13:20 +0000");
         assert_eq!(vars["requestTimeEpoch"], 1_700_000_000_000_i64);
         assert_eq!(vars["integration"]["status"], 200);
+        assert_eq!(vars["integration"]["responseTransferMode"], "STREAMED");
+        assert_eq!(vars["integration"]["timeToAllHeaders"], 5);
         assert_eq!(vars["authorizer"]["principalId"], "user-1");
         assert!(vars["integration"].get("error").is_none());
+    }
+
+    #[test]
+    fn protocol_follows_the_client_for_http_apis_only() {
+        let mut http = request(ApiKind::Http);
+        let mut rest = request(ApiKind::Rest);
+        for (version, expected) in [
+            (Version::HTTP_10, "HTTP/1.0"),
+            (Version::HTTP_11, "HTTP/1.1"),
+            (Version::HTTP_2, "HTTP/2.0"),
+        ] {
+            http.version = version;
+            rest.version = version;
+            assert_eq!(http.protocol(), expected);
+            assert_eq!(
+                rest.protocol(),
+                "HTTP/1.1",
+                "REST reports HTTP/1.1 for every client"
+            );
+        }
     }
 
     #[test]

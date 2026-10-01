@@ -580,6 +580,12 @@ mod tests {
                 "Request Entity Too Large",
             ),
             (
+                GatewayError::MalformedStreamingResponse,
+                ApiKind::Rest,
+                500,
+                "Internal server error",
+            ),
+            (
                 GatewayError::UnsupportedIntegration,
                 ApiKind::Rest,
                 501,

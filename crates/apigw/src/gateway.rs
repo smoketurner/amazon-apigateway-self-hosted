@@ -10,8 +10,10 @@ use axum::http::{HeaderName, StatusCode};
 use axum::response::Response;
 use uuid::Uuid;
 
+use crate::authz::KeyStore;
 use crate::aws::AwsClients;
 use crate::canary::Release;
+use crate::cors::Cors;
 use crate::gateway_response::{Failure, GatewayResponses};
 use crate::integration::StageVariables;
 use crate::model::{ApiKind, Protection, ResponseType};
@@ -147,10 +149,12 @@ pub(crate) struct ApiContext {
     pub(crate) stage_variables: Arc<StageVariables>,
     pub(crate) enforcement: Enforcement,
     pub(crate) responses: GatewayResponses,
+    pub(crate) cors: Option<Cors>,
     pub(crate) state: Arc<StateBackend>,
     pub(crate) replicas: NonZeroU32,
     pub(crate) http: reqwest::Client,
     pub(crate) aws: Arc<AwsClients>,
+    pub(crate) keys: Arc<KeyStore>,
     pub(crate) observer: StageObserver,
     /// Which release of a canary stage this context serves; `None` when the
     /// stage has no canary.
@@ -168,7 +172,15 @@ impl ApiContext {
     pub(crate) fn reject_unrouted(&self, request: Request) -> Response {
         let (parts, _) = request.into_parts();
         let context = RequestContext::new(self, None, parts, Vec::new());
-        self.respond(&context, &GatewayError::NoRoute.failure(self.kind))
+        let Some(ref cors) = self.cors else {
+            return self.respond(&context, &GatewayError::NoRoute.failure(self.kind));
+        };
+        if Cors::is_preflight(&context) {
+            return cors.preflight(&context);
+        }
+        let mut response = self.respond(&context, &GatewayError::NoRoute.failure(self.kind));
+        cors.decorate(&context, &mut response);
+        response
     }
 }
 
@@ -192,6 +204,9 @@ pub(crate) enum GatewayError {
     RequestTooLarge,
     /// An integration this gateway can't execute yet.
     UnsupportedIntegration,
+    /// A streaming integration's output doesn't follow the response streaming
+    /// format; API Gateway answers `500`.
+    MalformedStreamingResponse,
 }
 
 impl GatewayError {
@@ -221,6 +236,7 @@ impl GatewayError {
             (Self::RequestTooLarge, ApiKind::Http) => {
                 Failure::new(ResponseType::RequestTooLarge).with_message("Request Entity Too Large")
             }
+            (Self::MalformedStreamingResponse, _) => Failure::new(ResponseType::Default5xx),
             (Self::UnsupportedIntegration, _) => Failure::gateway(
                 StatusCode::NOT_IMPLEMENTED,
                 "Integration not supported by this gateway",

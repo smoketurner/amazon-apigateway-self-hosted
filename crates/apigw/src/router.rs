@@ -20,6 +20,7 @@ use crate::aws::{AwsClients, RoleArn, RoleStatus};
 use crate::canary::{CanaryRelease, CanarySummary};
 use crate::domain::{DomainName, DomainRegistry, DomainSummary, Resolution};
 use crate::gateway::{ApiContext, Enforcement, RequestId};
+use crate::http_routes::{HttpRoutes, PathPattern};
 use crate::integration::Integration;
 use crate::model::{ApiKind, ApiModel, Feature, MethodMatch, Protections, RouteKey, RoutePath};
 use crate::pipeline::Pipeline;
@@ -36,6 +37,28 @@ pub(crate) struct BasePath(Option<String>);
     "base path {0:?} must start with '/', must not end with '/', and must not contain '{{' or '}}'"
 )]
 pub(crate) struct InvalidBasePath(String);
+
+impl BasePath {
+    /// Serves `router` under this prefix; requests outside it are answered as
+    /// unrouted.
+    fn mount(&self, router: Router, ctx: &Arc<ApiContext>) -> Router {
+        let Some(ref prefix) = self.0 else {
+            return router;
+        };
+        let ctx = Arc::clone(ctx);
+        Router::new()
+            .without_v07_checks()
+            .nest(prefix, router)
+            .fallback(move |mut request: Request| {
+                let ctx = Arc::clone(&ctx);
+                async move {
+                    let pending = ctx.observer.begin(&ctx, &mut request, None);
+                    let response = ctx.reject_unrouted(request);
+                    ctx.observer.finish(pending, response)
+                }
+            })
+    }
+}
 
 impl std::str::FromStr for BasePath {
     type Err = InvalidBasePath;
@@ -160,6 +183,32 @@ impl PathRoutes {
     }
 }
 
+/// Serves an HTTP API: route selection is by path and method together, so
+/// the router has no per-path entries ([`HttpRoutes`]).
+struct HttpHandler {
+    ctx: Arc<ApiContext>,
+    routes: HttpRoutes,
+}
+
+impl HttpHandler {
+    async fn handle(&self, mut request: Request) -> Response {
+        let selection = self.routes.select(request.uri().path(), request.method());
+        let pending =
+            self.ctx
+                .observer
+                .begin(&self.ctx, &mut request, selection.as_ref().map(|s| s.route));
+        let response = match selection {
+            Some(selection) => {
+                let pipeline =
+                    Pipeline::new(&self.ctx, selection.route).with_path_params(selection.params);
+                Box::pin(pipeline.run(request)).await
+            }
+            None => self.ctx.reject_unrouted(request),
+        };
+        self.ctx.observer.finish(pending, response)
+    }
+}
+
 /// API Gateway's `{name}` and greedy `{name+}` become axum's `{name}` and `{*name}`.
 fn axum_path(path: &str) -> Result<String, String> {
     if !path.starts_with('/') {
@@ -235,6 +284,7 @@ pub(crate) fn build(
     // checks for 0.7-style syntax would reject with a panic.
     let mut matcher = matchit::Router::new();
     let mut router = Router::new().without_v07_checks();
+    let mut http_routes = HttpRoutes::default();
     for (path, methods) in by_path {
         if let Err(err) = matcher.insert(path.as_str(), ()) {
             tracing::error!(path, %err, "route conflicts with another route; skipping it");
@@ -242,6 +292,14 @@ pub(crate) fn build(
                 if methods.values().any(|r| r.key == summary.route_key) {
                     summary.problems.push(format!("not served: {err}"));
                 }
+            }
+            continue;
+        }
+        if model.kind == ApiKind::Http {
+            if let Some(pattern) = PathPattern::parse(&path) {
+                http_routes.insert(pattern, methods);
+            } else {
+                tracing::error!(path, "route path is not a valid pattern; skipping it");
             }
             continue;
         }
@@ -259,33 +317,30 @@ pub(crate) fn build(
         );
     }
 
-    let fallback = Arc::new(PathRoutes {
-        ctx: Arc::clone(ctx),
-        methods: BTreeMap::new(),
-        default,
-    });
-    let router = router.fallback(move |request: Request| {
-        let fallback = Arc::clone(&fallback);
-        async move { fallback.handle(request).await }
-    });
-    let router = match base.0 {
-        Some(ref prefix) => {
-            let ctx = Arc::clone(ctx);
-            Router::new()
-                .without_v07_checks()
-                .nest(prefix, router)
-                .fallback(move |mut request: Request| {
-                    let ctx = Arc::clone(&ctx);
-                    async move {
-                        let pending = ctx.observer.begin(&ctx, &mut request, None);
-                        let response = ctx.reject_unrouted(request);
-                        ctx.observer.finish(pending, response)
-                    }
-                })
+    let router = if model.kind == ApiKind::Http {
+        if let Some(default) = default {
+            http_routes.set_default(default);
         }
-        None => router,
+        let handler = Arc::new(HttpHandler {
+            ctx: Arc::clone(ctx),
+            routes: http_routes,
+        });
+        router.fallback(move |request: Request| {
+            let handler = Arc::clone(&handler);
+            async move { handler.handle(request).await }
+        })
+    } else {
+        let fallback = Arc::new(PathRoutes {
+            ctx: Arc::clone(ctx),
+            methods: BTreeMap::new(),
+            default,
+        });
+        router.fallback(move |request: Request| {
+            let fallback = Arc::clone(&fallback);
+            async move { fallback.handle(request).await }
+        })
     };
-    (router, summaries)
+    (base.mount(router, ctx), summaries)
 }
 
 /// Serves every request through whichever [`Loaded`] router is current, so a
@@ -463,7 +518,9 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::authz::KeyStore;
     use crate::aws::{CredentialsMode, LambdaEndpoints};
+    use crate::cors::Cors;
     use crate::gateway::{AuthorizationMode, Unsupported};
     use crate::gateway_response::GatewayResponses;
     use crate::model::{IntegrationOverrides, Protection, StageSettings};
@@ -500,6 +557,7 @@ mod tests {
         kind: ApiKind,
         enforcement: Enforcement,
         responses: GatewayResponses,
+        cors: Option<Cors>,
     ) -> Arc<ApiContext> {
         Arc::new(ApiContext {
             kind,
@@ -507,11 +565,13 @@ mod tests {
             stage: None,
             stage_variables: Arc::default(),
             responses,
+            cors,
             state: test_state(),
             replicas: NonZeroU32::MIN,
             enforcement,
             http: reqwest::Client::new(),
             aws: aws(),
+            keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
             observer: StageObserver::disabled(),
             release: None,
         })
@@ -559,9 +619,10 @@ mod tests {
     ) -> (Router, Vec<RouteSummary>) {
         let model = ApiModel::import(doc, kind, stage, &IntegrationOverrides::default()).unwrap();
         let responses = GatewayResponses::compile(kind, &model.gateway_responses);
+        let cors = model.settings.cors.as_ref().map(Cors::compile);
         build(
             &model,
-            &ctx(kind, enforcement, responses),
+            &ctx(kind, enforcement, responses, cors),
             &base.parse().unwrap(),
         )
     }
@@ -700,6 +761,181 @@ mod tests {
             call(&rest, Method::GET, "/key").await.0,
             StatusCode::FORBIDDEN
         );
+    }
+
+    fn cors_doc() -> Value {
+        json!({
+            "x-amazon-apigateway-cors": {
+                "allowOrigins": ["https://app.example"],
+                "allowMethods": ["GET", "POST"],
+                "allowHeaders": ["authorization"],
+                "exposeHeaders": ["x-id"],
+                "maxAge": 300
+            },
+            "components": {"securitySchemes": {
+                "sigv4": {"type": "apiKey", "name": "Authorization", "in": "header", "x-amazon-apigateway-authtype": "awsSigv4"}
+            }},
+            "paths": {
+                "/pets": {"get": {"x-amazon-apigateway-integration": mock(200)}},
+                "/iam": {"options": {"security": [{"sigv4": []}], "x-amazon-apigateway-integration": mock(200)}},
+                "/opts": {"options": {"x-amazon-apigateway-integration": mock(418)}}
+            }
+        })
+    }
+
+    async fn call_with(
+        router: &Router,
+        method: Method,
+        uri: &str,
+        headers: &[(&str, &str)],
+    ) -> Reply {
+        let mut builder = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let response = router
+            .clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let (parts, body) = response.into_parts();
+        let body = axum::body::to_bytes(body, 1 << 20).await.unwrap();
+        Reply {
+            status: parts.status,
+            headers: parts.headers,
+            body: String::from_utf8(body.to_vec()).unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn http_api_cors_preflight_is_answered_without_the_integration() {
+        let (http, _) = router_with(&cors_doc(), ApiKind::Http, STRICT, "");
+        let preflight = [
+            ("origin", "https://app.example"),
+            ("access-control-request-method", "GET"),
+        ];
+        // A route with its own OPTIONS integration still gets the gateway's answer.
+        for path in ["/pets", "/opts", "/nowhere"] {
+            let reply = call_with(&http, Method::OPTIONS, path, &preflight).await;
+            assert_eq!(reply.status(), StatusCode::NO_CONTENT, "{path}");
+            assert_eq!(
+                reply.headers()["access-control-allow-origin"],
+                "https://app.example"
+            );
+            assert_eq!(reply.headers()["access-control-allow-methods"], "GET, POST");
+            assert_eq!(reply.headers()["access-control-max-age"], "300");
+        }
+        let blocked = call_with(
+            &http,
+            Method::OPTIONS,
+            "/pets",
+            &[
+                ("origin", "https://evil.example"),
+                ("access-control-request-method", "GET"),
+            ],
+        )
+        .await;
+        assert_eq!(blocked.status(), StatusCode::NO_CONTENT);
+        assert!(
+            blocked
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none()
+        );
+        // Without the preflight headers an OPTIONS request is an ordinary request.
+        let plain = call_with(
+            &http,
+            Method::OPTIONS,
+            "/opts",
+            &[("origin", "https://app.example")],
+        )
+        .await;
+        assert_eq!(plain.status(), StatusCode::IM_A_TEAPOT);
+    }
+
+    #[tokio::test]
+    async fn http_api_cors_preflight_follows_route_protections() {
+        let (http, _) = router_with(&cors_doc(), ApiKind::Http, STRICT, "");
+        let reply = call_with(
+            &http,
+            Method::OPTIONS,
+            "/iam",
+            &[
+                ("origin", "https://app.example"),
+                ("access-control-request-method", "GET"),
+            ],
+        )
+        .await;
+        assert_eq!(reply.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn http_api_cors_headers_are_added_to_responses() {
+        let (http, _) = router_with(&cors_doc(), ApiKind::Http, STRICT, "");
+        let reply = call_with(
+            &http,
+            Method::GET,
+            "/pets",
+            &[("origin", "https://app.example")],
+        )
+        .await;
+        assert_eq!(reply.status(), StatusCode::OK);
+        assert_eq!(
+            reply.headers()["access-control-allow-origin"],
+            "https://app.example"
+        );
+        assert_eq!(reply.headers()["access-control-expose-headers"], "x-id");
+        let other = call_with(
+            &http,
+            Method::GET,
+            "/pets",
+            &[("origin", "https://evil.example")],
+        )
+        .await;
+        assert!(other.headers().get("access-control-allow-origin").is_none());
+        let missing = call_with(
+            &http,
+            Method::GET,
+            "/nope",
+            &[("origin", "https://app.example")],
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            missing.headers()["access-control-allow-origin"],
+            "https://app.example"
+        );
+        let (no_cors, _) = router_with(&sample(), ApiKind::Http, STRICT, "");
+        let reply = call_with(
+            &no_cors,
+            Method::GET,
+            "/pets",
+            &[("origin", "https://app.example")],
+        )
+        .await;
+        assert!(reply.headers().get("access-control-allow-origin").is_none());
+    }
+
+    #[tokio::test]
+    async fn http_routes_fall_back_to_a_less_specific_route_that_serves_the_method() {
+        let doc = json!({"paths": {
+            "/pets/dog/1": {"get": {"x-amazon-apigateway-integration": mock(201)}},
+            "/pets/dog/{id}": {"get": {"x-amazon-apigateway-integration": mock(203)}},
+            "/pets/{proxy+}": {"get": {"x-amazon-apigateway-integration": mock(204)}},
+            "/{proxy+}": {"x-amazon-apigateway-any-method": {"x-amazon-apigateway-integration": mock(202)}},
+            "/$default": {"x-amazon-apigateway-any-method": {"x-amazon-apigateway-integration": mock(418)}}
+        }});
+        let (http, _) = router_with(&doc, ApiKind::Http, STRICT, "");
+        let status = |method, path| {
+            let http = http.clone();
+            async move { call(&http, method, path).await.0.as_u16() }
+        };
+        assert_eq!(status(Method::GET, "/pets/dog/1").await, 201);
+        assert_eq!(status(Method::GET, "/pets/dog/2").await, 203);
+        assert_eq!(status(Method::GET, "/pets/cat/1").await, 204);
+        assert_eq!(status(Method::POST, "/pets/dog/1").await, 202);
+        assert_eq!(status(Method::POST, "/test/5").await, 202);
+        assert_eq!(status(Method::GET, "/").await, 418);
     }
 
     #[tokio::test]
@@ -1141,11 +1377,13 @@ mod tests {
             stage: Some("prod".to_owned()),
             stage_variables: Arc::default(),
             responses: GatewayResponses::default(),
+            cors: None,
             state: test_state(),
             replicas: NonZeroU32::MIN,
             enforcement: STRICT,
             http: reqwest::Client::new(),
             aws,
+            keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
             observer: StageObserver::disabled(),
             release: None,
         });

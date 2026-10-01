@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use clap::{ArgGroup, Parser, ValueEnum};
 
+use crate::authz::IssuerEndpoint;
 use crate::aws::{CredentialsMode, LambdaEndpoint, LambdaEndpoints};
 use crate::domain::DomainName;
 use crate::gateway::{AuthorizationMode, Enforcement, Unsupported};
@@ -67,7 +68,8 @@ pub(crate) struct Config {
     #[arg(long, env = "APIGW_CANARY_EXPORT_STAGE", requires = "rest_api_id")]
     pub(crate) canary_export_stage: Option<String>,
 
-    /// Stage to export, and to read stage variables from.
+    /// Stage to export, and to read stage variables from. With --openapi-file it
+    /// only names the stage for `$context.stage`.
     #[arg(long, env = "APIGW_STAGE")]
     pub(crate) stage: Option<String>,
 
@@ -116,6 +118,19 @@ pub(crate) struct Config {
         value_delimiter = ','
     )]
     pub(crate) lambda_endpoints: Vec<LambdaEndpoint>,
+
+    /// Fetch the signing keys of a token issuer from URL instead of from the
+    /// issuer (repeatable; `ISSUER` is the issuer string tokens carry as `iss`).
+    /// For an in-cluster mirror of an identity provider; the keys are read from
+    /// `URL/.well-known/openid-configuration` (JWT authorizers) or
+    /// `URL/.well-known/jwks.json` (Cognito user pools). Use `https` URLs.
+    #[arg(
+        long = "issuer-endpoint",
+        value_name = "ISSUER=URL",
+        env = "APIGW_ISSUER_ENDPOINTS",
+        value_delimiter = ','
+    )]
+    pub(crate) issuer_endpoints: Vec<IssuerEndpoint>,
 
     /// What to do with routes under a resource policy, which this gateway does
     /// not evaluate yet: `reject` answers 403, `ignore` serves them unrestricted.
@@ -247,6 +262,7 @@ impl Config {
             (None, None, path) => Source::File {
                 path: path.clone().unwrap_or_default(),
                 kind: self.api_type,
+                stage: self.stage.clone(),
             },
         }
     }

@@ -102,6 +102,7 @@ impl ApigwProcess {
             .arg("--openapi-file")
             .arg(scratch.join("export.json"))
             .args(["--api-type", api.api_type()])
+            .args(["--stage", &export.stage])
             .arg("--base-path")
             .arg(format!("/{}", export.stage))
             .arg("--tls-cert")
