@@ -10,7 +10,7 @@ use aws_sdk_cloudwatchlogs::config::{Credentials, SharedCredentialsProvider};
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse as _, Response};
 use serde_json::Value;
 
@@ -74,18 +74,23 @@ impl Shared {
         }
         let body = match target {
             "Firehose_20150804.PutRecordBatch" => r#"{"FailedPutCount":0,"RequestResponses":[]}"#,
+            "/TraceSegments" => r#"{"UnprocessedTraceSegments":[]}"#,
             _ => "{}",
         };
         Reply::json(body)
     }
 }
 
-async fn handle(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn handle(
+    State(shared): State<Arc<Shared>>,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let target = headers
         .get("x-amz-target")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or_default()
-        .to_owned();
+        .map_or_else(|| uri.path().to_owned(), str::to_owned);
     let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
     shared
         .calls
@@ -140,6 +145,10 @@ impl MockAws {
 
     pub(crate) fn cloudwatch_logs(&self) -> aws_sdk_cloudwatchlogs::Client {
         aws_sdk_cloudwatchlogs::Client::new(&self.sdk_config())
+    }
+
+    pub(crate) fn xray(&self) -> aws_sdk_xray::Client {
+        aws_sdk_xray::Client::new(&self.sdk_config())
     }
 
     pub(crate) fn firehose(&self) -> aws_sdk_firehose::Client {

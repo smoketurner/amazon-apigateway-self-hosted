@@ -30,6 +30,7 @@ absolute-paths-allowed-crates = [
     "aws_sdk_cloudwatchlogs",
     "aws_sdk_firehose",
     "aws_sdk_lambda",
+    "aws_sdk_xray",
     "axum",
     "base64",
     "clap",

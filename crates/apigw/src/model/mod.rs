@@ -563,7 +563,6 @@ pub(crate) enum Feature {
     IntegrationTlsConfig,
     ParameterMapping,
     ResponseCaching,
-    Tracing,
     Canary,
 }
 
@@ -577,7 +576,6 @@ impl fmt::Display for Feature {
             Self::IntegrationTlsConfig => "integration TLS config",
             Self::ParameterMapping => "parameter mapping",
             Self::ResponseCaching => "response caching",
-            Self::Tracing => "tracing",
             Self::Canary => "canary",
         };
         f.write_str(name)

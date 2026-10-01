@@ -46,6 +46,8 @@ pub(crate) enum Destination {
         region: Option<String>,
         stream: String,
     },
+    /// X-Ray, which receives trace segment documents.
+    XRay { region: Option<String> },
     /// The process's standard output, one event per line.
     Stdout,
 }

@@ -18,6 +18,7 @@ use crate::gateway::{ApiContext, RequestId};
 use crate::identity::ClientIdentity;
 use crate::integration::StageVariables;
 use crate::model::{ApiKind, PayloadVersion, RouteKey};
+use crate::observability::Trace;
 use crate::route::Route;
 
 /// The API and stage a request was received on.
@@ -172,6 +173,8 @@ pub(crate) struct RequestContext {
     pub(crate) body: Bytes,
     pub(crate) authorizer: AuthorizerContext,
     pub(crate) stage_variables: Arc<StageVariables>,
+    /// This request's place in an X-Ray trace, when the stage traces.
+    pub(crate) trace: Option<Trace>,
     pub(crate) integration: IntegrationOutcome,
 }
 
@@ -222,6 +225,9 @@ impl RequestContext {
         if let Some(identity) = request.extensions().get::<ClientIdentity>() {
             snapshot.extensions_mut().insert(identity.clone());
         }
+        if let Some(trace) = request.extensions().get::<Trace>() {
+            snapshot.extensions_mut().insert(*trace);
+        }
         let (parts, ()) = snapshot.into_parts();
         Self::new(api, route, parts, Vec::new())
     }
@@ -244,6 +250,7 @@ impl RequestContext {
         let request_id = extensions
             .get::<RequestId>()
             .map_or_else(Uuid::now_v7, |id| id.0);
+        let trace = extensions.get::<Trace>().copied();
         let identity = extensions.remove::<ClientIdentity>().unwrap_or_else(|| {
             tracing::warn!("request reached the pipeline without a client identity");
             ClientIdentity::unknown()
@@ -271,6 +278,7 @@ impl RequestContext {
             body: Bytes::new(),
             authorizer: AuthorizerContext::default(),
             stage_variables: Arc::clone(&api.stage_variables),
+            trace,
             integration: IntegrationOutcome::default(),
         }
     }
@@ -349,6 +357,9 @@ impl RequestContext {
             "stage": self.api.stage_name(),
             "authorizer": Value::Object(self.authorizer.values().clone()),
         });
+        if let (Value::Object(fields), Some(trace)) = (&mut context, self.trace) {
+            fields.insert("xrayTraceId".to_owned(), json!(trace.id().to_string()));
+        }
         let mut integration = BTreeMap::new();
         if let Some(status) = self.integration.status {
             integration.insert("status", json!(status));
@@ -402,6 +413,7 @@ pub(crate) mod tests {
             identity,
             body: Bytes::new(),
             authorizer: AuthorizerContext::default(),
+            trace: None,
             stage_variables: Arc::default(),
             integration: IntegrationOutcome::default(),
         }
