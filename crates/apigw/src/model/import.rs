@@ -446,7 +446,12 @@ impl ApiModel {
                     raw,
                 };
                 let security = document.security_requirements(kind, &source.raw);
-                let validator = document.validator(&source.raw);
+                // HTTP APIs have no request validators; whatever an export or a hand-written
+                // file says, they never validate.
+                let validator = match kind {
+                    ApiKind::Rest => document.validator(&source.raw),
+                    ApiKind::Http => None,
+                };
                 operations.push(Operation {
                     method,
                     path: route_path.clone(),
@@ -617,13 +622,36 @@ mod tests {
     }
 
     #[test]
+    fn http_apis_never_validate_requests() {
+        let doc = json!({
+            "x-amazon-apigateway-request-validators": {"all": {"validateRequestBody": true, "validateRequestParameters": true}},
+            "x-amazon-apigateway-request-validator": "all",
+            "paths": {"/a": {"get": {
+                "x-amazon-apigateway-request-validator": "all",
+                "x-amazon-apigateway-integration": {"type": "mock"}
+            }}}
+        });
+        let rest = import(&doc, ApiKind::Rest);
+        let http = import(&doc, ApiKind::Http);
+        let protections = |model: &ApiModel| {
+            model
+                .operations
+                .iter()
+                .any(|o| o.protections.contains(Protection::RequestValidation))
+        };
+        assert!(protections(&rest));
+        assert!(!protections(&http));
+        assert!(http.operations.iter().all(|o| o.validator.is_none()));
+    }
+
+    #[test]
     fn http_export_extensions_are_imported() {
         let doc: Value = serde_json::from_str(HTTP_EXPORT).unwrap();
         let model = import(&doc, ApiKind::Http);
         let cors = model.settings.cors.as_ref().unwrap();
         assert_eq!(cors.allow_origins, vec!["https://example.com".to_owned()]);
         assert_eq!(cors.max_age, Some(300));
-        assert_eq!(model.unenforced(), vec![Feature::Cors]);
+        assert!(model.unenforced().is_empty());
 
         let ops = by_path(&model);
         let orders = ops["/orders"];
@@ -636,10 +664,7 @@ mod tests {
             vec!["orders:write".to_owned()]
         );
         let items = ops["/items/{id}"];
-        assert_eq!(
-            items.unenforced(ApiKind::Http),
-            vec![Feature::ParameterMapping]
-        );
+        assert!(items.unenforced().is_empty());
         assert!(
             items.protections.contains(Protection::Authorizer),
             "document-level security applies"

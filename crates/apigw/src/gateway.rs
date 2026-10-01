@@ -10,8 +10,10 @@ use axum::http::{HeaderName, Method, StatusCode};
 use axum::response::Response;
 use uuid::Uuid;
 
+use crate::authz::KeyStore;
 use crate::aws::AwsClients;
 use crate::canary::Release;
+use crate::cors::Cors;
 use crate::gateway_response::{Failure, GatewayResponses};
 use crate::integration::StageVariables;
 use crate::limits::LimitExceeded;
@@ -20,6 +22,7 @@ use crate::observability::StageObserver;
 use crate::pipeline::RequestContext;
 use crate::route::Route;
 use crate::state::StateBackend;
+use crate::vpc_link::VpcLinks;
 
 /// API Gateway's maximum payload size.
 pub(crate) const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
@@ -148,10 +151,13 @@ pub(crate) struct ApiContext {
     pub(crate) stage_variables: Arc<StageVariables>,
     pub(crate) enforcement: Enforcement,
     pub(crate) responses: GatewayResponses,
+    pub(crate) cors: Option<Cors>,
     pub(crate) state: Arc<StateBackend>,
     pub(crate) replicas: NonZeroU32,
+    pub(crate) vpc_links: VpcLinks,
     pub(crate) http: reqwest::Client,
     pub(crate) aws: Arc<AwsClients>,
+    pub(crate) keys: Arc<KeyStore>,
     pub(crate) observer: StageObserver,
     /// Which release of a canary stage this context serves; `None` when the
     /// stage has no canary.
@@ -169,7 +175,15 @@ impl ApiContext {
     pub(crate) fn reject(&self, request: Request, error: GatewayError) -> Response {
         let (parts, _) = request.into_parts();
         let context = RequestContext::new(self, None, parts, Vec::new());
-        self.respond(&context, &error.failure(self.kind))
+        let Some(ref cors) = self.cors else {
+            return self.respond(&context, &error.failure(self.kind));
+        };
+        if Cors::is_preflight(&context) {
+            return cors.preflight(&context);
+        }
+        let mut response = self.respond(&context, &error.failure(self.kind));
+        cors.decorate(&context, &mut response);
+        response
     }
 }
 

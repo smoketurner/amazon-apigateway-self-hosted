@@ -7,16 +7,24 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
+use axum::Router;
 use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+use crate::authz::KeyStore;
 use crate::aws::AwsClients;
+#[cfg(test)]
+use crate::aws::{CredentialsMode, LambdaEndpoints};
 use crate::canary::{CanaryRelease, CanaryStructure, CanarySummary, Release, TrafficShare};
 use crate::config::Config;
+use crate::cors::Cors;
+use crate::domain::{DomainRegistry, DomainSupervisor};
 use crate::gateway::{ApiContext, Enforcement};
+#[cfg(test)]
+use crate::gateway::{AuthorizationMode, Unsupported};
 use crate::gateway_response::GatewayResponses;
 use crate::integration::StageVariables;
 use crate::integration_tls;
@@ -24,27 +32,61 @@ use crate::listener::{self, ConnLimits, Edge, Tls};
 use crate::model::{ApiModel, Feature, IntegrationOverrides, StageSettings};
 use crate::observability::{Observability, StageObserver};
 use crate::router::{self, BasePath, LoadSummary, Loaded, RouteSummary};
-use crate::source::{Fetch, Fetcher, Snapshot, SourceError};
-use crate::state::{InMemory, InMemoryLimits, StateBackend};
+use crate::source::{Fetch, Fetcher, Snapshot, Source, SourceError};
+use crate::state::StateBackend;
+use crate::vpc_link::VpcLinks;
 
 const CERT_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Everything a definition is built from besides the snapshot itself.
-struct Builder {
+#[derive(Clone)]
+pub(crate) struct Builder {
     base_path: BasePath,
     enforcement: Enforcement,
     stage_variable_overrides: BTreeMap<String, String>,
     overrides_path: Option<PathBuf>,
     http: reqwest::Client,
     aws: Arc<AwsClients>,
+    keys: Arc<KeyStore>,
     state: Arc<StateBackend>,
     replicas: NonZeroU32,
+    vpc_links: VpcLinks,
     observability: Arc<Observability>,
+}
+
+#[cfg(test)]
+impl Builder {
+    /// A builder with strict enforcement and no overrides or observability, for
+    /// tests that load APIs through it.
+    pub(crate) fn for_tests(sdk_config: aws_config::SdkConfig) -> Self {
+        Self {
+            observability: Observability::off(),
+            base_path: BasePath::default(),
+            enforcement: Enforcement {
+                authorization: AuthorizationMode::Enforce,
+                resource_policy: Unsupported::Reject,
+                request_validation: Unsupported::Reject,
+            },
+            stage_variable_overrides: BTreeMap::new(),
+            overrides_path: None,
+            state: StateBackend::in_memory(),
+            replicas: NonZeroU32::MIN,
+            http: reqwest::Client::new(),
+            aws: Arc::new(AwsClients::new(
+                sdk_config,
+                CredentialsMode::Assume,
+                LambdaEndpoints::default(),
+                reqwest::Client::new(),
+            )),
+            keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
+            vpc_links: VpcLinks::default(),
+        }
+    }
 }
 
 /// One release's router and what to report about it.
 struct BuiltRelease {
-    router: axum::Router,
+    router: Router,
     routes: Vec<RouteSummary>,
     unenforced: Vec<Feature>,
 }
@@ -92,11 +134,14 @@ impl Builder {
             stage: snapshot.stage.clone(),
             stage_variables: Arc::new(StageVariables::new(model.stage.variables.clone())),
             responses: GatewayResponses::compile(model.kind, &model.gateway_responses),
+            cors: model.settings.cors.as_ref().map(Cors::compile),
             state: Arc::clone(&self.state),
             replicas: self.replicas,
+            vpc_links: self.vpc_links.clone(),
             enforcement: self.enforcement,
             http: self.http.clone(),
             aws: Arc::clone(&self.aws),
+            keys: Arc::clone(&self.keys),
             observer: StageObserver::new(
                 &self.observability,
                 &model,
@@ -418,9 +463,130 @@ async fn shutdown_signal() {
     }
 }
 
+/// One API stage being served and kept current: its latest definition, and the
+/// task that refreshes it.
+pub(crate) struct ApiRuntime {
+    loaded: watch::Receiver<Arc<Loaded>>,
+    stop: CancellationToken,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl ApiRuntime {
+    /// Loads the API once (from `cache` when the source is unreachable) and,
+    /// when `interval` is set, refreshes it until `shutdown` is cancelled or
+    /// [`ApiRuntime::stop`] is called.
+    ///
+    /// # Errors
+    ///
+    /// When the definition cannot be loaded or built.
+    pub(crate) async fn start(
+        source: Source,
+        builder: Builder,
+        cache: Option<PathBuf>,
+        interval: Option<Duration>,
+        sdk_config: &aws_config::SdkConfig,
+        shutdown: &CancellationToken,
+    ) -> anyhow::Result<Self> {
+        let loader = Loader {
+            fetcher: Fetcher::new(source, sdk_config),
+            cache,
+        };
+        tracing::info!(source = ?loader.fetcher.source(), "loading API definition");
+        let snapshot = loader.initial().await?;
+        let inputs = Inputs {
+            snapshot,
+            overrides: builder.overrides().await?,
+        };
+        let loaded = builder.build(&inputs)?;
+        let (current, loaded) = watch::channel(Arc::new(loaded));
+        let stop = shutdown.child_token();
+        let task = interval.map(|interval| {
+            let refresher = Refresher {
+                loader,
+                builder,
+                inputs,
+                rejected: None,
+                backoff: Backoff::default(),
+            };
+            tokio::spawn(refresher.run(interval, current, stop.clone()))
+        });
+        Ok(Self { loaded, stop, task })
+    }
+
+    pub(crate) fn loaded(&self) -> watch::Receiver<Arc<Loaded>> {
+        self.loaded.clone()
+    }
+
+    /// Stops refreshing and waits for the refresh task to end.
+    pub(crate) async fn stop(self) {
+        self.stop.cancel();
+        if let Some(task) = self.task
+            && let Err(err) = task.await
+        {
+            tracing::error!(%err, "an API refresh task failed");
+        }
+    }
+}
+
+/// Loads what `config` says to serve (one API, or every API of the custom
+/// domains) and returns the routers for the API listener and the admin listener.
+/// Background tasks are added to `tasks`.
+async fn serve_apis(
+    config: &Config,
+    builder: Builder,
+    sdk_config: &aws_config::SdkConfig,
+    aws: &Arc<AwsClients>,
+    shutdown: &CancellationToken,
+    tasks: &mut JoinSet<()>,
+) -> anyhow::Result<(Router, Router)> {
+    if config.domain_names.is_empty() {
+        let runtime = ApiRuntime::start(
+            config.source(),
+            builder,
+            config.cache.clone(),
+            config.refresh_interval(),
+            sdk_config,
+            shutdown,
+        )
+        .await?;
+        let routes = runtime.loaded();
+        tasks.spawn(async move { runtime.stop().await });
+        return Ok((
+            router::dispatcher(routes.clone()),
+            router::admin(routes, Arc::clone(aws)),
+        ));
+    }
+    let mut registry = Vec::new();
+    for domain in &config.domain_names {
+        let supervisor = DomainSupervisor::new(
+            domain.clone(),
+            builder.clone(),
+            sdk_config,
+            config.refresh_interval(),
+            shutdown,
+        );
+        tracing::info!(%domain, "loading custom domain");
+        let (state, task) = supervisor
+            .start()
+            .await
+            .with_context(|| format!("failed to load custom domain {domain}"))?;
+        registry.push((domain.clone(), state));
+        tasks.spawn(async move {
+            if let Err(err) = task.await {
+                tracing::error!(%err, "a custom domain task failed");
+            }
+        });
+    }
+    let registry = DomainRegistry::new(registry);
+    Ok((
+        router::domain_dispatcher(registry.clone()),
+        router::admin_domains(registry, Arc::clone(aws)),
+    ))
+}
+
 pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
-    let tls = Tls::from_pem_files(&config.tls_cert, &config.tls_key)
-        .context("failed to load the TLS certificate")?;
+    let tls = Tls::with_domains(&config.tls_cert, &config.tls_key, &config.domain_certs())
+        .context("failed to load the TLS certificates")?;
     let sdk_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
     let http = integration_tls::client_builder()
         .build()
@@ -430,6 +596,13 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         config.integration_credentials,
         config.lambda_endpoints(),
         http.clone(),
+    ));
+    for endpoint in config.issuer_endpoints.iter().filter(|e| e.is_plaintext()) {
+        tracing::warn!(?endpoint, "token signing keys are fetched over plain HTTP");
+    }
+    let keys = Arc::new(KeyStore::new(
+        http.clone(),
+        config.issuer_endpoints.iter().cloned(),
     ));
     let observability = Observability::start(
         sdk_config.clone(),
@@ -442,29 +615,17 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         stage_variable_overrides: config.stage_variable_overrides(std::env::vars()),
         overrides_path: config.integration_overrides.clone(),
         aws: Arc::clone(&aws),
+        keys,
         http,
-        state: Arc::new(StateBackend::InMemory(InMemory::new(
-            InMemoryLimits::default(),
-        ))),
+        state: StateBackend::in_memory(),
         replicas: config.replicas,
+        vpc_links: config.vpc_links(),
     };
     builder.enforcement.warn_if_relaxed();
-    let loader = Loader {
-        fetcher: Fetcher::new(config.source(), &sdk_config),
-        cache: config.cache.clone(),
-    };
-    tracing::info!(source = ?loader.fetcher.source(), "loading API definition");
-
-    let snapshot = loader.initial().await?;
-    let inputs = Inputs {
-        snapshot,
-        overrides: builder.overrides().await?,
-    };
-    let loaded = builder.build(&inputs)?;
-    let (current, routes) = watch::channel(Arc::new(loaded));
-
     let shutdown = CancellationToken::new();
     let mut tasks = JoinSet::new();
+    let (app, admin_app) =
+        serve_apis(&config, builder, &sdk_config, &aws, &shutdown, &mut tasks).await?;
     let listener = TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("failed to bind {}", config.listen))?;
@@ -472,7 +633,7 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
     tasks.spawn(listener::serve(
         listener,
         tls.clone(),
-        router::dispatcher(routes.clone()),
+        app,
         ConnLimits::DEFAULT,
         config.max_connections,
         config.api_edge(),
@@ -486,7 +647,7 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         tasks.spawn(listener::serve(
             admin,
             tls.clone(),
-            router::admin(routes, Arc::clone(&aws)),
+            admin_app,
             ConnLimits::DEFAULT,
             config.max_connections,
             Edge::direct(),
@@ -494,16 +655,6 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         ));
     }
     tasks.spawn(tls.watch(CERT_POLL_INTERVAL, shutdown.clone()));
-    if let Some(interval) = config.refresh_interval() {
-        let refresher = Refresher {
-            loader,
-            builder,
-            inputs,
-            rejected: None,
-            backoff: Backoff::default(),
-        };
-        tasks.spawn(refresher.run(interval, current, shutdown.clone()));
-    }
 
     shutdown_signal().await;
     tracing::info!("shutting down; draining connections");
@@ -528,7 +679,7 @@ mod tests {
     use crate::aws::{CredentialsMode, LambdaEndpoints};
     use crate::gateway::{AuthorizationMode, Unsupported};
     use crate::model::{ApiKind, CanarySettings, DeploymentStamp, StageSettings};
-    use crate::source::{CanarySnapshot, Source};
+    use crate::source::CanarySnapshot;
 
     fn sdk_config() -> aws_config::SdkConfig {
         aws_config::SdkConfig::builder()
@@ -550,10 +701,9 @@ mod tests {
                 "local.internal".to_owned(),
             )]),
             overrides_path,
-            state: Arc::new(StateBackend::InMemory(InMemory::new(
-                InMemoryLimits::default(),
-            ))),
+            state: StateBackend::in_memory(),
             replicas: NonZeroU32::MIN,
+            vpc_links: VpcLinks::default(),
             http: reqwest::Client::new(),
             aws: Arc::new(AwsClients::new(
                 sdk_config(),
@@ -561,6 +711,7 @@ mod tests {
                 LambdaEndpoints::default(),
                 reqwest::Client::new(),
             )),
+            keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
         }
     }
 
@@ -593,6 +744,7 @@ mod tests {
                 Source::File {
                     path,
                     kind: ApiKind::Rest,
+                    stage: None,
                 },
                 &sdk_config(),
             ),
@@ -755,7 +907,7 @@ mod tests {
             tokio::spawn(refresher.run(Duration::from_millis(50), current, shutdown.clone()));
 
         let app = router::dispatcher(routes.clone());
-        let status = |app: axum::Router| async move {
+        let status = |app: Router| async move {
             use tower::ServiceExt as _;
             let request = axum::http::Request::builder()
                 .uri("/pets")

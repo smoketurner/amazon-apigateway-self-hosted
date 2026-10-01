@@ -1,4 +1,5 @@
 use super::*;
+use crate::pipeline::context::tests::request;
 
 fn pattern(expression: &str) -> TokenPattern {
     expression.parse().unwrap()
@@ -84,4 +85,52 @@ fn malformed_responses_are_configuration_errors() {
             String::from_utf8_lossy(bad)
         );
     }
+}
+
+fn authorizer(name: &str) -> LambdaAuthorizer {
+    let spec = AuthorizerSpec {
+        auth_type: Some("custom".to_owned()),
+        header_name: Some("Authorization".to_owned()),
+        config: json!({
+            "type": "token",
+            "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:auth/invocations",
+        }),
+    };
+    LambdaAuthorizer::compile(name, &spec, ApiKind::Rest, &StageVariables::default()).unwrap()
+}
+
+#[test]
+fn cache_keys_never_contain_the_credentials() {
+    let ctx = request(ApiKind::Rest);
+    let key = authorizer("auth").cache_key(&ctx, &["secret-token-value".to_owned()]);
+    assert!(
+        !key.as_str().contains("secret-token-value"),
+        "{}",
+        key.as_str()
+    );
+    assert!(
+        key.as_str().starts_with("authorizer:abc123:prod:auth:"),
+        "{}",
+        key.as_str()
+    );
+}
+
+#[test]
+fn cache_keys_separate_apis_stages_authorizers_and_identities() {
+    let ctx = request(ApiKind::Rest);
+    let identity = ["t".to_owned()];
+    let base = authorizer("auth").cache_key(&ctx, &identity);
+    assert_eq!(base, authorizer("auth").cache_key(&ctx, &identity));
+    assert_ne!(base, authorizer("other").cache_key(&ctx, &identity));
+    assert_ne!(base, authorizer("auth").cache_key(&ctx, &["u".to_owned()]));
+    assert_ne!(
+        base,
+        authorizer("auth").cache_key(&ctx, &["t".to_owned(), "u".to_owned()])
+    );
+    let mut other_stage = request(ApiKind::Rest);
+    other_stage.api.stage = Some("dev".to_owned());
+    assert_ne!(base, authorizer("auth").cache_key(&other_stage, &identity));
+    let mut other_api = request(ApiKind::Rest);
+    other_api.api.api_id = "zzz".to_owned();
+    assert_ne!(base, authorizer("auth").cache_key(&other_api, &identity));
 }

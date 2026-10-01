@@ -7,6 +7,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Cognito user pool authorizers (REST) and JWT authorizers (HTTP APIs) are evaluated. Tokens are
+  verified (RS256/RS384/RS512) against the issuer's published keys, fetched over HTTPS with a 1.5 s
+  timeout and 150 KB cap, cached for two hours, and refreshed at most every 30 s when a token names an
+  unknown key. Issuer, audience, expiry, and scopes are checked, and claims reach `$context.authorizer`.
+  `--issuer-endpoint` fetches an issuer's keys from a mirror instead.
 - REST header behavior from API Gateway's documented header table: request headers API Gateway
   drops never reach `HTTP_PROXY` backends or Lambda, backend and Lambda response headers are
   dropped or renamed to `X-Amzn-Remapped-*`, `X-HTTP-Method-Override` replaces the method before
@@ -78,6 +83,14 @@ All notable changes to this project are documented here. The format follows
   `{log group}/Canary` access and execution log groups and counted under `Stage` `{stage}/Canary`.
   `--canary-export-stage` names a stage holding the canary deployment, whose export builds the
   canary's routes; `/routes` reports the canary release.
+- Custom domains: `--domain-name` (repeatable, wildcards allowed) serves every API stage mapped to
+  a custom domain from one process. The `Host` picks the domain; the domain's routing mode picks
+  how: API mappings (single- and multi-level keys, longest prefix, the `(none)` mapping) and/or
+  routing rules (header and base path conditions, priorities, `stripBasePath`). The matched
+  prefix is removed from the path. REST and HTTP APIs can share a domain, each API refreshes
+  on its own, and `/ping` and `/sping` answer 200 as on API Gateway. `--domain-cert-dir` serves
+  each domain its own certificate by SNI, reloaded when the files change. `/routes` lists each
+  domain's mappings and APIs.
 - Log delivery uses bounded queues that drop (and count) events instead of slowing requests,
   and flushes everything on shutdown.
 - REST gateway responses: every error the gateway generates (missing authentication token,
@@ -110,8 +123,27 @@ All notable changes to this project are documented here. The format follows
 - A `StateBackend` (in-memory, bounded, with LRU eviction) holding token buckets, calendar-aligned
   day/week/month quota counters, and a TTL cache, for usage plans and response caching to use.
 
+- HTTP API CORS: preflight requests are answered with `204` from the configured CORS rules
+  without calling the integration (after the route's own protections), and allowed origins get
+  the CORS response headers; the backend's own CORS headers are dropped.
+- HTTP API parameter mapping for `HTTP_PROXY` integrations: `append:`, `overwrite:`, and
+  `remove:` for headers, query strings, and the path, and per-status response mappings
+  including `overwrite:statuscode`, with `$request.*`, `$response.*`, `$context.*`,
+  `$stageVariables.*`, and static sources.
+
+- `--vpc-link CONNECTION_ID=URL` (`APIGW_VPC_LINKS`, repeatable) serves `HTTP_PROXY`
+  integrations that use a VPC link from an in-cluster URL; REST routes send the integration
+  URI's host as the `Host` header, HTTP API routes send the request path (with the stage prefix
+  API Gateway adds). Routes whose link has no mapping still answer `501`, now naming the flag.
+
 ### Changed
 
+- HTTP API route selection takes the method into account: a route that matches the path but
+  not the method is skipped for a less specific route that serves it, as in API Gateway's
+  documented priorities. Previously such requests fell through to `$default`.
+- HTTP APIs never run request validation, even if a hand-written definition names a validator.
+- Lambda authorizer results are cached in the state backend under a SHA-256 hash of the identity
+  sources instead of in a private cache that held the caller's token.
 - An `HTTP_PROXY` backend that cannot be reached now answers REST clients 504 `Network error
   communicating with endpoint` (`INTEGRATION_FAILURE`) instead of 502; an invalid integration URI
   answers 500 (`API_CONFIGURATION_ERROR`).

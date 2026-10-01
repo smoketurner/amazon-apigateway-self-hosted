@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use axum::Router;
 use axum::extract::Request;
-use axum::http::{HeaderValue, Method};
+use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use serde::Serialize;
@@ -18,7 +18,9 @@ use uuid::Uuid;
 use crate::authz::Authorizers;
 use crate::aws::{AwsClients, RoleArn, RoleStatus};
 use crate::canary::{CanaryRelease, CanarySummary};
+use crate::domain::{DomainName, DomainRegistry, DomainSummary, Resolution};
 use crate::gateway::{ApiContext, Enforcement, GatewayError, RequestId};
+use crate::http_routes::{HttpRoutes, PathPattern};
 use crate::integration::Integration;
 use crate::model::{ApiKind, ApiModel, Feature, MethodMatch, Protections, RouteKey, RoutePath};
 use crate::pipeline::Pipeline;
@@ -35,6 +37,28 @@ pub(crate) struct BasePath(Option<String>);
     "base path {0:?} must start with '/', must not end with '/', and must not contain '{{' or '}}'"
 )]
 pub(crate) struct InvalidBasePath(String);
+
+impl BasePath {
+    /// Serves `router` under this prefix; requests outside it are answered as
+    /// unrouted.
+    fn mount(&self, router: Router, ctx: &Arc<ApiContext>) -> Router {
+        let Some(ref prefix) = self.0 else {
+            return router;
+        };
+        let ctx = Arc::clone(ctx);
+        Router::new()
+            .without_v07_checks()
+            .nest(prefix, router)
+            .fallback(move |mut request: Request| {
+                let ctx = Arc::clone(&ctx);
+                async move {
+                    let pending = ctx.observer.begin(&ctx, &mut request, None);
+                    let response = ctx.reject(request, GatewayError::NoRoute);
+                    ctx.observer.finish(pending, response)
+                }
+            })
+    }
+}
 
 impl std::str::FromStr for BasePath {
     type Err = InvalidBasePath;
@@ -161,6 +185,33 @@ impl PathRoutes {
     }
 }
 
+/// Serves an HTTP API: route selection is by path and method together, so
+/// the router has no per-path entries ([`HttpRoutes`]).
+struct HttpHandler {
+    ctx: Arc<ApiContext>,
+    routes: HttpRoutes,
+}
+
+impl HttpHandler {
+    async fn handle(&self, mut request: Request) -> Response {
+        let selection = self.routes.select(request.uri().path(), request.method());
+        let pending =
+            self.ctx
+                .observer
+                .begin(&self.ctx, &mut request, selection.as_ref().map(|s| s.route));
+        let response = match (self.ctx.kind.request_limits().check(&request), selection) {
+            (Err(exceeded), _) => self.ctx.reject(request, exceeded.into()),
+            (Ok(()), Some(selection)) => {
+                let pipeline =
+                    Pipeline::new(&self.ctx, selection.route).with_path_params(selection.params);
+                Box::pin(pipeline.run(request)).await
+            }
+            (Ok(()), None) => self.ctx.reject(request, GatewayError::NoRoute),
+        };
+        self.ctx.observer.finish(pending, response)
+    }
+}
+
 /// API Gateway's `{name}` and greedy `{name+}` become axum's `{name}` and `{*name}`.
 fn axum_path(path: &str) -> Result<String, String> {
     if !path.starts_with('/') {
@@ -207,6 +258,7 @@ pub(crate) fn build(
                 &ctx.stage_variables,
                 &authorizers,
                 &throttling,
+                &ctx.vpc_links,
             )
         })
         .collect();
@@ -236,6 +288,7 @@ pub(crate) fn build(
     // checks for 0.7-style syntax would reject with a panic.
     let mut matcher = matchit::Router::new();
     let mut router = Router::new().without_v07_checks();
+    let mut http_routes = HttpRoutes::default();
     for (path, methods) in by_path {
         if let Err(err) = matcher.insert(path.as_str(), ()) {
             tracing::error!(path, %err, "route conflicts with another route; skipping it");
@@ -243,6 +296,14 @@ pub(crate) fn build(
                 if methods.values().any(|r| r.key == summary.route_key) {
                     summary.problems.push(format!("not served: {err}"));
                 }
+            }
+            continue;
+        }
+        if model.kind == ApiKind::Http {
+            if let Some(pattern) = PathPattern::parse(&path) {
+                http_routes.insert(pattern, methods);
+            } else {
+                tracing::error!(path, "route path is not a valid pattern; skipping it");
             }
             continue;
         }
@@ -260,67 +321,144 @@ pub(crate) fn build(
         );
     }
 
-    let fallback = Arc::new(PathRoutes {
-        ctx: Arc::clone(ctx),
-        methods: BTreeMap::new(),
-        default,
-    });
-    let router = router.fallback(move |request: Request| {
-        let fallback = Arc::clone(&fallback);
-        async move { fallback.handle(request).await }
-    });
-    let router = match base.0 {
-        Some(ref prefix) => {
-            let ctx = Arc::clone(ctx);
-            Router::new()
-                .without_v07_checks()
-                .nest(prefix, router)
-                .fallback(move |mut request: Request| {
-                    let ctx = Arc::clone(&ctx);
-                    async move {
-                        let pending = ctx.observer.begin(&ctx, &mut request, None);
-                        let response = ctx.reject(request, GatewayError::NoRoute);
-                        ctx.observer.finish(pending, response)
-                    }
-                })
+    let router = if model.kind == ApiKind::Http {
+        if let Some(default) = default {
+            http_routes.set_default(default);
         }
-        None => router,
+        let handler = Arc::new(HttpHandler {
+            ctx: Arc::clone(ctx),
+            routes: http_routes,
+        });
+        router.fallback(move |request: Request| {
+            let handler = Arc::clone(&handler);
+            async move { handler.handle(request).await }
+        })
+    } else {
+        let fallback = Arc::new(PathRoutes {
+            ctx: Arc::clone(ctx),
+            methods: BTreeMap::new(),
+            default,
+        });
+        router.fallback(move |request: Request| {
+            let fallback = Arc::clone(&fallback);
+            async move { fallback.handle(request).await }
+        })
     };
-    (router, summaries)
+    (base.mount(router, ctx), summaries)
 }
 
 /// Serves every request through whichever [`Loaded`] router is current, so a
 /// refreshed definition takes effect without restarting the listener. Requests
 /// already in flight finish on the router they started with.
 pub(crate) fn dispatcher(current: watch::Receiver<Arc<Loaded>>) -> Router {
-    Router::new().fallback(move |mut request: Request| {
+    Router::new().fallback(move |request: Request| {
         let loaded = Arc::clone(&current.borrow());
-        async move {
-            let started = Instant::now();
-            let request_id = Uuid::now_v7();
-            request.extensions_mut().insert(RequestId(request_id));
-            let method = request.method().clone();
-            let path = request.uri().path().to_owned();
-            let mut response = loaded
-                .router_for_request()
-                .clone()
-                .oneshot(request)
-                .await
-                .into_response();
-            if let Ok(value) = HeaderValue::try_from(request_id.to_string()) {
-                response
-                    .headers_mut()
-                    .insert(loaded.kind.request_id_header(), value);
-            }
-            tracing::info!(
-                request_id = %request_id,
-                %method,
-                path,
-                status = response.status().as_u16(),
-                latency_ms = started.elapsed().as_millis(),
-                "request"
-            );
+        async move { loaded.serve(request).await }
+    })
+}
+
+impl Loaded {
+    /// Runs `request` through this definition: assigns the request ID, picks the
+    /// release, and logs the outcome.
+    async fn serve(&self, mut request: Request) -> Response {
+        let started = Instant::now();
+        let request_id = Uuid::now_v7();
+        request.extensions_mut().insert(RequestId(request_id));
+        let method = request.method().clone();
+        let path = request.uri().path().to_owned();
+        let mut response = self
+            .router_for_request()
+            .clone()
+            .oneshot(request)
+            .await
+            .into_response();
+        if let Ok(value) = HeaderValue::try_from(request_id.to_string()) {
             response
+                .headers_mut()
+                .insert(self.kind.request_id_header(), value);
+        }
+        tracing::info!(
+            request_id = %request_id,
+            %method,
+            path,
+            status = response.status().as_u16(),
+            latency_ms = started.elapsed().as_millis(),
+            "request"
+        );
+        response
+    }
+}
+
+/// What the domain dispatcher does to requests and how it refuses them.
+struct CustomDomain;
+
+impl CustomDomain {
+    /// API Gateway's `{"message": ...}` error body.
+    fn error(status: StatusCode, message: &'static str) -> Response {
+        (
+            status,
+            axum::Json(serde_json::json!({ "message": message })),
+        )
+            .into_response()
+    }
+
+    /// Replaces the path of `request`, keeping its query string.
+    fn rewrite_path(request: &mut Request, path: &str) -> Result<(), axum::http::uri::InvalidUri> {
+        let target = match request.uri().query() {
+            Some(query) => format!("{path}?{query}"),
+            None => path.to_owned(),
+        };
+        let mut parts = request.uri().clone().into_parts();
+        parts.path_and_query = Some(target.parse()?);
+        if let Ok(uri) = axum::http::Uri::from_parts(parts) {
+            *request.uri_mut() = uri;
+        }
+        Ok(())
+    }
+}
+
+/// Paths API Gateway reserves on every custom domain for its own health checks.
+const RESERVED_HEALTH_PATHS: [&str; 2] = ["/ping", "/sping"];
+
+/// Serves requests to custom domains: the `Host` header picks the domain, the
+/// domain's API mappings or routing rules pick the API stage, and the matched
+/// prefix is removed from the path before the stage's router sees the request.
+pub(crate) fn domain_dispatcher(domains: DomainRegistry) -> Router {
+    Router::new().fallback(move |mut request: Request| {
+        let domains = domains.clone();
+        async move {
+            let path = request.uri().path().to_owned();
+            if RESERVED_HEALTH_PATHS.contains(&path.as_str()) {
+                return (StatusCode::OK, "healthy").into_response();
+            }
+            let host = request
+                .headers()
+                .get(axum::http::header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .or_else(|| {
+                    request
+                        .uri()
+                        .authority()
+                        .map(axum::http::uri::Authority::as_str)
+                })
+                .map(DomainName::host_of)
+                .unwrap_or_default();
+            let Some(state) = domains.find(&host) else {
+                return CustomDomain::error(StatusCode::FORBIDDEN, "Forbidden");
+            };
+            match state.resolve(&path, request.headers()) {
+                Resolution::Matched(loaded, routed_path) => {
+                    if CustomDomain::rewrite_path(&mut request, &routed_path).is_err() {
+                        return CustomDomain::error(StatusCode::BAD_REQUEST, "Bad Request");
+                    }
+                    loaded.serve(request).await
+                }
+                Resolution::Unavailable(stage) => {
+                    tracing::warn!(%stage, host, "request for an API stage that has not loaded");
+                    CustomDomain::error(StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable")
+                }
+                Resolution::NoMatch => CustomDomain::error(StatusCode::FORBIDDEN, "Forbidden"),
+            }
         }
     })
 }
@@ -333,6 +471,30 @@ struct RoutesReport {
     #[serde(flatten)]
     summary: LoadSummary,
     credentials: BTreeMap<RoleArn, RoleStatus>,
+}
+
+/// The `/routes` document of a process serving custom domains.
+#[derive(Serialize)]
+struct DomainsReport {
+    domains: Vec<DomainSummary>,
+    credentials: BTreeMap<RoleArn, RoleStatus>,
+}
+
+/// Health and introspection routes for the admin listener of a process serving
+/// custom domains.
+pub(crate) fn admin_domains(domains: DomainRegistry, aws: Arc<AwsClients>) -> Router {
+    Router::new()
+        .route("/healthz", axum::routing::get(|| async { "ok" }))
+        .route(
+            "/routes",
+            axum::routing::get(move || {
+                let report = DomainsReport {
+                    domains: domains.summaries(),
+                    credentials: aws.role_status(),
+                };
+                async move { axum::Json(report) }
+            }),
+        )
 }
 
 /// Health and introspection routes for the admin listener.
@@ -360,13 +522,16 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::authz::KeyStore;
     use crate::aws::{CredentialsMode, LambdaEndpoints};
+    use crate::cors::Cors;
     use crate::gateway::{AuthorizationMode, Unsupported};
     use crate::gateway_response::GatewayResponses;
     use crate::model::{IntegrationOverrides, Protection, StageSettings};
     use crate::model::{MethodSettings, SettingsScope};
     use crate::observability::StageObserver;
     use crate::state::{InMemory, InMemoryLimits, StateBackend};
+    use crate::vpc_link::VpcLinks;
     use std::num::NonZeroU32;
 
     const STRICT: Enforcement = Enforcement {
@@ -397,6 +562,7 @@ mod tests {
         kind: ApiKind,
         enforcement: Enforcement,
         responses: GatewayResponses,
+        cors: Option<Cors>,
     ) -> Arc<ApiContext> {
         Arc::new(ApiContext {
             kind,
@@ -404,11 +570,14 @@ mod tests {
             stage: None,
             stage_variables: Arc::default(),
             responses,
+            cors,
             state: test_state(),
             replicas: NonZeroU32::MIN,
+            vpc_links: VpcLinks::default(),
             enforcement,
             http: reqwest::Client::new(),
             aws: aws(),
+            keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
             observer: StageObserver::disabled(),
             release: None,
         })
@@ -456,9 +625,10 @@ mod tests {
     ) -> (Router, Vec<RouteSummary>) {
         let model = ApiModel::import(doc, kind, stage, &IntegrationOverrides::default()).unwrap();
         let responses = GatewayResponses::compile(kind, &model.gateway_responses);
+        let cors = model.settings.cors.as_ref().map(Cors::compile);
         build(
             &model,
-            &ctx(kind, enforcement, responses),
+            &ctx(kind, enforcement, responses, cors),
             &base.parse().unwrap(),
         )
     }
@@ -597,6 +767,181 @@ mod tests {
             call(&rest, Method::GET, "/key").await.0,
             StatusCode::FORBIDDEN
         );
+    }
+
+    fn cors_doc() -> Value {
+        json!({
+            "x-amazon-apigateway-cors": {
+                "allowOrigins": ["https://app.example"],
+                "allowMethods": ["GET", "POST"],
+                "allowHeaders": ["authorization"],
+                "exposeHeaders": ["x-id"],
+                "maxAge": 300
+            },
+            "components": {"securitySchemes": {
+                "sigv4": {"type": "apiKey", "name": "Authorization", "in": "header", "x-amazon-apigateway-authtype": "awsSigv4"}
+            }},
+            "paths": {
+                "/pets": {"get": {"x-amazon-apigateway-integration": mock(200)}},
+                "/iam": {"options": {"security": [{"sigv4": []}], "x-amazon-apigateway-integration": mock(200)}},
+                "/opts": {"options": {"x-amazon-apigateway-integration": mock(418)}}
+            }
+        })
+    }
+
+    async fn call_with(
+        router: &Router,
+        method: Method,
+        uri: &str,
+        headers: &[(&str, &str)],
+    ) -> Reply {
+        let mut builder = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let response = router
+            .clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let (parts, body) = response.into_parts();
+        let body = axum::body::to_bytes(body, 1 << 20).await.unwrap();
+        Reply {
+            status: parts.status,
+            headers: parts.headers,
+            body: String::from_utf8(body.to_vec()).unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn http_api_cors_preflight_is_answered_without_the_integration() {
+        let (http, _) = router_with(&cors_doc(), ApiKind::Http, STRICT, "");
+        let preflight = [
+            ("origin", "https://app.example"),
+            ("access-control-request-method", "GET"),
+        ];
+        // A route with its own OPTIONS integration still gets the gateway's answer.
+        for path in ["/pets", "/opts", "/nowhere"] {
+            let reply = call_with(&http, Method::OPTIONS, path, &preflight).await;
+            assert_eq!(reply.status(), StatusCode::NO_CONTENT, "{path}");
+            assert_eq!(
+                reply.headers()["access-control-allow-origin"],
+                "https://app.example"
+            );
+            assert_eq!(reply.headers()["access-control-allow-methods"], "GET, POST");
+            assert_eq!(reply.headers()["access-control-max-age"], "300");
+        }
+        let blocked = call_with(
+            &http,
+            Method::OPTIONS,
+            "/pets",
+            &[
+                ("origin", "https://evil.example"),
+                ("access-control-request-method", "GET"),
+            ],
+        )
+        .await;
+        assert_eq!(blocked.status(), StatusCode::NO_CONTENT);
+        assert!(
+            blocked
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none()
+        );
+        // Without the preflight headers an OPTIONS request is an ordinary request.
+        let plain = call_with(
+            &http,
+            Method::OPTIONS,
+            "/opts",
+            &[("origin", "https://app.example")],
+        )
+        .await;
+        assert_eq!(plain.status(), StatusCode::IM_A_TEAPOT);
+    }
+
+    #[tokio::test]
+    async fn http_api_cors_preflight_follows_route_protections() {
+        let (http, _) = router_with(&cors_doc(), ApiKind::Http, STRICT, "");
+        let reply = call_with(
+            &http,
+            Method::OPTIONS,
+            "/iam",
+            &[
+                ("origin", "https://app.example"),
+                ("access-control-request-method", "GET"),
+            ],
+        )
+        .await;
+        assert_eq!(reply.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn http_api_cors_headers_are_added_to_responses() {
+        let (http, _) = router_with(&cors_doc(), ApiKind::Http, STRICT, "");
+        let reply = call_with(
+            &http,
+            Method::GET,
+            "/pets",
+            &[("origin", "https://app.example")],
+        )
+        .await;
+        assert_eq!(reply.status(), StatusCode::OK);
+        assert_eq!(
+            reply.headers()["access-control-allow-origin"],
+            "https://app.example"
+        );
+        assert_eq!(reply.headers()["access-control-expose-headers"], "x-id");
+        let other = call_with(
+            &http,
+            Method::GET,
+            "/pets",
+            &[("origin", "https://evil.example")],
+        )
+        .await;
+        assert!(other.headers().get("access-control-allow-origin").is_none());
+        let missing = call_with(
+            &http,
+            Method::GET,
+            "/nope",
+            &[("origin", "https://app.example")],
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            missing.headers()["access-control-allow-origin"],
+            "https://app.example"
+        );
+        let (no_cors, _) = router_with(&sample(), ApiKind::Http, STRICT, "");
+        let reply = call_with(
+            &no_cors,
+            Method::GET,
+            "/pets",
+            &[("origin", "https://app.example")],
+        )
+        .await;
+        assert!(reply.headers().get("access-control-allow-origin").is_none());
+    }
+
+    #[tokio::test]
+    async fn http_routes_fall_back_to_a_less_specific_route_that_serves_the_method() {
+        let doc = json!({"paths": {
+            "/pets/dog/1": {"get": {"x-amazon-apigateway-integration": mock(201)}},
+            "/pets/dog/{id}": {"get": {"x-amazon-apigateway-integration": mock(203)}},
+            "/pets/{proxy+}": {"get": {"x-amazon-apigateway-integration": mock(204)}},
+            "/{proxy+}": {"x-amazon-apigateway-any-method": {"x-amazon-apigateway-integration": mock(202)}},
+            "/$default": {"x-amazon-apigateway-any-method": {"x-amazon-apigateway-integration": mock(418)}}
+        }});
+        let (http, _) = router_with(&doc, ApiKind::Http, STRICT, "");
+        let status = |method, path| {
+            let http = http.clone();
+            async move { call(&http, method, path).await.0.as_u16() }
+        };
+        assert_eq!(status(Method::GET, "/pets/dog/1").await, 201);
+        assert_eq!(status(Method::GET, "/pets/dog/2").await, 203);
+        assert_eq!(status(Method::GET, "/pets/cat/1").await, 204);
+        assert_eq!(status(Method::POST, "/pets/dog/1").await, 202);
+        assert_eq!(status(Method::POST, "/test/5").await, 202);
+        assert_eq!(status(Method::GET, "/").await, 418);
     }
 
     #[tokio::test]
@@ -743,7 +1088,7 @@ mod tests {
         assert_eq!(call(&rest, Method::GET, "/open").await.0, StatusCode::OK);
     }
 
-    async fn call_with(
+    async fn status_with(
         router: &Router,
         method: Method,
         uri: &str,
@@ -761,44 +1106,44 @@ mod tests {
     async fn rest_apis_honor_method_override_and_enforce_request_limits() {
         let (rest, _) = router(&sample(), ApiKind::Rest, AuthorizationMode::Enforce, "");
         assert_eq!(
-            call_with(&rest, Method::POST, "/pets", &[]).await,
+            status_with(&rest, Method::POST, "/pets", &[]).await,
             StatusCode::ACCEPTED
         );
         let override_get = [("x-http-method-override", "GET".to_owned())];
         assert_eq!(
-            call_with(&rest, Method::POST, "/pets", &override_get).await,
+            status_with(&rest, Method::POST, "/pets", &override_get).await,
             StatusCode::OK,
             "the header replaces the method before routing"
         );
 
         let at_limit = format!("/pets?q={}", "a".repeat(10_240 - "/pets?q=".len()));
         assert_eq!(
-            call_with(&rest, Method::GET, &at_limit, &[]).await,
+            status_with(&rest, Method::GET, &at_limit, &[]).await,
             StatusCode::OK
         );
         assert_eq!(
-            call_with(&rest, Method::GET, &format!("{at_limit}a"), &[]).await,
+            status_with(&rest, Method::GET, &format!("{at_limit}a"), &[]).await,
             StatusCode::URI_TOO_LONG
         );
         let big_header = [("x-pad", "a".repeat(20_480 - "x-pad: \r\n".len()))];
         assert_eq!(
-            call_with(&rest, Method::GET, "/pets", &big_header).await,
+            status_with(&rest, Method::GET, "/pets", &big_header).await,
             StatusCode::OK
         );
         let bigger = [("x-pad", "a".repeat(20_481 - "x-pad: \r\n".len()))];
         assert_eq!(
-            call_with(&rest, Method::GET, "/pets", &bigger).await,
+            status_with(&rest, Method::GET, "/pets", &bigger).await,
             StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
         );
         assert_eq!(
-            call_with(&rest, Method::GET, "/missing", &bigger).await,
+            status_with(&rest, Method::GET, "/missing", &bigger).await,
             StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
             "unrouted requests are measured too"
         );
 
         let (http, _) = router(&sample(), ApiKind::Http, AuthorizationMode::Enforce, "");
         assert_eq!(
-            call_with(&http, Method::POST, "/pets", &override_get).await,
+            status_with(&http, Method::POST, "/pets", &override_get).await,
             StatusCode::ACCEPTED,
             "HTTP APIs ignore the override header"
         );
@@ -807,7 +1152,7 @@ mod tests {
             "a".repeat(10_240 - "GET /pets HTTP/1.1\r\nx-pad: \r\n".len()),
         )];
         assert_eq!(
-            call_with(&http, Method::GET, "/pets", &http_limit).await,
+            status_with(&http, Method::GET, "/pets", &http_limit).await,
             StatusCode::OK
         );
         let http_over = [(
@@ -815,7 +1160,7 @@ mod tests {
             "a".repeat(10_241 - "GET /pets HTTP/1.1\r\nx-pad: \r\n".len()),
         )];
         assert_eq!(
-            call_with(&http, Method::GET, "/pets", &http_over).await,
+            status_with(&http, Method::GET, "/pets", &http_over).await,
             StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
         );
     }
@@ -937,6 +1282,23 @@ mod tests {
                 .unwrap()
                 .problems
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn unmapped_vpc_links_answer_501_with_the_reason_on_routes() {
+        let doc = json!({"paths": {"/private": {"get": {"x-amazon-apigateway-integration": {
+            "type": "http_proxy", "httpMethod": "GET", "connectionType": "VPC_LINK",
+            "connectionId": "vl1", "uri": "http://nlb.internal/x"}}}}});
+        let (router, summaries) = router(&doc, ApiKind::Rest, AuthorizationMode::Enforce, "");
+        assert_eq!(
+            call(&router, Method::GET, "/private").await.0,
+            StatusCode::NOT_IMPLEMENTED
+        );
+        let problems = &summaries.first().unwrap().problems;
+        assert!(
+            problems.iter().any(|p| p.contains("--vpc-link vl1=<url>")),
+            "{problems:?}"
         );
     }
 
@@ -1115,11 +1477,14 @@ mod tests {
             stage: Some("prod".to_owned()),
             stage_variables: Arc::default(),
             responses: GatewayResponses::default(),
+            cors: None,
             state: test_state(),
             replicas: NonZeroU32::MIN,
+            vpc_links: VpcLinks::default(),
             enforcement: STRICT,
             http: reqwest::Client::new(),
             aws,
+            keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
             observer: StageObserver::disabled(),
             release: None,
         });
