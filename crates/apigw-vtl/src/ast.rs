@@ -104,13 +104,13 @@ pub(crate) enum Expr {
     /// A reference.
     Reference(Reference),
     /// `[a, b]`
-    List(Vec<Expr>),
+    List(Vec<Self>),
     /// `{k: v}`
-    Map(Vec<(Expr, Expr)>),
+    Map(Vec<(Self, Self)>),
     /// `[from..to]`
-    Range(Box<Expr>, Box<Expr>),
+    Range(Box<Self>, Box<Self>),
     /// `!x`
-    Not(Box<Expr>),
+    Not(Box<Self>),
     /// `a op b`
-    Binary(BinaryOp, Box<Expr>, Box<Expr>),
+    Binary(BinaryOp, Box<Self>, Box<Self>),
 }

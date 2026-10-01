@@ -1,6 +1,6 @@
-//! JSON path expressions with Jayway JsonPath 2.x semantics.
+//! JSON path expressions with Jayway `JsonPath` 2.x semantics.
 //!
-//! API Gateway evaluates `$input.path('$.a.b')` and `$input.json(...)` with Jayway JsonPath.
+//! API Gateway evaluates `$input.path('$.a.b')` and `$input.json(...)` with Jayway `JsonPath`.
 //! This module implements its dot and bracket notation, wildcards, deep scan (`..`), index
 //! lists, slices, filters (`[?(@.price < 10 && @.in_stock)]`), and the common functions
 //! (`length()`, `min()`, `max()`, `avg()`, `sum()`, `stddev()`, `keys()`, `first()`, `last()`,
@@ -17,7 +17,7 @@ use std::str::FromStr;
 
 use apigw_regex::JavaRegex;
 
-use crate::value::{List, Map, Value};
+use crate::value::{List, Map, Value, doubles_equal};
 
 /// A malformed or unsupported path expression, or a function that cannot be evaluated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,7 +138,10 @@ impl Segments {
         Ok(if multiple {
             Found::Many(current)
         } else {
-            current.into_iter().next().map_or(Found::Nothing, Found::One)
+            current
+                .into_iter()
+                .next()
+                .map_or(Found::Nothing, Found::One)
         })
     }
 }
@@ -240,7 +243,9 @@ impl Selector {
             Self::Index(indexes) => {
                 if let Value::List(list) = node {
                     for index in indexes {
-                        if let Some(value) = normalize_index(*index, list.len()).and_then(|i| list.get(i)) {
+                        if let Some(value) =
+                            normalize_index(*index, list.len()).and_then(|i| list.get(i))
+                        {
                             out.push(value);
                         }
                     }
@@ -319,7 +324,11 @@ impl Selector {
 
 fn normalize_index(index: i64, len: usize) -> Option<usize> {
     let len = i64::try_from(len).ok()?;
-    let resolved = if index < 0 { index.checked_add(len)? } else { index };
+    let resolved = if index < 0 {
+        index.checked_add(len)?
+    } else {
+        index
+    };
     if (0..len).contains(&resolved) {
         usize::try_from(resolved).ok()
     } else {
@@ -333,10 +342,24 @@ fn slice(items: &[Value], from: Option<i64>, to: Option<i64>) -> Vec<Value> {
     let len = i64::try_from(items.len()).unwrap_or(i64::MAX);
     let take = |start: i64, end: i64| -> Vec<Value> {
         let (start, end) = (start.clamp(0, len), end.clamp(0, len));
-        let (start, end) = (usize::try_from(start).unwrap_or(0), usize::try_from(end).unwrap_or(0));
-        items.iter().skip(start).take(end.saturating_sub(start)).cloned().collect()
+        let (start, end) = (
+            usize::try_from(start).unwrap_or(0),
+            usize::try_from(end).unwrap_or(0),
+        );
+        items
+            .iter()
+            .skip(start)
+            .take(end.saturating_sub(start))
+            .cloned()
+            .collect()
     };
-    let from_start = |from: i64| if from < 0 { from.saturating_add(len).max(0) } else { from };
+    let from_start = |from: i64| {
+        if from < 0 {
+            from.saturating_add(len).max(0)
+        } else {
+            from
+        }
+    };
     let to_end = |to: i64| if to < 0 { to.saturating_add(len) } else { to };
     match (from, to) {
         (None, None) => take(0, len),
@@ -392,7 +415,10 @@ impl Function {
             }
             Self::Keys => Ok(match input {
                 Value::Map(map) => Some(Value::List(List::from_values(
-                    map.entries().into_iter().map(|(key, _)| Value::Str(key)).collect(),
+                    map.entries()
+                        .into_iter()
+                        .map(|(key, _)| Value::Str(key))
+                        .collect(),
                 ))),
                 _ => None,
             }),
@@ -430,7 +456,11 @@ impl Function {
                 }
                 for value in extra {
                     if matches!(value, Value::Int(_) | Value::Double(_)) {
-                        joined.push_str(&value.to_java_string().map_err(|e| JsonPathError::new(e.to_string()))?);
+                        joined.push_str(
+                            &value
+                                .to_java_string()
+                                .map_err(|e| JsonPathError::new(e.to_string()))?,
+                        );
                     }
                 }
                 Ok(Some(Value::from(joined)))
@@ -438,7 +468,12 @@ impl Function {
             Self::Append(extra) => Ok(Some(match input {
                 Value::List(list) => {
                     let mut items = list.snapshot();
-                    items.extend(extra.iter().filter(|v| matches!(v, Value::Int(_) | Value::Double(_))).cloned());
+                    items.extend(
+                        extra
+                            .iter()
+                            .filter(|v| matches!(v, Value::Int(_) | Value::Double(_)))
+                            .cloned(),
+                    );
                     Value::List(List::from_values(items))
                 }
                 other => other.clone(),
@@ -479,7 +514,10 @@ fn numbers(input: &Value) -> Vec<f64> {
 }
 
 /// Converts an integer to a double, losing precision beyond 2^53 like Java's widening.
-#[expect(clippy::cast_precision_loss, reason = "Java's long to double conversion rounds the same way")]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Java's long to double conversion rounds the same way"
+)]
 const fn f64_from_i64(value: i64) -> f64 {
     value as f64
 }
@@ -488,9 +526,9 @@ const fn f64_from_i64(value: i64) -> f64 {
 
 #[derive(Debug, Clone)]
 enum Filter {
-    Or(Box<Filter>, Box<Filter>),
-    And(Box<Filter>, Box<Filter>),
-    Not(Box<Filter>),
+    Or(Box<Self>, Box<Self>),
+    And(Box<Self>, Box<Self>),
+    Not(Box<Self>),
     Exists(Operand),
     Compare(Operand, CompareOp, Operand),
 }
@@ -553,11 +591,16 @@ impl Operand {
         match self {
             Self::Literal(value) => Some(value.clone()),
             Self::Regex(pattern) => Some(Value::from(pattern.as_str())),
-            Self::Path { from_root, segments } => {
+            Self::Path {
+                from_root,
+                segments,
+            } => {
                 let start = if *from_root { root } else { current };
                 match segments.run(start, root) {
                     Ok(Found::One(value)) => Some(value),
-                    Ok(Found::Many(values)) if !values.is_empty() => Some(Value::List(List::from_values(values))),
+                    Ok(Found::Many(values)) if !values.is_empty() => {
+                        Some(Value::List(List::from_values(values)))
+                    }
                     Ok(Found::Many(_) | Found::Nothing) | Err(_) => None,
                 }
             }
@@ -605,7 +648,9 @@ impl CompareOp {
             }
             Self::Contains => match (left, right) {
                 (Some(Value::Str(text)), Some(Value::Str(part))) => text.contains(&**part),
-                (Some(Value::List(list)), Some(item)) => list.snapshot().iter().any(|v| json_equal(v, item)),
+                (Some(Value::List(list)), Some(item)) => {
+                    list.snapshot().iter().any(|v| json_equal(v, item))
+                }
                 _ => false,
             },
         }
@@ -623,7 +668,9 @@ fn values_equal(left: Option<&Value>, right: Option<&Value>) -> bool {
 /// Equality as Jayway compares JSON nodes: numbers by value across integer and double.
 fn json_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
-        (Value::Int(x), Value::Double(y)) | (Value::Double(y), Value::Int(x)) => f64_from_i64(*x) == *y,
+        (Value::Int(x), Value::Double(y)) | (Value::Double(y), Value::Int(x)) => {
+            doubles_equal(f64_from_i64(*x), *y)
+        }
         (Value::List(x), Value::List(y)) => {
             let (x, y) = (x.snapshot(), y.snapshot());
             x.len() == y.len() && x.iter().zip(&y).all(|(p, q)| json_equal(p, q))
@@ -632,7 +679,9 @@ fn json_equal(a: &Value, b: &Value) -> bool {
             let (x, y) = (x.entries(), y.entries());
             x.len() == y.len()
                 && x.iter().all(|(key, value)| {
-                    y.iter().find(|(other, _)| other == key).is_some_and(|(_, other)| json_equal(value, other))
+                    y.iter()
+                        .find(|(other, _)| other == key)
+                        .is_some_and(|(_, other)| json_equal(value, other))
                 })
         }
         _ => a.java_equals(b),
@@ -671,7 +720,11 @@ fn subset(left: Option<&Value>, right: Option<&Value>) -> Option<bool> {
         return None;
     };
     let right = right.snapshot();
-    Some(left.snapshot().iter().all(|a| right.iter().any(|b| json_equal(a, b))))
+    Some(
+        left.snapshot()
+            .iter()
+            .all(|a| right.iter().any(|b| json_equal(a, b))),
+    )
 }
 
 fn overlap(left: Option<&Value>, right: Option<&Value>) -> Option<bool> {
@@ -679,7 +732,11 @@ fn overlap(left: Option<&Value>, right: Option<&Value>) -> Option<bool> {
         return None;
     };
     let right = right.snapshot();
-    Some(left.snapshot().iter().any(|a| right.iter().any(|b| json_equal(a, b))))
+    Some(
+        left.snapshot()
+            .iter()
+            .any(|a| right.iter().any(|b| json_equal(a, b))),
+    )
 }
 
 fn size_of(value: Option<&Value>) -> Option<i64> {
@@ -731,7 +788,11 @@ impl PathParser {
     }
 
     fn eat_str(&mut self, text: &str) -> bool {
-        if text.chars().enumerate().all(|(i, c)| self.peek_at(i) == Some(c)) {
+        if text
+            .chars()
+            .enumerate()
+            .all(|(i, c)| self.peek_at(i) == Some(c))
+        {
             self.pos = self.pos.saturating_add(text.chars().count());
             true
         } else {
@@ -746,7 +807,10 @@ impl PathParser {
     }
 
     fn fail<T>(&self, message: &str) -> Result<T, JsonPathError> {
-        Err(JsonPathError::new(format!("{message} at position {}", self.pos)))
+        Err(JsonPathError::new(format!(
+            "{message} at position {}",
+            self.pos
+        )))
     }
 
     fn expect(&mut self, c: char) -> Result<(), JsonPathError> {
@@ -800,7 +864,10 @@ impl PathParser {
     fn parse_name(&mut self) -> Result<Selector, JsonPathError> {
         let mut name = String::new();
         while let Some(c) = self.peek() {
-            if matches!(c, '.' | '[' | ' ' | '(' | ')' | ']' | '=' | '<' | '>' | '!' | '&' | '|' | ',') {
+            if matches!(
+                c,
+                '.' | '[' | ' ' | '(' | ')' | ']' | '=' | '<' | '>' | '!' | '&' | '|' | ','
+            ) {
                 break;
             }
             name.push(c);
@@ -926,7 +993,11 @@ impl PathParser {
         while self.peek().is_some_and(|c| c.is_ascii_digit()) {
             self.advance();
         }
-        let text: String = self.chars.get(start..self.pos).map(|s| s.iter().collect()).unwrap_or_default();
+        let text: String = self
+            .chars
+            .get(start..self.pos)
+            .map(|s| s.iter().collect())
+            .unwrap_or_default();
         if text.is_empty() {
             return Ok(None);
         }
@@ -1045,12 +1116,7 @@ impl PathParser {
             ("<", CompareOp::Lt),
             (">", CompareOp::Gt),
         ];
-        for (text, op) in SYMBOLS {
-            if self.eat_str(text) {
-                return Some(op);
-            }
-        }
-        const WORDS: [(&str, CompareOp); 7] = [
+        const WORDS: [(&str, CompareOp); 8] = [
             ("nin", CompareOp::NotIn),
             ("in", CompareOp::In),
             ("subsetof", CompareOp::SubsetOf),
@@ -1058,23 +1124,31 @@ impl PathParser {
             ("noneof", CompareOp::NoneOf),
             ("size", CompareOp::Size),
             ("empty", CompareOp::Empty),
+            ("contains", CompareOp::Contains),
         ];
+        for (text, op) in SYMBOLS {
+            if self.eat_str(text) {
+                return Some(op);
+            }
+        }
         for (text, op) in WORDS {
             if self.word_ahead(text) {
                 self.pos = self.pos.saturating_add(text.chars().count());
                 return Some(op);
             }
         }
-        if self.word_ahead("contains") {
-            self.pos = self.pos.saturating_add("contains".chars().count());
-            return Some(CompareOp::Contains);
-        }
         None
     }
 
     fn word_ahead(&self, word: &str) -> bool {
-        let matches_word = word.chars().enumerate().all(|(i, c)| self.peek_at(i) == Some(c));
-        matches_word && self.peek_at(word.chars().count()).is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
+        let matches_word = word
+            .chars()
+            .enumerate()
+            .all(|(i, c)| self.peek_at(i) == Some(c));
+        matches_word
+            && self
+                .peek_at(word.chars().count())
+                .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
     }
 
     fn parse_operand(&mut self) -> Result<Operand, JsonPathError> {
@@ -1120,7 +1194,10 @@ impl PathParser {
             }
         }
         let mut flags = String::new();
-        while let Some(c) = self.peek().filter(|c| matches!(c, 'i' | 's' | 'm' | 'x' | 'u')) {
+        while let Some(c) = self
+            .peek()
+            .filter(|c| matches!(c, 'i' | 's' | 'm' | 'x' | 'u'))
+        {
             flags.push(c);
             self.advance();
         }
@@ -1198,7 +1275,11 @@ impl PathParser {
                 self.pos = save;
             }
         }
-        let text: String = self.chars.get(start..self.pos).map(|s| s.iter().collect()).unwrap_or_default();
+        let text: String = self
+            .chars
+            .get(start..self.pos)
+            .map(|s| s.iter().collect())
+            .unwrap_or_default();
         if is_float {
             text.parse::<f64>()
                 .map(Value::Double)
@@ -1247,7 +1328,10 @@ mod tests {
 
     #[test]
     fn wildcards_scans_and_slices() {
-        assert_eq!(eval("$.store.book[*].author", STORE), r#"["Nigel Rees","Evelyn Waugh","Herman Melville"]"#);
+        assert_eq!(
+            eval("$.store.book[*].author", STORE),
+            r#"["Nigel Rees","Evelyn Waugh","Herman Melville"]"#
+        );
         assert_eq!(eval("$..price", STORE), "[8.95,12.99,8.99,19.95]");
         assert_eq!(eval("$.store.book[0:2].price", STORE), "[8.95,12.99]");
         assert_eq!(eval("$.store.book[-2:].price", STORE), "[12.99,8.99]");
@@ -1257,19 +1341,79 @@ mod tests {
 
     #[test]
     fn filters() {
-        assert_eq!(eval("$.store.book[?(@.price < 10)].price", STORE), "[8.95,8.99]");
-        assert_eq!(eval("$.store.book[?(@.isbn)].author", STORE), r#"["Evelyn Waugh"]"#);
-        assert_eq!(eval("$.store.book[?(@.category == 'fiction' && @.price > 10)].author", STORE), r#"["Evelyn Waugh"]"#);
-        assert_eq!(eval("$.store.book[?(@.author =~ /.*REES/i)].price", STORE), "[8.95]");
-        assert_eq!(eval("$.store.book[?(@.price < $.expensive)].price", STORE), "[8.95,8.99]");
+        assert_eq!(
+            eval("$.store.book[?(@.price < 10)].price", STORE),
+            "[8.95,8.99]"
+        );
+        assert_eq!(
+            eval("$.store.book[?(@.isbn)].author", STORE),
+            r#"["Evelyn Waugh"]"#
+        );
+        assert_eq!(
+            eval(
+                "$.store.book[?(@.category == 'fiction' && @.price > 10)].author",
+                STORE
+            ),
+            r#"["Evelyn Waugh"]"#
+        );
+        assert_eq!(
+            eval("$.store.book[?(@.author =~ /.*REES/i)].price", STORE),
+            "[8.95]"
+        );
+        assert_eq!(
+            eval("$.store.book[?(@.price < $.expensive)].price", STORE),
+            "[8.95,8.99]"
+        );
         assert_eq!(eval("$.store.book[?(!@.isbn)].price", STORE), "[8.95,8.99]");
     }
 
     #[test]
     fn functions() {
         assert_eq!(eval("$.store.book.length()", STORE), "3");
-        assert_eq!(eval("$.store.book[*].price.max()", STORE), "12.99");
-        assert_eq!(eval("$..price.min()", STORE), "8.95");
+        assert_eq!(eval("$.n.max()", r#"{"n":[3,1,2]}"#), "3.0");
+        assert_eq!(eval("$.n.sum()", r#"{"n":[3,1,2]}"#), "6.0");
+        assert_eq!(eval("$.n.avg()", r#"{"n":[3,1,2]}"#), "2.0");
+        assert_eq!(eval("$.n.first()", r#"{"n":[3,1,2]}"#), "3");
+        assert_eq!(eval("$.n.last()", r#"{"n":[3,1,2]}"#), "2");
+        assert_eq!(eval("$.n.index(-2)", r#"{"n":[3,1,2]}"#), "1");
+        assert_eq!(eval("$.o.keys()", r#"{"o":{"b":1,"a":2}}"#), r#"["b","a"]"#);
+    }
+
+    #[test]
+    fn functions_after_a_wildcard_run_once_per_match() {
+        assert_eq!(
+            eval("$.a[*].length()", r#"{"a":[[1,2],{"k":1},3]}"#),
+            "[2,1,null]"
+        );
+        assert!(eval("$.a[*].max()", r#"{"a":[1,2]}"#).starts_with("ERR"));
+    }
+
+    #[test]
+    fn aggregates_of_nothing_are_errors() {
+        assert!(eval("$.n.max()", r#"{"n":[]}"#).starts_with("ERR"));
+        assert!(eval("$.n.first()", r#"{"n":[]}"#).starts_with("ERR"));
+    }
+
+    #[test]
+    fn functions_after_a_scan_are_not_supported() {
+        assert!(eval("$..price.max()", STORE).starts_with("ERR"));
+    }
+
+    #[test]
+    fn jayway_slice_oddities_are_reproduced() {
+        let doc = r#"{"h":[1,2,3,4,5]}"#;
+        assert_eq!(eval("$.h[1:-1]", doc), "[]");
+        assert_eq!(eval("$.h[-2:5]", doc), "[4,5,1,2,3,4,5]");
+        assert_eq!(eval("$.h[-3:-1]", doc), "[3,4]");
+    }
+
+    #[test]
+    fn several_names_yield_one_map() {
+        assert_eq!(
+            eval("$['a','b']", r#"{"a":1,"b":2,"c":3}"#),
+            r#"{"a":1,"b":2}"#
+        );
+        assert_eq!(eval("$['x','y']", r#"{"a":1}"#), "{}");
     }
 
     #[test]

@@ -11,13 +11,39 @@
 //! (`{k=v}`, `[a, b]`, `1.0E10`). Templates are checked against output produced by Apache
 //! Velocity 1.7 itself; see `tools/vtl-oracle` in the repository.
 //!
+//! # Differences from Velocity and Java
+//!
+//! Output is compared with Apache Velocity 1.7 and Jayway `JsonPath` 2.9 (see `tools/vtl-oracle`).
+//! What is known to differ:
+//!
+//! - `#macro`, `#parse`, `#include`, `#evaluate`, and `#define` are rejected as
+//!   [`ParseError::UnsupportedDirective`].
+//! - Integer arithmetic that leaves 64 bits is a [`RenderError::IntegerOverflow`]; Java promotes to
+//!   `BigInteger`. JSON integers beyond 64 bits become doubles.
+//! - `Map` keys are strings, so `{1: 'a'}` and `$m.get('1')` agree where Java distinguishes them.
+//! - There is no reflection (`$x.class`, `getClass()`), and arrays are lists: `split` prints as a
+//!   list instead of `[Ljava.lang.String;@...`. `Map.keySet()`, `values()`, and `entrySet()` are
+//!   snapshots without `get(int)` or `[i]`, as the Java collections have none.
+//! - Only the methods templates use are implemented, for the JDK 8 API. A call that matches no
+//!   method renders as written, as in Velocity; Velocity instead throws for a single-overload
+//!   method called with the wrong arguments.
+//! - Lexer states that make Velocity's output depend on earlier tokens are reproduced for the
+//!   common cases (whitespace before `#set`, `##` after a property, `[` after a reference and a
+//!   directive). Odd sequences such as `$#set(...)` or `# #set(...)` are not.
+//! - JSON paths: functions after `..`, such as `$..price.max()`, are rejected, and Jayway's lenient
+//!   handling of some malformed paths is an error here. `$util.parseJson` accepts strict JSON, not
+//!   json-smart's permissive syntax.
+//! - `$input.json` returns compact JSON and `$input.params(name)` matches headers
+//!   case-insensitively; both follow API Gateway's documentation but have not been compared with a
+//!   live API.
+//!
 //! # Examples
 //!
 //! ```
 //! use apigw_vtl::{InputParams, Renderer, SimpleInput, Template};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let template: Template = r#"{"names": [#foreach($u in $input.path('$.users'))"$u.name"#if($foreach.hasNext),#end#end]}"#.parse()?;
+//! let template: Template = r##"{"names": [#foreach($u in $input.path('$.users'))"$u.name"#if($foreach.hasNext),#end#end]}"##.parse()?;
 //! let input = SimpleInput::new(r#"{"users":[{"name":"ann"},{"name":"bob"}]}"#, InputParams::default());
 //! let output = Renderer::new(&input).render(&template)?;
 //! assert_eq!(output, r#"{"names": ["ann","bob"]}"#);
@@ -129,20 +155,43 @@ impl TemplateInput for SimpleInput {
 #[non_exhaustive]
 pub struct Limits {
     /// The most bytes a render may produce; API Gateway's payload limit is 10 MiB.
-    pub max_output_bytes: usize,
+    pub output_bytes: usize,
     /// How many evaluation steps (nodes rendered, expressions and range elements evaluated)
     /// one render may take; this bounds nested loops that print nothing.
-    pub max_steps: u64,
+    pub steps: u64,
     /// How deeply directives, strings, and expressions may nest during evaluation.
-    pub max_depth: usize,
+    pub depth: usize,
+}
+
+impl Limits {
+    /// Sets the most bytes a render may produce.
+    #[must_use]
+    pub const fn with_output_bytes(mut self, output_bytes: usize) -> Self {
+        self.output_bytes = output_bytes;
+        self
+    }
+
+    /// Sets the evaluation step budget.
+    #[must_use]
+    pub const fn with_steps(mut self, steps: u64) -> Self {
+        self.steps = steps;
+        self
+    }
+
+    /// Sets the evaluation nesting limit.
+    #[must_use]
+    pub const fn with_depth(mut self, depth: usize) -> Self {
+        self.depth = depth;
+        self
+    }
 }
 
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_output_bytes: 10 * 1024 * 1024,
-            max_steps: 5_000_000,
-            max_depth: 128,
+            output_bytes: 10 * 1024 * 1024,
+            steps: 5_000_000,
+            depth: 128,
         }
     }
 }

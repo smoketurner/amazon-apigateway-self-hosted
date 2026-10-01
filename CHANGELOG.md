@@ -7,6 +7,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `crates/apigw-vtl`: an Apache Velocity 1.7 engine for mapping templates. It parses and renders
+  references, `#set`, `#if`/`#elseif`/`#else`, `#foreach` (1,000-iteration cap, `$foreach.*`,
+  `$velocityCount`), `#break`, `#stop`, comments, escaping, and Velocity's whitespace gobbling,
+  with a Java value model (`toString`, arithmetic, comparison) and the common `String`, `List`,
+  and `Map` methods. `$input` (`body`, `json()`, `path()`, `params()`), `$util`, `$context`
+  (including caller-readable `requestOverride`/`responseOverride`), and `$stageVariables` are
+  provided, with Jayway JsonPath semantics for paths. Output size, evaluation steps, and nesting
+  are bounded and reported as typed errors. Its tests replay about 960 templates rendered by
+  Apache Velocity 1.7 and Jayway JsonPath 2.9, and a cargo-fuzz target lives in `fuzz/`.
 - Lambda authorizers are evaluated. REST `TOKEN` (with `identityValidationExpression`) and `REQUEST`
   authorizers and HTTP API `REQUEST` authorizers (payload 1.0 and 2.0, simple responses) are invoked
   with the request's identity sources, their results are cached by identity source and TTL, and the

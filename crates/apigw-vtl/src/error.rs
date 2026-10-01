@@ -2,6 +2,8 @@
 
 use thiserror::Error;
 
+use crate::value::DepthExceeded;
+
 /// A template that cannot be parsed.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ParseError {
@@ -40,7 +42,7 @@ pub enum ParseError {
 }
 
 /// A failure while rendering a template.
-#[derive(Debug, Clone, PartialEq, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RenderError {
     /// The output grew beyond the configured limit.
     #[error("rendered output exceeds {limit} bytes")]
@@ -83,6 +85,10 @@ pub enum RenderError {
     /// `BigInteger`.
     #[error("integer overflow")]
     IntegerOverflow,
+    /// A collection was stored inside itself, which Java allows but which cannot be freed or
+    /// printed.
+    #[error("a collection cannot contain itself")]
+    CircularReference,
     /// A value contains itself or nests too deeply to be formatted.
     #[error("value nests too deeply to format")]
     ValueTooDeep,
@@ -99,8 +105,8 @@ pub enum RenderError {
     },
 }
 
-impl From<crate::value::DepthExceeded> for RenderError {
-    fn from(_: crate::value::DepthExceeded) -> Self {
+impl From<DepthExceeded> for RenderError {
+    fn from(_: DepthExceeded) -> Self {
         Self::ValueTooDeep
     }
 }

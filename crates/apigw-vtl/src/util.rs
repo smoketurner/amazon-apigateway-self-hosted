@@ -1,10 +1,18 @@
 //! The `$util` object: escaping, encoding, and JSON parsing helpers.
 
 use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
+use base64::alphabet::STANDARD as STANDARD_ALPHABET;
+use base64::engine::DecodePaddingMode;
+use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig};
 
 use crate::error::RenderError;
-use crate::value::Value;
+use crate::value::{Value, push_formatted};
+
+/// Java's `Base64.getDecoder()` accepts input with or without trailing `=` padding.
+const STANDARD: GeneralPurpose = GeneralPurpose::new(
+    &STANDARD_ALPHABET,
+    GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
+);
 
 fn fail(method: &str, message: impl Into<String>) -> RenderError {
     RenderError::Method {
@@ -18,7 +26,12 @@ fn fail(method: &str, message: impl Into<String>) -> RenderError {
 pub(crate) fn call(name: &str, args: &[Value]) -> Result<Option<Value>, RenderError> {
     let known = matches!(
         name,
-        "escapeJavaScript" | "parseJson" | "urlEncode" | "urlDecode" | "base64Encode" | "base64Decode"
+        "escapeJavaScript"
+            | "parseJson"
+            | "urlEncode"
+            | "urlDecode"
+            | "base64Encode"
+            | "base64Decode"
     );
     let [argument] = args else {
         return Ok(None);
@@ -38,7 +51,9 @@ pub(crate) fn call(name: &str, args: &[Value]) -> Result<Option<Value>, RenderEr
         "urlDecode" => Value::from(url_decode(text).map_err(|message| fail(name, message))?),
         "base64Encode" => Value::from(STANDARD.encode(text.as_bytes())),
         _ => {
-            let bytes = STANDARD.decode(text.as_bytes()).map_err(|err| fail(name, err.to_string()))?;
+            let bytes = STANDARD
+                .decode(text.as_bytes())
+                .map_err(|err| fail(name, err.to_string()))?;
             Value::from(String::from_utf8_lossy(&bytes).into_owned())
         }
     };
@@ -61,7 +76,9 @@ pub(crate) fn escape_java_script(text: &str) -> String {
             0x27 => out.push_str("\\'"),
             0x2F => out.push_str("\\/"),
             0x5C => out.push_str("\\\\"),
-            unit if unit < 0x20 || unit > 0x7F => out.push_str(&format!("\\u{unit:04X}")),
+            unit if !(0x20..=0x7F).contains(&unit) => {
+                push_formatted(&mut out, format_args!("\\u{unit:04X}"));
+            }
             unit => {
                 if let Some(c) = char::from_u32(u32::from(unit)) {
                     out.push(c);
@@ -78,9 +95,11 @@ pub(crate) fn url_encode(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for byte in text.bytes() {
         match byte {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'-' | b'*' | b'_' => out.push(char::from(byte)),
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'-' | b'*' | b'_' => {
+                out.push(char::from(byte));
+            }
             b' ' => out.push('+'),
-            other => out.push_str(&format!("%{other:02X}")),
+            other => push_formatted(&mut out, format_args!("%{other:02X}")),
         }
     }
     out
@@ -130,7 +149,10 @@ mod tests {
     #[test]
     fn url_codec_round_trips() {
         assert_eq!(url_encode("a b&c=d/é"), "a+b%26c%3Dd%2F%C3%A9");
-        assert_eq!(url_decode("a+b%26c%3Dd%2F%C3%A9").as_deref(), Ok("a b&c=d/é"));
+        assert_eq!(
+            url_decode("a+b%26c%3Dd%2F%C3%A9").as_deref(),
+            Ok("a b&c=d/é")
+        );
         assert!(url_decode("%zz").is_err());
         assert!(url_decode("%4").is_err());
     }

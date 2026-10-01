@@ -113,7 +113,6 @@ dependencies = [
  "base64",
  "indexmap",
  "proptest",
- "serde",
  "serde_json",
  "thiserror",
 ]

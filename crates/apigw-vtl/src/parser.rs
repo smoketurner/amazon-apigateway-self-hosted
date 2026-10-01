@@ -105,7 +105,10 @@ impl BlockBuilder {
     }
 
     fn drop_leading_space_for_set(&mut self) {
-        if self.after_token && !self.text.is_empty() && self.text.chars().all(|c| c == ' ' || c == '\t') {
+        if self.after_token
+            && !self.text.is_empty()
+            && self.text.chars().all(|c| c == ' ' || c == '\t')
+        {
             self.text.clear();
             self.reference_pending = self.pending_before_text;
         }
@@ -261,18 +264,14 @@ impl Parser {
     fn eat_word(&mut self, word: &str) -> bool {
         let after = self.pos.saturating_add(word.chars().count());
         let boundary = self.chars.get(after).is_none_or(|c| !is_ident_char(*c));
-        if boundary && self.eat_str(word) {
-            true
-        } else {
-            false
-        }
+        boundary && self.eat_str(word)
     }
 
     fn eat_word_ignoring_case(&mut self, word: &str) -> bool {
-        let matches_word = word
-            .chars()
-            .enumerate()
-            .all(|(offset, c)| self.peek_at(offset).is_some_and(|actual| actual.eq_ignore_ascii_case(&c)));
+        let matches_word = word.chars().enumerate().all(|(offset, c)| {
+            self.peek_at(offset)
+                .is_some_and(|actual| actual.eq_ignore_ascii_case(&c))
+        });
         let after = self.pos.saturating_add(word.chars().count());
         let boundary = self.chars.get(after).is_none_or(|c| !is_ident_char(*c));
         if matches_word && boundary {
@@ -361,7 +360,8 @@ impl Parser {
     ) -> Result<(), ParseError> {
         match self.parse_dollar(backslashes)? {
             Dollar::Reference(reference) => {
-                let formal = reference.source.starts_with("${") || reference.source.starts_with("$!{");
+                let formal =
+                    reference.source.starts_with("${") || reference.source.starts_with("$!{");
                 let pending = if formal {
                     PendingReference::None
                 } else if matches!(reference.steps.last(), Some(Step::Property(_))) {
@@ -458,7 +458,9 @@ impl Parser {
                         let before = self.pos;
                         match self.parse_arguments() {
                             Ok(args) => steps.push(Step::Method(name.into(), args)),
-                            Err(ParseError::TooDeep { limit }) => return Err(ParseError::TooDeep { limit }),
+                            Err(ParseError::TooDeep { limit }) => {
+                                return Err(ParseError::TooDeep { limit });
+                            }
                             Err(err) => {
                                 if self.pos < self.chars.len() {
                                     return Err(err);
@@ -486,6 +488,12 @@ impl Parser {
         self.expect('[')?;
         self.skip_whitespace();
         let index = self.parse_parameter()?;
+        if matches!(
+            index,
+            Expr::Literal(Value::Double(_)) | Expr::List(_) | Expr::Map(_) | Expr::Range(..)
+        ) {
+            return Err(self.error("an index must be an integer, a string, or a reference"));
+        }
         self.skip_whitespace();
         self.expect(']')?;
         Ok(index)
@@ -493,7 +501,10 @@ impl Parser {
 
     /// A method argument: a parameter, or a bare word, which Velocity passes as `null`.
     fn parse_argument(&mut self) -> Result<Expr, ParseError> {
-        if self.peek().is_some_and(is_ident_start) && !self.word_ahead("true") && !self.word_ahead("false") {
+        if self.peek().is_some_and(is_ident_start)
+            && !self.word_ahead("true")
+            && !self.word_ahead("false")
+        {
             self.parse_identifier();
             return Ok(Expr::Literal(Value::Null));
         }
@@ -549,7 +560,7 @@ impl Parser {
             return Ok(None);
         }
         if backslashes == 0 && self.peek_at(1) == Some('*') {
-            self.skip_block_comment()?;
+            self.skip_block_comment();
             builder.mark_token();
             return Ok(None);
         }
@@ -558,18 +569,25 @@ impl Parser {
             self.copy_unparsed(builder)?;
             return Ok(None);
         }
-        let Some(token) = self.directive_at(backslashes % 2 == 0) else {
+        let Some(token) = self.directive_at(backslashes.is_multiple_of(2)) else {
             if backslashes == 0 {
                 self.advance();
                 let mut token = String::from("#");
-                while let Some(c) = self.peek().filter(|c| c.is_ascii_alphanumeric() || *c == '_') {
+                while let Some(c) = self
+                    .peek()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                {
                     token.push(c);
                     self.advance();
                 }
                 if token.len() > 1 {
                     builder.flush();
                     builder.add_text(&token);
-                    if token.chars().nth(1).is_some_and(|c| c.is_ascii_alphabetic()) {
+                    if token
+                        .chars()
+                        .nth(1)
+                        .is_some_and(|c| c.is_ascii_alphabetic())
+                    {
                         self.parse_macro_call_text(builder)?;
                     }
                     builder.mark_token();
@@ -579,9 +597,9 @@ impl Parser {
             }
             return Ok(None);
         };
-        let executes = backslashes % 2 == 0;
+        let executes = backslashes.is_multiple_of(2);
         if !executes {
-            let kept = "\\".repeat(backslashes / 2);
+            let kept = "\\".repeat(backslashes.div_euclid(2));
             builder.add_text(&kept);
             builder.add_text(&token.text);
             self.pos = token.end;
@@ -590,7 +608,7 @@ impl Parser {
         let kept = if token.directive == Directive::Set {
             backslashes
         } else {
-            backslashes / 2
+            backslashes.div_euclid(2)
         };
         builder.add_text(&"\\".repeat(kept));
         self.pos = token.end;
@@ -614,7 +632,11 @@ impl Parser {
             self.skip_whitespace();
             self.parse_parameter()?;
         }
-        let call: String = self.chars.get(start..self.pos).map(|s| s.iter().collect()).unwrap_or_default();
+        let call: String = self
+            .chars
+            .get(start..self.pos)
+            .map(|s| s.iter().collect())
+            .unwrap_or_default();
         builder.add_text(&call);
         Ok(())
     }
@@ -636,15 +658,14 @@ impl Parser {
         }
     }
 
-    fn skip_block_comment(&mut self) -> Result<(), ParseError> {
+    fn skip_block_comment(&mut self) {
         self.pos = self.pos.saturating_add(2);
         while self.peek().is_some() {
             if self.eat_str("*#") {
-                return Ok(());
+                return;
             }
             self.advance();
         }
-        Ok(())
     }
 
     fn copy_unparsed(&mut self, builder: &mut BlockBuilder) -> Result<(), ParseError> {
@@ -680,7 +701,10 @@ impl Parser {
                 name.push(c);
                 offset = offset.saturating_add(1);
             }
-            if self.peek_at(offset).is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+            if self
+                .peek_at(offset)
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
                 return None;
             }
             (name, self.pos.saturating_add(offset))
@@ -1084,7 +1108,9 @@ impl Parser {
         }
         let mut is_float = false;
         let fraction_follows = self.peek() == Some('.')
-            && self.peek_at(1).is_none_or(|c| c.is_ascii_digit() || !(c == '.' || is_ident_start(c)));
+            && self
+                .peek_at(1)
+                .is_none_or(|c| c.is_ascii_digit() || !(c == '.' || is_ident_start(c)));
         if fraction_follows {
             is_float = true;
             self.advance();
@@ -1093,7 +1119,8 @@ impl Parser {
             }
         }
         if self.peek().is_some_and(|c| c == 'e' || c == 'E') {
-            let digit_after = |offset: usize| self.peek_at(offset).is_some_and(|c| c.is_ascii_digit());
+            let digit_after =
+                |offset: usize| self.peek_at(offset).is_some_and(|c| c.is_ascii_digit());
             let signed = matches!(self.peek_at(1), Some('+' | '-'));
             if digit_after(1) || (signed && digit_after(2)) {
                 is_float = true;
@@ -1117,10 +1144,12 @@ impl Parser {
                 .map_err(|_| self.error("invalid floating point literal"))?;
             Ok(Expr::Literal(Value::Double(value)))
         } else {
-            let value: i64 = text.parse().map_err(|_| ParseError::IntegerLiteralTooLarge {
-                literal: text.clone(),
-                line: self.line(),
-            })?;
+            let value: i64 = text
+                .parse()
+                .map_err(|_| ParseError::IntegerLiteralTooLarge {
+                    literal: text.clone(),
+                    line: self.line(),
+                })?;
             Ok(Expr::Literal(Value::Int(value)))
         }
     }
@@ -1189,7 +1218,8 @@ impl Parser {
             let last = self.parse_parameter()?;
             self.skip_whitespace();
             self.expect(']')?;
-            let valid = |expr: &Expr| matches!(expr, Expr::Literal(Value::Int(_)) | Expr::Reference(_));
+            let valid =
+                |expr: &Expr| matches!(expr, Expr::Literal(Value::Int(_)) | Expr::Reference(_));
             if !valid(&first) || !valid(&last) {
                 return Err(self.error("a range needs integer or reference endpoints"));
             }
@@ -1232,4 +1262,3 @@ impl Parser {
         }
     }
 }
-

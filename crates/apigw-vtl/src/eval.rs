@@ -61,11 +61,11 @@ impl<'a> Interpreter<'a> {
         Ok(self.out)
     }
 
-    fn charge(&mut self, steps: u64) -> Result<(), RenderError> {
+    pub(crate) fn charge(&mut self, steps: u64) -> Result<(), RenderError> {
         self.steps = self.steps.saturating_add(steps);
-        if self.steps > self.limits.max_steps {
+        if self.steps > self.limits.steps {
             return Err(RenderError::StepLimit {
-                limit: self.limits.max_steps,
+                limit: self.limits.steps,
             });
         }
         Ok(())
@@ -73,9 +73,9 @@ impl<'a> Interpreter<'a> {
 
     fn enter(&mut self) -> Result<(), RenderError> {
         self.depth = self.depth.saturating_add(1);
-        if self.depth > self.limits.max_depth {
+        if self.depth > self.limits.depth {
             return Err(RenderError::DepthLimit {
-                limit: self.limits.max_depth,
+                limit: self.limits.depth,
             });
         }
         Ok(())
@@ -86,9 +86,9 @@ impl<'a> Interpreter<'a> {
     }
 
     fn push_str(&mut self, text: &str) -> Result<(), RenderError> {
-        if self.out.len().saturating_add(text.len()) > self.limits.max_output_bytes {
+        if self.out.len().saturating_add(text.len()) > self.limits.output_bytes {
             return Err(RenderError::OutputLimit {
-                limit: self.limits.max_output_bytes,
+                limit: self.limits.output_bytes,
             });
         }
         self.out.push_str(text);
@@ -96,9 +96,9 @@ impl<'a> Interpreter<'a> {
     }
 
     fn push_backslashes(&mut self, count: usize) -> Result<(), RenderError> {
-        if self.out.len().saturating_add(count) > self.limits.max_output_bytes {
+        if self.out.len().saturating_add(count) > self.limits.output_bytes {
             return Err(RenderError::OutputLimit {
-                limit: self.limits.max_output_bytes,
+                limit: self.limits.output_bytes,
             });
         }
         self.out.push_str(&"\\".repeat(count));
@@ -185,9 +185,12 @@ impl<'a> Interpreter<'a> {
             });
             self.current_loop = Some(Arc::clone(&info));
             self.vars.insert(Arc::clone(&directive.var), item);
-            self.vars.insert("foreach".into(), Value::Loop(Arc::clone(&info)));
-            self.vars.insert("velocityCount".into(), Value::Int(info.count));
-            self.vars.insert("velocityHasNext".into(), Value::Bool(info.has_next));
+            self.vars
+                .insert("foreach".into(), Value::Loop(Arc::clone(&info)));
+            self.vars
+                .insert("velocityCount".into(), Value::Int(info.count));
+            self.vars
+                .insert("velocityHasNext".into(), Value::Bool(info.has_next));
             let result = self.render_block(&directive.body);
             match result {
                 Ok(Flow::Continue) => {}
@@ -218,6 +221,9 @@ impl<'a> Interpreter<'a> {
             return Ok(());
         };
         let container = self.walk(&set.head, parents)?;
+        if matches!(container, Value::Map(_) | Value::List(_)) {
+            self.check_acyclic(&container, &value)?;
+        }
         match (&container, last) {
             (Value::Map(map), Step::Property(name)) => {
                 map.insert(Arc::clone(name), value);
@@ -231,8 +237,11 @@ impl<'a> Interpreter<'a> {
             (Value::List(list), Step::Index(index)) => {
                 if let Value::Int(position) = self.value(index)? {
                     let len = list.len();
-                    let resolved = resolve_list_index(position, len)
-                        .ok_or(RenderError::IndexOutOfBounds { index: position, len })?;
+                    let resolved =
+                        resolve_list_index(position, len).ok_or(RenderError::IndexOutOfBounds {
+                            index: position,
+                            len,
+                        })?;
                     list.with(|items| {
                         if let Some(slot) = items.get_mut(resolved) {
                             *slot = value;
@@ -251,14 +260,14 @@ impl<'a> Interpreter<'a> {
         let value = self.resolve(reference)?;
         let backslashes = reference.backslashes;
         let defined = !value.is_null();
-        let odd = backslashes % 2 == 1;
+        let odd = !backslashes.is_multiple_of(2);
         match (defined, odd) {
             (true, false) => {
-                self.push_backslashes(backslashes / 2)?;
+                self.push_backslashes(backslashes.div_euclid(2))?;
                 self.push_value(&value)
             }
             (true, true) => {
-                self.push_backslashes(backslashes / 2)?;
+                self.push_backslashes(backslashes.div_euclid(2))?;
                 self.push_str(&reference.source)
             }
             (false, false) => {
@@ -270,7 +279,7 @@ impl<'a> Interpreter<'a> {
                 }
             }
             (false, true) => {
-                self.push_backslashes(backslashes.saturating_add(1) / 2)?;
+                self.push_backslashes(backslashes.saturating_add(1).div_euclid(2))?;
                 self.push_str(&reference.source)
             }
         }
@@ -311,11 +320,13 @@ impl<'a> Interpreter<'a> {
                 for arg in args {
                     values.push(self.value(arg)?);
                 }
-                Ok(self.call_method(current, name, &values)?.unwrap_or(Value::Null))
+                Ok(self
+                    .call_method(current, name, &values)?
+                    .unwrap_or(Value::Null))
             }
             Step::Index(index) => {
                 let index = self.value(index)?;
-                self.index(current, &index)
+                Self::index(current, &index)
             }
         }
     }
@@ -354,14 +365,15 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    fn index(&self, target: &Value, index: &Value) -> Result<Value, RenderError> {
+    fn index(target: &Value, index: &Value) -> Result<Value, RenderError> {
         match (target, index) {
             (Value::List(list), Value::Int(position)) if list.is_indexed() => {
                 let len = list.len();
-                let resolved = resolve_list_index(*position, len).ok_or(RenderError::IndexOutOfBounds {
-                    index: *position,
-                    len,
-                })?;
+                let resolved =
+                    resolve_list_index(*position, len).ok_or(RenderError::IndexOutOfBounds {
+                        index: *position,
+                        len,
+                    })?;
                 Ok(list.get(resolved).unwrap_or(Value::Null))
             }
             (Value::Map(map), key) => Ok(Self::map_key(key)?
@@ -435,7 +447,12 @@ impl<'a> Interpreter<'a> {
             Expr::Not(_) => Ok(Value::Bool(self.truthy(expr)?)),
             Expr::Binary(op, left, right) => match op {
                 BinaryOp::Or | BinaryOp::And => Ok(Value::Bool(self.truthy(expr)?)),
-                BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => {
                     let (l, r) = (self.value(left)?, self.value(right)?);
                     Ok(Value::Bool(Self::compare(*op, &l, &r)))
                 }
@@ -483,9 +500,11 @@ impl<'a> Interpreter<'a> {
     fn truthy_inner(&mut self, expr: &Expr) -> Result<bool, RenderError> {
         match expr {
             Expr::Literal(Value::Bool(value)) => Ok(*value),
-            Expr::Literal(_) | Expr::Interpolated(_) | Expr::List(_) | Expr::Map(_) | Expr::Range(..) => {
-                Ok(false)
-            }
+            Expr::Literal(_)
+            | Expr::Interpolated(_)
+            | Expr::List(_)
+            | Expr::Map(_)
+            | Expr::Range(..) => Ok(false),
             Expr::Reference(reference) => Ok(match self.resolve(reference)? {
                 Value::Null => false,
                 Value::Bool(value) => value,
@@ -495,11 +514,18 @@ impl<'a> Interpreter<'a> {
             Expr::Binary(op, left, right) => match op {
                 BinaryOp::And => Ok(self.truthy(left)? && self.truthy(right)?),
                 BinaryOp::Or => Ok(self.truthy(left)? || self.truthy(right)?),
-                BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => {
                     let (l, r) = (self.value(left)?, self.value(right)?);
                     Ok(Self::compare(*op, &l, &r))
                 }
-                BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => Ok(false),
+                BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
+                    Ok(false)
+                }
             },
         }
     }
@@ -508,7 +534,11 @@ impl<'a> Interpreter<'a> {
 /// Resolves a possibly negative list index, which counts from the end.
 pub(crate) fn resolve_list_index(position: i64, len: usize) -> Option<usize> {
     let len_i = i64::try_from(len).ok()?;
-    let resolved = if position < 0 { position.checked_add(len_i)? } else { position };
+    let resolved = if position < 0 {
+        position.checked_add(len_i)?
+    } else {
+        position
+    };
     if (0..len_i).contains(&resolved) {
         usize::try_from(resolved).ok()
     } else {
@@ -523,7 +553,12 @@ struct LoopVariables {
 
 impl LoopVariables {
     fn save(interpreter: &Interpreter<'_>, var: &Arc<str>) -> Self {
-        let names: [Arc<str>; 4] = [Arc::clone(var), "foreach".into(), "velocityCount".into(), "velocityHasNext".into()];
+        let names: [Arc<str>; 4] = [
+            Arc::clone(var),
+            "foreach".into(),
+            "velocityCount".into(),
+            "velocityHasNext".into(),
+        ];
         Self {
             entries: names
                 .into_iter()

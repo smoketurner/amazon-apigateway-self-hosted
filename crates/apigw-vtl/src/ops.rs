@@ -3,7 +3,7 @@
 use crate::ast::{BinaryOp, Expr};
 use crate::error::RenderError;
 use crate::eval::Interpreter;
-use crate::value::Value;
+use crate::value::{Value, doubles_equal};
 
 /// A numeric operand.
 #[derive(Debug, Clone, Copy)]
@@ -45,9 +45,21 @@ impl Number {
 }
 
 /// Java widens a `long` to a `double` by rounding to nearest.
-#[expect(clippy::cast_precision_loss, reason = "this is Java's long to double conversion")]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "this is Java's long to double conversion"
+)]
 pub(crate) const fn int_to_f64(value: i64) -> f64 {
     value as f64
+}
+
+/// Java's `%` on doubles takes the sign of the dividend, as Rust's does.
+#[expect(
+    clippy::modulo_arithmetic,
+    reason = "the remainder keeps the dividend's sign, as in Java"
+)]
+fn java_remainder(a: f64, b: f64) -> f64 {
+    a % b
 }
 
 impl Interpreter<'_> {
@@ -57,7 +69,8 @@ impl Interpreter<'_> {
             BinaryOp::Eq => Self::equals(left, right),
             BinaryOp::Ne => !Self::equals(left, right),
             BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-                let (Some(l), Some(r)) = (Number::from_value(left), Number::from_value(right)) else {
+                let (Some(l), Some(r)) = (Number::from_value(left), Number::from_value(right))
+                else {
                     return false;
                 };
                 let ordering = match (l, r) {
@@ -91,7 +104,7 @@ impl Interpreter<'_> {
                 if let (Some(l), Some(r)) = (Number::from_value(left), Number::from_value(right)) {
                     return match (l, r) {
                         (Number::Int(a), Number::Int(b)) => a == b,
-                        _ => l.to_f64() == r.to_f64(),
+                        _ => doubles_equal(l.to_f64(), r.to_f64()),
                     };
                 }
                 let same_kind = matches!(
@@ -121,7 +134,8 @@ impl Interpreter<'_> {
         left_expr: &Expr,
         right_expr: &Expr,
     ) -> Result<Value, RenderError> {
-        if op == BinaryOp::Add && (matches!(left, Value::Str(_)) || matches!(right, Value::Str(_))) {
+        if op == BinaryOp::Add && (matches!(left, Value::Str(_)) || matches!(right, Value::Str(_)))
+        {
             let text = format!(
                 "{}{}",
                 Self::concat_text(left, left_expr)?,
@@ -159,7 +173,7 @@ impl Interpreter<'_> {
             BinaryOp::Sub => a - b,
             BinaryOp::Mul => a * b,
             BinaryOp::Div => a / b,
-            BinaryOp::Rem => a % b,
+            BinaryOp::Rem => java_remainder(a, b),
             BinaryOp::Or
             | BinaryOp::And
             | BinaryOp::Eq

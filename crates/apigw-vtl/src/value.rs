@@ -5,6 +5,7 @@
 //! behaviors templates can observe: `toString` formatting, reference semantics for collections
 //! (a list or map assigned to two variables is one object), and insertion-ordered maps.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -14,7 +15,7 @@ use indexmap::IndexMap;
 /// collection that contains itself, which Java rejects with a stack overflow.
 pub(crate) const MAX_VALUE_DEPTH: usize = 64;
 
-/// A value nested deeper than [`MAX_VALUE_DEPTH`], usually a collection that contains itself.
+/// A value nested deeper than 64 levels, usually a collection that contains itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DepthExceeded;
 
@@ -42,6 +43,11 @@ impl<T> Shared<T> {
 
     fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    /// The address of the shared data, which identifies it.
+    fn address(&self) -> usize {
+        Arc::as_ptr(&self.0).addr()
     }
 }
 
@@ -131,6 +137,10 @@ impl List {
     pub fn same_as(&self, other: &Self) -> bool {
         self.items.ptr_eq(&other.items)
     }
+
+    fn address(&self) -> usize {
+        self.items.address()
+    }
 }
 
 impl Default for List {
@@ -196,6 +206,7 @@ impl Map {
     }
 
     /// Removes `key`, returning its value.
+    #[must_use]
     pub fn remove(&self, key: &str) -> Option<Value> {
         self.0.lock().shift_remove(key)
     }
@@ -219,6 +230,10 @@ impl Map {
     #[must_use]
     pub fn same_as(&self, other: &Self) -> bool {
         self.0.ptr_eq(&other.0)
+    }
+
+    fn address(&self) -> usize {
+        self.0.address()
     }
 }
 
@@ -259,7 +274,7 @@ pub struct LoopInfo {
     pub(crate) index: i64,
     pub(crate) count: i64,
     pub(crate) has_next: bool,
-    pub(crate) parent: Option<Arc<LoopInfo>>,
+    pub(crate) parent: Option<Arc<Self>>,
 }
 
 impl LoopInfo {
@@ -371,7 +386,7 @@ impl Value {
     ///
     /// # Errors
     ///
-    /// Fails when the value contains itself or nests deeper than [`MAX_VALUE_DEPTH`].
+    /// Fails when the value contains itself or nests deeper than 64 levels.
     pub fn to_java_string(&self) -> Result<String, DepthExceeded> {
         let mut out = String::new();
         self.write_java(&mut out, 0)?;
@@ -432,11 +447,13 @@ impl Value {
             return false;
         }
         match (self, other) {
-            (Self::Null, Self::Null) => true,
+            (Self::Null, Self::Null) | (Self::Input, Self::Input) | (Self::Util, Self::Util) => {
+                true
+            }
             (Self::Bool(a), Self::Bool(b)) => a == b,
-            (Self::Int(a), Self::Int(b)) => a == b,
-            (Self::Double(a), Self::Double(b)) => a.to_bits() == b.to_bits() || a == b,
-            (Self::Str(a), Self::Str(b)) => a == b,
+            (Self::Int(a), Self::Int(b)) => a.cmp(b).is_eq(),
+            (Self::Double(a), Self::Double(b)) => doubles_equal(*a, *b),
+            (Self::Str(a), Self::Str(b)) => **a == **b,
             (Self::List(a), Self::List(b)) => {
                 a.same_as(b) || {
                     let (left, right) = (a.snapshot(), b.snapshot());
@@ -464,7 +481,6 @@ impl Value {
             (Self::Entry(a), Self::Entry(b)) => {
                 a.key == b.key && a.value.equals_at(&b.value, depth.saturating_add(1))
             }
-            (Self::Input, Self::Input) | (Self::Util, Self::Util) => true,
             (Self::Loop(a), Self::Loop(b)) => Arc::ptr_eq(a, b),
             (
                 Self::Null
@@ -481,6 +497,42 @@ impl Value {
                 _,
             ) => false,
         }
+    }
+}
+
+impl Value {
+    /// Whether `target` is this value or is reachable from it through lists and maps.
+    ///
+    /// Templates check this before storing a collection inside another, because a collection
+    /// that contains itself can never be freed and has no Java `toString`. The second result
+    /// is the number of collections visited, for charging against the step budget.
+    pub(crate) fn reaches(&self, target: &Self) -> (bool, usize) {
+        let mut seen = HashSet::new();
+        let mut stack = vec![self.clone()];
+        while let Some(value) = stack.pop() {
+            let address = match &value {
+                Self::List(list) => list.address(),
+                Self::Map(map) => map.address(),
+                _ => continue,
+            };
+            if !seen.insert(address) {
+                continue;
+            }
+            let found = match (&value, target) {
+                (Self::List(a), Self::List(b)) => a.same_as(b),
+                (Self::Map(a), Self::Map(b)) => a.same_as(b),
+                _ => false,
+            };
+            if found {
+                return (true, seen.len());
+            }
+            match &value {
+                Self::List(list) => stack.extend(list.snapshot()),
+                Self::Map(map) => stack.extend(map.entries().into_iter().map(|(_, v)| v)),
+                _ => {}
+            }
+        }
+        (false, seen.len())
     }
 }
 
@@ -527,8 +579,8 @@ impl From<String> for Value {
     }
 }
 
-impl From<Vec<Value>> for Value {
-    fn from(values: Vec<Value>) -> Self {
+impl From<Vec<Self>> for Value {
+    fn from(values: Vec<Self>) -> Self {
         Self::List(List::from_values(values))
     }
 }
@@ -545,8 +597,8 @@ impl From<Map> for Value {
     }
 }
 
-impl From<Option<Value>> for Value {
-    fn from(value: Option<Value>) -> Self {
+impl From<Option<Self>> for Value {
+    fn from(value: Option<Self>) -> Self {
         value.unwrap_or(Self::Null)
     }
 }
@@ -593,7 +645,7 @@ impl Value {
     ///
     /// # Errors
     ///
-    /// Fails when the value nests deeper than [`MAX_VALUE_DEPTH`].
+    /// Fails when the value nests deeper than 64 levels.
     pub fn to_json(&self) -> Result<String, DepthExceeded> {
         let mut out = String::new();
         self.write_json(&mut out, 0)?;
@@ -649,11 +701,22 @@ fn write_json_string(out: &mut String, text: &str) {
             '\t' => out.push_str("\\t"),
             '\u{8}' => out.push_str("\\b"),
             '\u{C}' => out.push_str("\\f"),
-            c if c < '\u{20}' => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c if c < '\u{20}' => push_formatted(out, format_args!("\\u{:04x}", u32::from(c))),
             c => out.push(c),
         }
     }
     out.push('"');
+}
+
+/// Java compares doubles exactly, as `==` and `Double.equals` do.
+#[expect(clippy::float_cmp, reason = "Java compares doubles exactly")]
+pub(crate) fn doubles_equal(a: f64, b: f64) -> bool {
+    a == b
+}
+
+/// Appends formatted text; `String` formatting cannot fail.
+pub(crate) fn push_formatted(out: &mut String, args: fmt::Arguments<'_>) {
+    out.push_str(&fmt::format(args));
 }
 
 /// A `double` formatted like `Double.toString`.
@@ -670,7 +733,11 @@ impl fmt::Display for JavaDouble {
             return f.write_str(if value > 0.0 { "Infinity" } else { "-Infinity" });
         }
         if value == 0.0 {
-            return f.write_str(if value.is_sign_negative() { "-0.0" } else { "0.0" });
+            return f.write_str(if value.is_sign_negative() {
+                "-0.0"
+            } else {
+                "0.0"
+            });
         }
         let scientific = format!("{:e}", value.abs());
         let Some((mantissa, exponent)) = scientific.split_once('e') else {
@@ -762,6 +829,9 @@ mod tests {
     #[test]
     fn json_round_trip_preserves_order_and_types() {
         let value = Value::from_json(r#"{"z":1,"a":[1.5,"x",null,true]}"#).unwrap_or(Value::Null);
-        assert_eq!(value.to_json().unwrap_or_default(), r#"{"z":1,"a":[1.5,"x",null,true]}"#);
+        assert_eq!(
+            value.to_json().unwrap_or_default(),
+            r#"{"z":1,"a":[1.5,"x",null,true]}"#
+        );
     }
 }
