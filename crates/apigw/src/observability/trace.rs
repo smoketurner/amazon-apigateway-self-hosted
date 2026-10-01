@@ -10,6 +10,7 @@ use std::sync::{Mutex, PoisonError};
 
 use serde_json::{Map, Number, Value, json};
 
+use crate::entropy::Entropy;
 use crate::pipeline::RequestContext;
 
 /// Fixed-size identifier written as lowercase hexadecimal.
@@ -18,12 +19,7 @@ struct Hex<const N: usize>([u8; N]);
 
 impl<const N: usize> Hex<N> {
     fn random() -> Option<Self> {
-        let mut bytes = [0_u8; N];
-        rustls::crypto::aws_lc_rs::default_provider()
-            .secure_random
-            .fill(&mut bytes)
-            .ok()?;
-        Some(Self(bytes))
+        Entropy::bytes().map(Self)
     }
 }
 

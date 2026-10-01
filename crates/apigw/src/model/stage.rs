@@ -284,13 +284,6 @@ impl StageSettings {
         if self.cache_cluster_enabled {
             features.push(Feature::ResponseCaching);
         }
-        if self
-            .canary
-            .as_ref()
-            .is_some_and(|c| c.percent_traffic > 0.0)
-        {
-            features.push(Feature::Canary);
-        }
         features
     }
 }
@@ -510,10 +503,7 @@ mod tests {
                 .map(String::as_str),
             Some("b")
         );
-        assert_eq!(
-            settings.unenforced(),
-            vec![Feature::ResponseCaching, Feature::Canary]
-        );
+        assert_eq!(settings.unenforced(), vec![Feature::ResponseCaching]);
         assert_eq!(
             DeploymentStamp::from(&stage),
             DeploymentStamp {

@@ -17,6 +17,7 @@ use super::format::AccessLogFormat;
 use super::metrics::{MetricKey, MetricsAggregator, RequestMetrics, RouteDimensions};
 use super::queue::{LogEvent, LogQueue};
 use super::trace::{Sampler, SegmentOutcome, Trace};
+use crate::canary::Release;
 use crate::gateway::ApiContext;
 use crate::model::{ApiKind, ApiModel, ExecutionLogging, MethodMatch, RouteKey};
 use crate::pipeline::RequestContext;
@@ -36,7 +37,9 @@ const STANDARD_METHODS: [&str; 7] = ["GET", "PUT", "POST", "DELETE", "PATCH", "H
 #[derive(Debug)]
 struct AccessLog {
     format: AccessLogFormat,
-    queue: LogQueue,
+    /// Every queue a line goes to: the stage's destination, plus the canary
+    /// destination for canary requests.
+    queues: Vec<LogQueue>,
 }
 
 #[derive(Debug)]
@@ -94,7 +97,7 @@ struct RouteSettings {
 struct Inner {
     api: ApiInfo,
     access_log: Option<AccessLog>,
-    execution_queue: Option<LogQueue>,
+    execution_queues: Vec<LogQueue>,
     metrics: Option<Metrics>,
     tracing: Option<Tracing>,
     routes: BTreeMap<RouteKey, RouteSettings>,
@@ -127,18 +130,21 @@ impl StageObserver {
         model: &ApiModel,
         api_id: &str,
         stage: Option<&str>,
+        release: Option<Release>,
     ) -> Self {
         let api = ApiInfo {
             kind: model.kind,
             api_id: api_id.to_owned(),
             stage: stage.map(str::to_owned),
+            release,
         };
         let access_log = model.stage.access_log.as_ref().and_then(|settings| {
             let format = settings.format.as_deref().filter(|f| !f.is_empty())?;
-            let queue = observability.access_log_queue(settings.destination_arn.as_deref())?;
-            Some(AccessLog {
+            let queues =
+                observability.access_log_queues(settings.destination_arn.as_deref(), release);
+            (!queues.is_empty()).then(|| AccessLog {
                 format: AccessLogFormat::from(format),
-                queue,
+                queues,
             })
         });
 
@@ -165,11 +171,11 @@ impl StageObserver {
                 },
             );
         }
-        let execution_queue = routes
-            .values()
-            .any(|r| r.execution_logging.is_some())
-            .then(|| observability.execution_queue(api_id, api.stage_name()))
-            .flatten();
+        let execution_queues = if routes.values().any(|r| r.execution_logging.is_some()) {
+            observability.execution_queues(api_id, api.stage_name(), release)
+        } else {
+            Vec::new()
+        };
         let metrics = observability.metrics().map(|aggregator| Metrics {
             aggregator,
             api: Self::api_dimension(model, api_id),
@@ -191,7 +197,7 @@ impl StageObserver {
             });
 
         if access_log.is_none()
-            && execution_queue.is_none()
+            && execution_queues.is_empty()
             && metrics.is_none()
             && tracing.is_none()
         {
@@ -200,7 +206,7 @@ impl StageObserver {
         Self(Some(Arc::new(Inner {
             api,
             access_log,
-            execution_queue,
+            execution_queues,
             metrics,
             tracing,
             routes,
@@ -268,14 +274,14 @@ impl StageObserver {
         let settings = pending.route.as_ref().and_then(|key| inner.routes.get(key));
 
         if let Some(ref metrics) = inner.metrics {
-            metrics.aggregator.record(
-                &inner.metric_key(metrics, settings, &pending.method),
-                RequestMetrics {
-                    status,
-                    latency_ms,
-                    integration_latency_ms: integration_ms,
-                },
-            );
+            let request = RequestMetrics {
+                status,
+                latency_ms,
+                integration_latency_ms: integration_ms,
+            };
+            for key in inner.metric_keys(metrics, settings, &pending.method) {
+                metrics.aggregator.record(&key, request);
+            }
         }
         let Some(mut context) = pending.context else {
             return response;
@@ -285,16 +291,19 @@ impl StageObserver {
             latency_ms: integration_ms,
             error: None,
         };
-        if let (Some(settings), Some(queue)) = (
-            settings.and_then(|s| s.execution_logging),
-            inner.execution_queue.as_ref(),
-        ) {
+        if let Some(logging) = settings
+            .and_then(|s| s.execution_logging)
+            .filter(|_| !inner.execution_queues.is_empty())
+        {
             let outcome = Outcome {
                 status,
                 integration: integration_ms.map(|ms| (status, ms)),
             };
-            for line in settings.lines(&context, outcome) {
-                queue.push(LogEvent::now(line));
+            for line in logging.lines(&context, outcome) {
+                let event = LogEvent::now(line);
+                for queue in &inner.execution_queues {
+                    queue.push(event.clone());
+                }
             }
         }
         if let (Some(trace), Some(tracing)) = (
@@ -320,9 +329,10 @@ impl StageObserver {
                 Self::response_length(&response),
                 latency_ms,
             );
-            access_log
-                .queue
-                .push(LogEvent::now(access_log.format.render(&variables)));
+            let event = LogEvent::now(access_log.format.render(&variables));
+            for queue in &access_log.queues {
+                queue.push(event.clone());
+            }
         }
         response
     }
@@ -368,6 +378,27 @@ impl StageObserver {
 }
 
 impl Inner {
+    /// The series a request counts toward: its stage's, and for canary
+    /// requests also the canary's own, whose `Stage` is `{stage}/Canary`.
+    fn metric_keys(
+        &self,
+        metrics: &Metrics,
+        settings: Option<&RouteSettings>,
+        method: &Method,
+    ) -> Vec<MetricKey> {
+        let stage = self.metric_key(metrics, settings, method);
+        match self.api.release {
+            Some(Release::Canary) => {
+                let canary = MetricKey {
+                    stage: format!("{}/Canary", stage.stage),
+                    ..stage.clone()
+                };
+                vec![stage, canary]
+            }
+            Some(Release::Production) | None => vec![stage],
+        }
+    }
+
     fn metric_key(
         &self,
         metrics: &Metrics,
@@ -517,7 +548,8 @@ mod tests {
             },
             http: reqwest::Client::new(),
             aws: clients,
-            observer: StageObserver::new(&observability, &model, "abc", Some("prod")),
+            observer: StageObserver::new(&observability, &model, "abc", Some("prod"), None),
+            release: None,
         });
         let (router, _) = build(&model, &ctx, &BasePath::default());
         (router, observability)
@@ -714,9 +746,10 @@ mod tests {
                 kind: ApiKind::Rest,
                 api_id: "abc".to_owned(),
                 stage: Some("prod".to_owned()),
+                release: None,
             },
             access_log: None,
-            execution_queue: None,
+            execution_queues: Vec::new(),
             metrics: None,
             tracing: None,
             routes: BTreeMap::new(),

@@ -4,7 +4,9 @@
 mod app;
 mod authz;
 mod aws;
+mod canary;
 mod config;
+mod entropy;
 mod gateway;
 mod gateway_response;
 mod identity;

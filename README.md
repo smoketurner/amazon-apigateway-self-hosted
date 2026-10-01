@@ -82,6 +82,7 @@ Every flag has an environment variable (`apigw --help` lists them). The main one
 | `--metrics-namespace` | `APIGW_METRICS_NAMESPACE` | `ApiGatewaySelfHosted` | CloudWatch namespace for the metrics (`AWS/` is reserved) |
 | `--tracing` | `APIGW_TRACING` | `aws` | `aws` sends X-Ray segments for stages with tracing enabled and propagates trace headers; `off` does neither |
 | `--xray-sampling-percent` | `APIGW_XRAY_SAMPLING_PERCENT` | `5` | Percentage of requests traced after the first request each second, when the caller made no sampling decision |
+| `--canary-export-stage` | `APIGW_CANARY_EXPORT_STAGE` | none | REST stage that holds the canary deployment of `--stage`, exported to build the canary release ([Canary releases](#canary-releases)) |
 | `--log-stream` | `APIGW_LOG_STREAM` | `{HOSTNAME}/{start time}/{suffix}` | Log stream this process writes to in every log group |
 
 Logs are JSON on stdout by default (`--log-format text` for humans); filter with `RUST_LOG`.
@@ -113,6 +114,26 @@ HTTP route:
 
 The file is re-read on every refresh. A key that names no route rejects the whole update (the
 previous routes keep serving), so a typo never goes unnoticed.
+
+## Canary releases
+
+A REST stage with canary settings serves two releases. Each request goes to the canary with
+probability `percentTraffic` (chosen with aws-lc-rs randomness; if randomness is unavailable the
+request goes to production), and the canary's `stageVariableOverrides` apply to its routes on top of
+the stage's variables. `--stage-variable` overrides apply to both releases and win over the
+canary's, so a variable you override locally is the same in both. `$context.isCanaryRequest` is
+`true` or `false` on stages that have a canary. Canary requests are also logged to the
+`{access log group}/Canary` and `API-Gateway-Execution-Logs_{apiId}/{stage}/Canary` log groups
+(created if missing) and counted in a second metric series whose `Stage` is `{stage}/Canary`.
+A canary at 0 percent builds no second release.
+
+API Gateway cannot export a canary deployment, so by default the canary release has the stage's
+routes and differs only in stage variables. To serve the canary deployment's routes, deploy it to
+a second stage of the same API (for example with `create-deployment --stage-name canary-shadow`)
+and pass `--canary-export-stage canary-shadow`: that stage's export builds the canary release
+whenever either stage's deployment changes, and its own stage variables and settings are ignored.
+`/routes` reports the canary release, its routes, and where its structure came from. `useStageCache`
+is recorded and applied when response caching lands ([#38](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/38)).
 
 ## Observability
 
@@ -183,11 +204,12 @@ are flushed every 5 seconds, when a batch is full, and at shutdown.
 | Action | Resource | For |
 |---|---|---|
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/restapis/<id>/stages/<stage>/exports/oas30`, `.../restapis/<id>/stages/<stage>` | REST APIs |
+| `apigateway:GET` | the same two resources for the stage named by `--canary-export-stage` | canary releases from a shadow stage |
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/apis/<id>/exports/OAS30`, `.../apis/<id>/stages/<stage>` | HTTP APIs |
 | `lambda:InvokeFunction` | each integrated function and each Lambda authorizer function | `AWS_PROXY` routes and Lambda authorizers |
 | `sts:AssumeRole` | each integration `credentials` and each `authorizerCredentials` role | integrations and authorizers with a role, unless `--integration-credentials=gateway` |
 | `logs:CreateLogStream`, `logs:PutLogEvents` | each access log group, the metrics log group, and `arn:aws:logs:<region>:<account>:log-group:API-Gateway-Execution-Logs_<id>/<stage>:*` | access logs, metrics, execution logs |
-| `logs:CreateLogGroup` | `arn:aws:logs:<region>:<account>:log-group:API-Gateway-Execution-Logs_*` | execution logs (the only log group the gateway creates) |
+| `logs:CreateLogGroup` | `arn:aws:logs:<region>:<account>:log-group:API-Gateway-Execution-Logs_*`, and each access log group with `/Canary` appended | execution logs, and canary access logs (the only log groups the gateway creates) |
 | `xray:PutTraceSegments` | `*` | stages with tracing enabled |
 | `firehose:PutRecordBatch` | each access log delivery stream | access logs to Firehose |
 

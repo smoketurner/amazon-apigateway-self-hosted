@@ -18,6 +18,12 @@ impl LogGroup {
         Self(format!("API-Gateway-Execution-Logs_{api_id}/{stage}"))
     }
 
+    /// The log group that receives a stage's canary requests as well:
+    /// the same name with `/Canary` appended.
+    fn canary(&self) -> Self {
+        Self(format!("{}/Canary", self.0))
+    }
+
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
@@ -50,6 +56,26 @@ pub(crate) enum Destination {
     XRay { region: Option<String> },
     /// The process's standard output, one event per line.
     Stdout,
+}
+
+impl Destination {
+    /// Where canary requests are logged in addition to `self`: a CloudWatch
+    /// Logs log group gets a sibling named with a `/Canary` suffix, created if
+    /// it does not exist. Other destinations have no canary variant.
+    pub(crate) fn canary(&self) -> Option<Self> {
+        match *self {
+            Self::CloudWatch {
+                ref region,
+                ref group,
+                ..
+            } => Some(Self::CloudWatch {
+                region: region.clone(),
+                group: group.canary(),
+                create_group: true,
+            }),
+            Self::Firehose { .. } | Self::XRay { .. } | Self::Stdout => None,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

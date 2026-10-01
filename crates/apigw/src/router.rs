@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::authz::Authorizers;
 use crate::aws::{AwsClients, RoleArn, RoleStatus};
+use crate::canary::{CanaryRelease, CanarySummary};
 use crate::gateway::{ApiContext, Enforcement, RequestId};
 use crate::integration::Integration;
 use crate::model::{ApiKind, ApiModel, Feature, MethodMatch, Protections, RouteKey, RoutePath};
@@ -52,8 +53,21 @@ impl std::str::FromStr for BasePath {
 /// One loaded API definition, as served and as reported on the admin listener.
 pub(crate) struct Loaded {
     pub(crate) router: Router,
+    /// The canary release of the stage, when it has one that receives traffic.
+    pub(crate) canary: Option<CanaryRelease>,
     pub(crate) kind: ApiKind,
     pub(crate) summary: LoadSummary,
+}
+
+impl Loaded {
+    /// The router for one request: the canary's for the share of requests the
+    /// stage's canary settings send there, the stage's otherwise.
+    fn router_for_request(&self) -> &Router {
+        match self.canary {
+            Some(ref canary) if canary.share.picks_canary() => &canary.router,
+            Some(_) | None => &self.router,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,6 +79,9 @@ pub(crate) struct LoadSummary {
     /// API- and stage-level features imported but not enforced yet.
     pub(crate) unenforced: Vec<Feature>,
     pub(crate) routes: Vec<RouteSummary>,
+    /// The canary release, when the stage has one that receives traffic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) canary: Option<CanarySummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -282,7 +299,12 @@ pub(crate) fn dispatcher(current: watch::Receiver<Arc<Loaded>>) -> Router {
             request.extensions_mut().insert(RequestId(request_id));
             let method = request.method().clone();
             let path = request.uri().path().to_owned();
-            let mut response = loaded.router.clone().oneshot(request).await.into_response();
+            let mut response = loaded
+                .router_for_request()
+                .clone()
+                .oneshot(request)
+                .await
+                .into_response();
             if let Ok(value) = HeaderValue::try_from(request_id.to_string()) {
                 response
                     .headers_mut()
@@ -386,6 +408,7 @@ mod tests {
             http: reqwest::Client::new(),
             aws: aws(),
             observer: StageObserver::disabled(),
+            release: None,
         })
     }
 
@@ -938,7 +961,9 @@ mod tests {
                     loaded_at: String::new(),
                     unenforced: Vec::new(),
                     routes: summary,
+                    canary: None,
                 },
+                canary: None,
             })
         };
         let (tx, rx) = watch::channel(loaded(first, summary));
@@ -1017,6 +1042,7 @@ mod tests {
             http: reqwest::Client::new(),
             aws,
             observer: StageObserver::disabled(),
+            release: None,
         });
         let (router, _) = build(&model, &api, &BasePath::default());
         let request = Request::builder()
