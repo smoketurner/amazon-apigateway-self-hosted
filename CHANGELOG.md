@@ -92,6 +92,16 @@ All notable changes to this project are documented here. The format follows
   and `requestContext.identity.clientCert` and `requestContext.authentication.clientCert` in
   Lambda events, carry `clientCertPem`, `subjectDN`, `issuerDN`, `serialNumber`, and `validity`;
   a certificate reported by a trusted proxy in `X-Forwarded-Client-Cert` is described the same way.
+- Response caching: REST stages with `cacheClusterEnabled` cache responses of methods whose method
+  settings enable caching (`GET` methods through the stage-wide setting, other methods only through
+  their own), for the method's TTL (default 300 s, at most 3600 s, 0 off), in the state backend. Entries
+  are keyed by the method and the integration's `cacheKeyParameters` values, and responses over
+  1,048,576 bytes are not cached. `Cache-Control: max-age=0` follows
+  `requireAuthorizationForCacheControl` (default true) and
+  `unauthorizedCacheControlHeaderStrategy`; since this gateway cannot verify the IAM permission to
+  invalidate, every such request counts as unauthorized when authorization is required.
+  `CacheHitCount` and `CacheMissCount` are published with the other metrics. A canary release uses
+  the stage cache only with `useStageCache`, sharing entries only when it runs the same deployment.
 - Log delivery uses bounded queues that drop (and count) events instead of slowing requests,
   and flushes everything on shutdown.
 - REST gateway responses: every error the gateway generates (missing authentication token,

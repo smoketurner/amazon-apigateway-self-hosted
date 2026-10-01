@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::authz::{Authorizers, ResourcePolicies};
 use crate::aws::{AwsClients, RoleArn, RoleStatus};
+use crate::cache::CacheSettings;
 use crate::canary::{CanaryRelease, CanarySummary};
 use crate::domain::{DomainName, DomainRegistry, DomainSummary, Resolution};
 use crate::gateway::{ApiContext, Enforcement, RequestId};
@@ -234,11 +235,8 @@ fn axum_path(path: &str) -> Result<String, String> {
     Ok(out)
 }
 
-pub(crate) fn build(
-    model: &ApiModel,
-    ctx: &Arc<ApiContext>,
-    base: &BasePath,
-) -> (Router, Vec<RouteSummary>) {
+/// Compiles every operation of `model` into a route of the release `ctx` serves.
+fn compile_routes(model: &ApiModel, ctx: &ApiContext) -> Vec<Route> {
     let authorizers = Authorizers::compile(model, &ctx.stage_variables);
     let policies = ResourcePolicies::compile(model, &ctx.api_id);
     let throttling = ThrottleSettings::new(
@@ -247,11 +245,17 @@ pub(crate) fn build(
         model.stage.clone(),
         ctx.replicas,
     );
-    let routes: Vec<Route> = model
+    let caching = CacheSettings::new(
+        &ctx.api_id,
+        ctx.stage.as_deref(),
+        model.stage.clone(),
+        ctx.cache.clone(),
+    );
+    model
         .operations
         .iter()
         .map(|operation| {
-            Route::compile(
+            let mut route = Route::compile(
                 operation,
                 model.kind,
                 &ctx.stage_variables,
@@ -259,9 +263,19 @@ pub(crate) fn build(
                 &policies,
                 &throttling,
                 &ctx.vpc_links,
-            )
+            );
+            route.cache = caching.for_route(operation);
+            route
         })
-        .collect();
+        .collect()
+}
+
+pub(crate) fn build(
+    model: &ApiModel,
+    ctx: &Arc<ApiContext>,
+    base: &BasePath,
+) -> (Router, Vec<RouteSummary>) {
+    let routes = compile_routes(model, ctx);
     let mut summaries = Vec::with_capacity(routes.len());
     let mut default = None;
     let mut by_path: BTreeMap<String, BTreeMap<MethodMatch, Route>> = BTreeMap::new();
@@ -538,6 +552,7 @@ mod tests {
     use super::*;
     use crate::authz::KeyStore;
     use crate::aws::{CredentialsMode, LambdaEndpoints};
+    use crate::cache::CacheScope;
     use crate::cors::Cors;
     use crate::gateway::{AuthorizationMode, Unsupported};
     use crate::gateway_response::GatewayResponses;
@@ -593,6 +608,7 @@ mod tests {
             keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
             observer: StageObserver::disabled(),
             release: None,
+            cache: CacheScope::Off,
         })
     }
 
@@ -1417,6 +1433,7 @@ mod tests {
             keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
             observer: StageObserver::disabled(),
             release: None,
+            cache: CacheScope::Off,
         });
         let (router, _) = build(&model, &api, &BasePath::default());
         let request = Request::builder()

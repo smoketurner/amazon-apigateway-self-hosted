@@ -6,7 +6,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Feature, MethodMatch, RoutePath};
+use super::{MethodMatch, RoutePath};
 
 /// Identifies one deployed version of a stage. A refresh re-exports only when
 /// this changes.
@@ -278,21 +278,31 @@ pub(crate) struct StageSettings {
 }
 
 impl StageSettings {
-    /// Stage settings imported but not enforced yet.
-    pub(crate) fn unenforced(&self) -> Vec<Feature> {
-        let mut features = Vec::new();
-        if self.cache_cluster_enabled {
-            features.push(Feature::ResponseCaching);
-        }
-        features
-    }
-}
-
-impl StageSettings {
     /// The settings in effect for one route: the stage-wide entry, overridden
     /// field by field by the entry for the method on any path, the path with any
     /// method, and the exact path and method, in that order.
     pub(crate) fn settings_for(&self, method: &MethodMatch, path: &RoutePath) -> MethodSettings {
+        self.layered_settings(method, path, true)
+    }
+
+    /// As [`StageSettings::settings_for`], without the stage-wide entry: what
+    /// is set for the method or its path specifically. API Gateway enables
+    /// caching on `GET` methods through the stage-wide entry, but on other
+    /// methods only through their own.
+    pub(crate) fn method_specific_settings(
+        &self,
+        method: &MethodMatch,
+        path: &RoutePath,
+    ) -> MethodSettings {
+        self.layered_settings(method, path, false)
+    }
+
+    fn layered_settings(
+        &self,
+        method: &MethodMatch,
+        path: &RoutePath,
+        include_stage_default: bool,
+    ) -> MethodSettings {
         let path = path.to_string();
         let methods = match method {
             MethodMatch::Any => vec!["ANY".to_owned(), "*".to_owned()],
@@ -304,7 +314,11 @@ impl StageSettings {
                 method: method.to_owned(),
             })
         };
-        let mut layers = vec![self.method_settings.get(&SettingsScope::All)];
+        let mut layers = vec![
+            self.method_settings
+                .get(&SettingsScope::All)
+                .filter(|_| include_stage_default),
+        ];
         layers.extend(methods.iter().map(|m| lookup("*", m)));
         layers.push(lookup(&path, "*"));
         layers.extend(methods.iter().map(|m| lookup(&path, m)));
@@ -503,7 +517,6 @@ mod tests {
                 .map(String::as_str),
             Some("b")
         );
-        assert_eq!(settings.unenforced(), vec![Feature::ResponseCaching]);
         assert_eq!(
             DeploymentStamp::from(&stage),
             DeploymentStamp {
@@ -533,7 +546,6 @@ mod tests {
         let settings = StageSettings::from(&stage);
         assert_eq!(settings.method_settings.len(), 2);
         assert!(settings.method_settings.contains_key(&SettingsScope::All));
-        assert!(settings.unenforced().is_empty());
     }
 
     fn scope(path: &str, method: &str) -> SettingsScope {
@@ -651,6 +663,5 @@ mod tests {
                 ..MethodSettings::default()
             },
         );
-        assert!(settings.unenforced().is_empty());
     }
 }

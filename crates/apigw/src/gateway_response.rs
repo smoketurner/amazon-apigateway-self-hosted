@@ -164,6 +164,11 @@ pub(crate) struct Failure {
 }
 
 impl Failure {
+    #[cfg(test)]
+    pub(crate) fn status(&self) -> StatusCode {
+        self.status
+    }
+
     /// A failure of `response_type` with API Gateway's default status and message.
     pub(crate) fn new(response_type: ResponseType) -> Self {
         Self {
