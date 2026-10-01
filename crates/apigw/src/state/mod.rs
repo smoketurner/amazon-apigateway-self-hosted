@@ -68,6 +68,13 @@ pub(crate) enum StateBackend {
     InMemory(InMemory),
 }
 
+impl StateBackend {
+    /// An in-memory backend with the default bounds, shared between requests.
+    pub(crate) fn in_memory() -> Arc<Self> {
+        Arc::new(Self::InMemory(InMemory::new(InMemoryLimits::default())))
+    }
+}
+
 #[expect(
     clippy::unused_async,
     clippy::unused_async_trait_impl,

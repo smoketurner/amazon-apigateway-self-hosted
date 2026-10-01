@@ -29,6 +29,7 @@ mod router;
 mod source;
 mod state;
 mod throttle;
+mod vpc_link;
 
 use clap::Parser as _;
 use tracing_subscriber::EnvFilter;

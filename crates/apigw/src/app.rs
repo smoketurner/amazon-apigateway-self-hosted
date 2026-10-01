@@ -32,7 +32,8 @@ use crate::model::{ApiModel, Feature, IntegrationOverrides, StageSettings};
 use crate::observability::{Observability, StageObserver};
 use crate::router::{self, BasePath, LoadSummary, Loaded, RouteSummary};
 use crate::source::{Fetch, Fetcher, Snapshot, Source, SourceError};
-use crate::state::{InMemory, InMemoryLimits, StateBackend};
+use crate::state::StateBackend;
+use crate::vpc_link::VpcLinks;
 
 const CERT_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -48,6 +49,7 @@ pub(crate) struct Builder {
     keys: Arc<KeyStore>,
     state: Arc<StateBackend>,
     replicas: NonZeroU32,
+    vpc_links: VpcLinks,
     observability: Arc<Observability>,
 }
 
@@ -66,9 +68,7 @@ impl Builder {
             },
             stage_variable_overrides: BTreeMap::new(),
             overrides_path: None,
-            state: Arc::new(StateBackend::InMemory(InMemory::new(
-                InMemoryLimits::default(),
-            ))),
+            state: StateBackend::in_memory(),
             replicas: NonZeroU32::MIN,
             http: reqwest::Client::new(),
             aws: Arc::new(AwsClients::new(
@@ -78,6 +78,7 @@ impl Builder {
                 reqwest::Client::new(),
             )),
             keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
+            vpc_links: VpcLinks::default(),
         }
     }
 }
@@ -135,6 +136,7 @@ impl Builder {
             cors: model.settings.cors.as_ref().map(Cors::compile),
             state: Arc::clone(&self.state),
             replicas: self.replicas,
+            vpc_links: self.vpc_links.clone(),
             enforcement: self.enforcement,
             http: self.http.clone(),
             aws: Arc::clone(&self.aws),
@@ -615,10 +617,9 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         aws: Arc::clone(&aws),
         keys,
         http,
-        state: Arc::new(StateBackend::InMemory(InMemory::new(
-            InMemoryLimits::default(),
-        ))),
+        state: StateBackend::in_memory(),
         replicas: config.replicas,
+        vpc_links: config.vpc_links(),
     };
     builder.enforcement.warn_if_relaxed();
     let shutdown = CancellationToken::new();
@@ -700,10 +701,9 @@ mod tests {
                 "local.internal".to_owned(),
             )]),
             overrides_path,
-            state: Arc::new(StateBackend::InMemory(InMemory::new(
-                InMemoryLimits::default(),
-            ))),
+            state: StateBackend::in_memory(),
             replicas: NonZeroU32::MIN,
+            vpc_links: VpcLinks::default(),
             http: reqwest::Client::new(),
             aws: Arc::new(AwsClients::new(
                 sdk_config(),

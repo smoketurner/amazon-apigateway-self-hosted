@@ -20,6 +20,7 @@ Java regex syntax to `fancy-regex` and provides Java's matching, replacement, an
 | `state`, `throttle` | `StateBackend` (token buckets, period quota counters, TTL cache; in-memory today, shaped for a shared Valkey backend) and the stage throttle settings that become one bucket per route |
 | `digest` | SHA-256 digests, so credentials never appear in cache keys |
 | `cors`, `http_routes`, `mapping` | HTTP API CORS (preflight answers and response headers), route selection by path and method together for HTTP APIs, and `requestParameters`/`responseParameters` mapping for `HTTP_PROXY` |
+| `vpc_link` | `--vpc-link` mappings from a VPC link connection ID to an in-cluster base URL, used when compiling `HTTP_PROXY` integrations |
 | `aws` | `AwsClients`: per-region Lambda clients, assumed integration-role credentials, Lambda endpoint overrides, trace header propagation |
 | `proxy` | `HTTP_PROXY` forwarding |
 | `lambda`, `lambda_response` | `AWS_PROXY` event construction (payload 1.0 and 2.0), invocation (buffered `Invoke` or streamed `InvokeWithResponseStream`), and response mapping |
