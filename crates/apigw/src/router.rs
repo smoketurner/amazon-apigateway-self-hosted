@@ -15,9 +15,11 @@ use tokio::sync::watch;
 use tower::ServiceExt as _;
 use uuid::Uuid;
 
-use crate::gateway::{self, ApiContext, Enforcement, RequestId, request_id_header};
+use crate::aws::{AwsClients, RoleArn, RoleStatus};
+use crate::gateway::{ApiContext, Enforcement, GatewayError, RequestId};
 use crate::integration::Integration;
 use crate::model::{ApiKind, ApiModel, Feature, MethodMatch, Protections, RouteKey, RoutePath};
+use crate::pipeline::Pipeline;
 use crate::route::Route;
 
 /// A stage prefix such as `/prod` that every route is served under, as on an
@@ -68,6 +70,8 @@ pub(crate) struct RouteSummary {
     pub(crate) route_key: RouteKey,
     pub(crate) integration: &'static str,
     pub(crate) target: Option<String>,
+    /// The role the integration runs as, when it has one.
+    pub(crate) credentials: Option<RoleArn>,
     pub(crate) protections: Protections,
     /// Why the route is not being served as API Gateway would serve it.
     pub(crate) problems: Vec<String>,
@@ -83,15 +87,22 @@ impl RouteSummary {
             .collect();
         let target = match route.integration {
             Integration::HttpProxy(ref proxy) => Some(proxy.uri.clone()),
-            Integration::Lambda(ref lambda) => Some(lambda.function.clone()),
+            Integration::Lambda(ref lambda) => Some(lambda.function.to_string()),
             Integration::Mock(_) => None,
             Integration::Unsupported { ref reason } => {
                 problems.push(reason.clone());
                 None
             }
         };
+        let credentials = match route.integration {
+            Integration::Lambda(ref lambda) => lambda.credentials.clone(),
+            Integration::HttpProxy(_) | Integration::Mock(_) | Integration::Unsupported { .. } => {
+                None
+            }
+        };
         Self {
             route_key: route.key.clone(),
+            credentials,
             integration: route.integration.kind(),
             target,
             protections: route.protections.clone(),
@@ -119,8 +130,9 @@ impl PathRoutes {
 
     async fn handle(&self, request: Request) -> Response {
         match self.select(request.method()) {
-            Some(route) => gateway::handle(&self.ctx, route, request).await,
-            None => gateway::not_found(self.ctx.kind),
+            // The pipeline future holds whole SDK calls; box it once here.
+            Some(route) => Box::pin(Pipeline::new(&self.ctx, route).run(request)).await,
+            None => GatewayError::NoRoute.response(self.ctx.kind),
         }
     }
 }
@@ -224,7 +236,7 @@ pub(crate) fn build(
             Router::new()
                 .without_v07_checks()
                 .nest(prefix, router)
-                .fallback(move || async move { gateway::not_found(kind) })
+                .fallback(move || async move { GatewayError::NoRoute.response(kind) })
         }
         None => router,
     };
@@ -247,7 +259,7 @@ pub(crate) fn dispatcher(current: watch::Receiver<Arc<Loaded>>) -> Router {
             if let Ok(value) = HeaderValue::try_from(request_id.to_string()) {
                 response
                     .headers_mut()
-                    .insert(request_id_header(loaded.kind), value);
+                    .insert(loaded.kind.request_id_header(), value);
             }
             tracing::info!(
                 request_id = %request_id,
@@ -263,14 +275,27 @@ pub(crate) fn dispatcher(current: watch::Receiver<Arc<Loaded>>) -> Router {
 }
 
 /// Health and introspection routes for the admin listener.
-pub(crate) fn admin(current: watch::Receiver<Arc<Loaded>>) -> Router {
+/// The `/routes` document: the loaded API plus the current state of every
+/// integration role the gateway has tried to assume.
+#[derive(Serialize)]
+struct RoutesReport {
+    #[serde(flatten)]
+    summary: LoadSummary,
+    credentials: BTreeMap<RoleArn, RoleStatus>,
+}
+
+/// Health and introspection routes for the admin listener.
+pub(crate) fn admin(current: watch::Receiver<Arc<Loaded>>, aws: Arc<AwsClients>) -> Router {
     Router::new()
         .route("/healthz", axum::routing::get(|| async { "ok" }))
         .route(
             "/routes",
             axum::routing::get(move || {
-                let summary = current.borrow().summary.clone();
-                async move { axum::Json(summary) }
+                let report = RoutesReport {
+                    summary: current.borrow().summary.clone(),
+                    credentials: aws.role_status(),
+                };
+                async move { axum::Json(report) }
             }),
         )
 }
@@ -294,10 +319,19 @@ mod tests {
         request_validation: Unsupported::Reject,
     };
 
-    fn ctx(kind: ApiKind, enforcement: Enforcement) -> Arc<ApiContext> {
+    fn aws() -> Arc<AwsClients> {
         let config = aws_config::SdkConfig::builder()
             .behavior_version(aws_config::BehaviorVersion::latest())
             .build();
+        Arc::new(AwsClients::new(
+            config,
+            crate::aws::CredentialsMode::Assume,
+            crate::aws::LambdaEndpoints::default(),
+            reqwest::Client::new(),
+        ))
+    }
+
+    fn ctx(kind: ApiKind, enforcement: Enforcement) -> Arc<ApiContext> {
         Arc::new(ApiContext {
             kind,
             api_id: "abc".to_owned(),
@@ -305,7 +339,7 @@ mod tests {
             stage_variables: StageVariables::default(),
             enforcement,
             http: reqwest::Client::new(),
-            lambda: aws_sdk_lambda::Client::new(&config),
+            aws: aws(),
         })
     }
 
@@ -680,9 +714,74 @@ mod tests {
             StatusCode::NON_AUTHORITATIVE_INFORMATION
         );
 
-        let (status, body) = call(&admin(rx), Method::GET, "/routes").await;
+        let (status, body) = call(&admin(rx, aws()), Method::GET, "/routes").await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("GET /pets"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn lambda_routes_invoke_through_endpoint_overrides() {
+        let app = axum::Router::new().route(
+            "/invoke",
+            axum::routing::post(|headers: axum::http::HeaderMap, body: axum::body::Bytes| async move {
+                let event: Value = serde_json::from_slice(&body).unwrap();
+                let trace = headers.get("x-amzn-trace-id").and_then(|v| v.to_str().ok()).unwrap_or("none").to_owned();
+                json!({
+                    "statusCode": 201,
+                    "headers": {"x-trace": trace},
+                    "body": format!("{} {}", event.pointer("/httpMethod").and_then(Value::as_str).unwrap_or("?"), event.pointer("/pathParameters/id").and_then(Value::as_str).unwrap_or("?")),
+                })
+                .to_string()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let config = aws_config::SdkConfig::builder()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .build();
+        let endpoint = reqwest::Url::parse(&format!("http://{addr}/invoke")).unwrap();
+        let aws = Arc::new(AwsClients::new(
+            config,
+            crate::aws::CredentialsMode::Assume,
+            crate::aws::LambdaEndpoints::from_iter([("items".to_owned(), endpoint)]),
+            reqwest::Client::new(),
+        ));
+        let doc = json!({"paths": {"/items/{id}": {"put": {"x-amazon-apigateway-integration": {
+            "type": "aws_proxy", "httpMethod": "POST",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:items/invocations"
+        }}}}});
+        let model = ApiModel::import(
+            &doc,
+            ApiKind::Rest,
+            StageSettings::default(),
+            &IntegrationOverrides::default(),
+        )
+        .unwrap();
+        let api = Arc::new(ApiContext {
+            kind: ApiKind::Rest,
+            api_id: "abc".to_owned(),
+            stage: Some("prod".to_owned()),
+            stage_variables: StageVariables::default(),
+            enforcement: STRICT,
+            http: reqwest::Client::new(),
+            aws,
+        });
+        let (router, _) = build(&model, &api, &BasePath::default());
+        let request = Request::builder()
+            .method(Method::PUT)
+            .uri("/items/42")
+            .header("x-amzn-trace-id", "Root=1-test")
+            .body(Body::empty())
+            .unwrap();
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(response.headers()["x-trace"], "Root=1-test");
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"PUT 42");
     }
 
     #[test]

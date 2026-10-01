@@ -216,6 +216,14 @@ pub(crate) struct ClientIdentity {
 }
 
 impl ClientIdentity {
+    /// An identity whose client address could not be established.
+    pub(crate) fn unknown() -> Self {
+        Self {
+            source_ip: SourceIp::Unknown,
+            certificate: ClientCertificate::Absent,
+        }
+    }
+
     pub(crate) fn source_ip(&self) -> SourceIp {
         self.source_ip
     }

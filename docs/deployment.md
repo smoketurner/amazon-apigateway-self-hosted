@@ -45,6 +45,50 @@ There is no IRSA or EKS Pod Identity off AWS. Options, in order of preference:
 
 Always set `AWS_REGION` to the API's region.
 
+## Integration roles
+
+In AWS, API Gateway invokes integrations as the integration's `credentials` role, and Lambda
+functions allow `apigateway.amazonaws.com` in their resource policies. Outside AWS the gateway's
+own principal does the calling, so:
+
+- **Integration roles** (`credentials` on an integration): add the gateway's principal to the
+  role's trust policy alongside API Gateway, and grant the gateway `sts:AssumeRole` on it.
+
+  ```json
+  {
+    "Effect": "Allow",
+    "Principal": { "AWS": "arn:aws:iam::123456789012:role/apigw-self-hosted" },
+    "Action": "sts:AssumeRole"
+  }
+  ```
+
+  `/routes` reports each role the gateway tried to assume and whether it worked. With
+  `--integration-credentials=gateway` the roles are ignored and the gateway's own credentials
+  are used.
+- **Lambda functions without a role**: grant the gateway's principal `lambda:InvokeFunction`
+  (identity policy, or the function's resource policy for cross-account functions).
+- **Caller passthrough** (`arn:aws:iam::*:user/*`) needs IAM-authenticated callers and cannot
+  work outside AWS; those routes answer 501.
+
+Lambda clients use the region in each function's ARN, so functions in several regions work
+from one gateway.
+
+## Running Lambda functions in-cluster
+
+`--lambda-endpoint FUNCTION=URL` (repeatable, or comma-separated in `APIGW_LAMBDA_ENDPOINTS`)
+sends a function's invocations to a URL that speaks Lambda's Invoke protocol instead of to AWS.
+The AWS Lambda base images include the Runtime Interface Emulator, so a function's container
+image can run as a Deployment unchanged:
+
+```bash
+--lambda-endpoint pets=http://pets.default.svc:8080/2015-03-31/functions/function/invocations
+```
+
+`FUNCTION` is the function name or full ARN from the integration. The emulator's response body
+is the function's payload; an `X-Amz-Function-Error` header marks a function error, as with Lambda.
+The SDK also honors `AWS_ENDPOINT_URL_LAMBDA` (and `AWS_ENDPOINT_URL`) for LocalStack-style
+emulators that implement the full Lambda API.
+
 ## Kubernetes
 
 ```yaml
