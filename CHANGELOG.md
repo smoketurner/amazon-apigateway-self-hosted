@@ -73,6 +73,20 @@ All notable changes to this project are documented here. The format follows
   `$context`, `$stageVariables`, and `$method.request.*` substitution (no VTL), with
   `DEFAULT_4XX`/`DEFAULT_5XX` fallback. Error responses carry `x-amzn-ErrorType` and
   `x-amz-apigw-id`. The 413 response is not customizable. HTTP APIs keep fixed messages.
+- Lambda proxy events match API Gateway's `requestContext`: `accountId` (from the function
+  ARN), `extendedRequestId`, `resourceId`, the full `identity` block, and `protocol`
+  (REST reports `HTTP/1.1` as API Gateway documents; HTTP APIs report the client's version).
+  REST payload 1.0 keeps the client's header name case (recovered from the HTTP/1 request
+  head, because hyper keeps it private); HTTP/2 clients and HTTP APIs get lower case.
+- Lambda integrations reject requests and buffered responses over Lambda's 6 MB limit with
+  `502`, merge `headers` and `multiValueHeaders` as API Gateway does, tolerate `null` response
+  fields, and drop `Content-Length`/hop-by-hop headers set by the function.
+- `--lambda-endpoint` accepts `name:alias`, a function ARN with or without its qualifier, or the
+  bare name, most specific first.
+- REST response streaming: `responseTransferMode: STREAM` with Lambda
+  (`InvokeWithResponseStream`, `/response-streaming-invocations` URIs) and `HTTP_PROXY`, with
+  the 15 minute limit, a 5 minute idle limit, and `$context.integration.responseTransferMode`
+  / `timeToAllHeaders`. Output that doesn't follow the streaming format answers `500`.
 
 - Stage throttling: REST `methodSettings` (including the `*/*` default) and HTTP API route
   settings (including the default route settings) limit each method or route with a token

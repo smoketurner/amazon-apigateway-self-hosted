@@ -290,6 +290,7 @@ impl StageObserver {
             status: integration_ms.map(|_| status),
             latency_ms: integration_ms,
             error: None,
+            ..IntegrationOutcome::default()
         };
         if let Some(logging) = settings
             .and_then(|s| s.execution_logging)
