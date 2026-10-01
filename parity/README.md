@@ -46,7 +46,7 @@ cases:
       headers: [content-type]          # response headers to compare, by name
       body: exact                      # exact (default) | json | ignore
       echo:                            # compare what the echo backend received
-        fields: [method, path, query]  # default; body is also available
+        fields: [method, path, query]  # default; also body, resource, path_parameters
         headers: [x-mapped-header]
 ```
 
@@ -102,9 +102,10 @@ which is how they get confirmed or corrected. Recorded files carry `"source": "r
 
 ## Not covered yet
 
-- Lambda proxy event shapes. `apigw` can send a Lambda invocation to a plain HTTP endpoint
-  (`--lambda-endpoint`), but replay does not start one yet, so cases for `AWS_PROXY` routes can be
-  recorded but not replayed.
+- Lambda proxy event fidelity beyond the fields a case selects. Replay compares the request fields
+  the echo reports (`method`, `path`, `query`, `body`, headers, plus `resource` and
+  `path_parameters`); `requestContext` parity is tracked in
+  [#13](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/13).
 - Authorizers, API keys, validators, resource policies, mapping templates, and parameter mapping are
   not implemented in `apigw`; the seed cases that exercise them are marked `known_gap`.
 - Time-dependent behavior (throttles, quotas, cache TTLs) is covered by property tests, not fixtures.

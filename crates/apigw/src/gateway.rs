@@ -12,6 +12,7 @@ use crate::aws::AwsClients;
 use crate::gateway_response::{Failure, GatewayResponses};
 use crate::integration::StageVariables;
 use crate::model::{ApiKind, Protection, ResponseType};
+use crate::observability::StageObserver;
 use crate::pipeline::RequestContext;
 use crate::route::Route;
 
@@ -144,6 +145,7 @@ pub(crate) struct ApiContext {
     pub(crate) responses: GatewayResponses,
     pub(crate) http: reqwest::Client,
     pub(crate) aws: Arc<AwsClients>,
+    pub(crate) observer: StageObserver,
 }
 
 impl ApiContext {

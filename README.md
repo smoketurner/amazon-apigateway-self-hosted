@@ -75,6 +75,11 @@ Every flag has an environment variable (`apigw --help` lists them). The main one
 | `--trusted-proxies` | `APIGW_TRUSTED_PROXIES` | none | Comma-separated CIDRs or addresses of proxies whose `X-Forwarded-For` and `X-Forwarded-Client-Cert` are believed ([Client IP](docs/deployment.md#client-ip)) |
 | `--trusted-proxy-hops` | `APIGW_TRUSTED_PROXY_HOPS` | `1` | Proxies between the client and `apigw`, counting the one that connects to it |
 | `--proxy-protocol` | `APIGW_PROXY_PROTOCOL` | off | Require a PROXY protocol v2 header on `--listen`, from `--trusted-proxies` only |
+| `--access-logs` | `APIGW_ACCESS_LOGS` | `aws` | `aws` writes to the stage's access log destination, `stdout` writes lines to standard output, `off` writes none ([Observability](#observability)) |
+| `--execution-logs` | `APIGW_EXECUTION_LOGS` | `aws` | Same choices, for `loggingLevel`/`dataTraceEnabled` execution logs |
+| `--metrics-log-group` | `APIGW_METRICS_LOG_GROUP` | none | CloudWatch Logs log group (must exist) that receives metrics as embedded metric format events; metrics are off when unset |
+| `--metrics-namespace` | `APIGW_METRICS_NAMESPACE` | `ApiGatewaySelfHosted` | CloudWatch namespace for the metrics (`AWS/` is reserved) |
+| `--log-stream` | `APIGW_LOG_STREAM` | `{HOSTNAME}/{start time}/{suffix}` | Log stream this process writes to in every log group |
 
 Logs are JSON on stdout by default (`--log-format text` for humans); filter with `RUST_LOG`.
 
@@ -106,6 +111,48 @@ HTTP route:
 The file is re-read on every refresh. A key that names no route rejects the whole update (the
 previous routes keep serving), so a typo never goes unnoticed.
 
+## Observability
+
+Everything below is configured on the API Gateway stage, as on API Gateway itself, and applies
+without a redeploy of this container when the stage changes.
+
+**Access logs.** The stage's access log format is a template of `$context.*` variables
+(`$context.requestId`, `$context.identity.sourceIp`, `$context.status`,
+`$context.responseLength`, `$context.responseLatency`, `$context.integrationLatency`, ...),
+so CLF, JSON, XML, and CSV formats all work. A variable with no value renders as `-`, and
+values are JSON-escaped, so JSON formats stay valid. `$context.responseLength` is the
+`Content-Length` of the response and is `-` for streamed responses of unknown length.
+The destination ARN decides where lines go: a CloudWatch Logs log group
+(`arn:aws:logs:...:log-group:NAME`, which must exist) or a Firehose delivery stream
+(`arn:aws:firehose:...:deliverystream/amazon-apigateway-NAME`, records are newline-terminated).
+Anything else, or a stage with no destination, writes to standard output. A batch the
+destination rejects is written to standard output too.
+
+**Log streams.** Each process writes to its own stream in every CloudWatch Logs log group:
+`{HOSTNAME}/{start time}/{8 hex characters}`, so pods never share a stream and streams sort by
+start time. `--log-stream` sets a fixed name.
+
+**Metrics.** CloudWatch Logs extracts the metrics from embedded metric format events, so they
+are published to the log group in `--metrics-log-group` under `--metrics-namespace`. REST
+APIs publish `Count`, `4XXError`, `5XXError`, `Latency`, and `IntegrationLatency` with
+dimensions `ApiName, Stage`; with `metricsEnabled` on a method (or `*/*`) they also publish
+`ApiName, Method, Resource, Stage`. HTTP APIs publish `Count`, `4xx`, `5xx`, `Latency`,
+`IntegrationLatency` with `ApiId, Stage`, and with detailed metrics `ApiId, Method, Resource,
+Stage`. One event per series is written each minute, so the statistics differ from
+`AWS/ApiGateway`: use `Sum` for `Count` and the error metrics (`Average` and `SampleCount` do
+not mean what they do there), and treat `Latency`/`IntegrationLatency` percentiles and maxima as
+estimates, because each minute publishes at most 100 sampled values.
+
+**Execution logs.** REST stages with `loggingLevel` `ERROR` or `INFO` write a request trace to
+`API-Gateway-Execution-Logs_{apiId}/{stage}` (created if missing). `dataTraceEnabled` adds the
+query string and request headers (`Authorization`, `X-Api-Key`, and `Cookie` values are
+redacted). Request and response bodies are not logged, and events are cut at 1 KB as in API
+Gateway. HTTP APIs have no execution logs.
+
+**Delivery.** Each destination has a bounded queue (10,000 events). When it is full the newest
+events are dropped and counted in a warning, so a slow destination never slows requests. Queues
+are flushed every 5 seconds, when a batch is full, and at shutdown.
+
 ## Refresh and failure behavior
 
 - A refresh that fails (AWS unreachable, invalid definition, bad override file) keeps the
@@ -125,6 +172,9 @@ previous routes keep serving), so a typo never goes unnoticed.
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/apis/<id>/exports/OAS30`, `.../apis/<id>/stages/<stage>` | HTTP APIs |
 | `lambda:InvokeFunction` | each integrated function and each Lambda authorizer function | `AWS_PROXY` routes and Lambda authorizers |
 | `sts:AssumeRole` | each integration `credentials` and each `authorizerCredentials` role | integrations and authorizers with a role, unless `--integration-credentials=gateway` |
+| `logs:CreateLogStream`, `logs:PutLogEvents` | each access log group, the metrics log group, and `arn:aws:logs:<region>:<account>:log-group:API-Gateway-Execution-Logs_<id>/<stage>:*` | access logs, metrics, execution logs |
+| `logs:CreateLogGroup` | `arn:aws:logs:<region>:<account>:log-group:API-Gateway-Execution-Logs_*` | execution logs (the only log group the gateway creates) |
+| `firehose:PutRecordBatch` | each access log delivery stream | access logs to Firehose |
 
 ## Documentation
 

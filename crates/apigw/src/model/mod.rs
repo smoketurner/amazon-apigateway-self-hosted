@@ -17,11 +17,15 @@ use axum::http::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub(crate) use stage::{DeploymentStamp, StageSettings};
+#[cfg(test)]
+pub(crate) use stage::{AccessLogSettings, MethodSettings, SettingsScope};
+pub(crate) use stage::{DeploymentStamp, ExecutionLogging, LoggingLevel, StageSettings};
 
 /// Which API Gateway product the definition came from. The two differ in Lambda
 /// payload defaults, error bodies, and response headers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, clap::ValueEnum,
+)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum ApiKind {
     /// API Gateway REST API (v1).
@@ -481,6 +485,8 @@ pub(crate) struct CorsConfig {
 /// API-wide settings carried in the export.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub(crate) struct ApiSettings {
+    /// The API's name (`info.title` of the export).
+    pub(crate) title: Option<String>,
     pub(crate) binary_media_types: Vec<String>,
     pub(crate) minimum_compression_size: Option<u64>,
     pub(crate) api_key_source: Option<ApiKeySource>,
@@ -558,9 +564,6 @@ pub(crate) enum Feature {
     ParameterMapping,
     Throttling,
     ResponseCaching,
-    AccessLogs,
-    ExecutionLogs,
-    DetailedMetrics,
     Tracing,
     Canary,
 }
@@ -576,9 +579,6 @@ impl fmt::Display for Feature {
             Self::ParameterMapping => "parameter mapping",
             Self::Throttling => "throttling",
             Self::ResponseCaching => "response caching",
-            Self::AccessLogs => "access logs",
-            Self::ExecutionLogs => "execution logs",
-            Self::DetailedMetrics => "detailed metrics",
             Self::Tracing => "tracing",
             Self::Canary => "canary",
         };

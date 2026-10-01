@@ -42,6 +42,8 @@ dependencies = [
  "aws-config",
  "aws-sdk-apigateway",
  "aws-sdk-apigatewayv2",
+ "aws-sdk-cloudwatchlogs",
+ "aws-sdk-firehose",
  "aws-sdk-lambda",
  "axum",
  "base64",
@@ -89,6 +91,17 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "apigw-regex"
+version = "0.1.0"
+dependencies = [
+ "fancy-regex",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -280,6 +293,57 @@ name = "aws-sdk-apigatewayv2"
 version = "1.117.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c99eabb36b2cc8bd72c9494303bcc933ffcf4a77955d39f34be61fd8b2784eb7"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 1.5.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
+name = "aws-sdk-cloudwatchlogs"
+version = "1.156.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ed1946748f8af6758c208e177107fbbd855c45d59f6c28997d4a7d38aabb79a"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-eventstream",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 1.5.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
+name = "aws-sdk-firehose"
+version = "1.123.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec632310fd4e45c25f8432baf2c1ccd3fbe22b1221f07573586c6aae79490ac9"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -705,6 +769,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "bit-set"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08807e080ed7f9d5433fa9b275196cfc35414f66a0c79d864dc51a0d825231a3"
+dependencies = [
+ "bit-vec 0.8.0",
+]
+
+[[package]]
+name = "bit-vec"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
+
+[[package]]
 name = "bit-vec"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1085,6 +1164,17 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "fancy-regex"
+version = "0.19.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d301f5bf187b3c295fce6468d3875037a0bccc5f6b151c63cac2f85babf21912"
+dependencies = [
+ "bit-set",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]
@@ -3123,7 +3213,7 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5f6765e852b9b4dc8e2a76843e4d64d1cea8e79bcde0b6901aea8e7c7f08282"
 dependencies = [
- "bit-vec",
+ "bit-vec 0.9.1",
  "time",
 ]
 

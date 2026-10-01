@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::body::Bytes;
+use axum::extract::Request;
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method};
 use base64::Engine as _;
@@ -208,6 +209,23 @@ impl ContextVariables {
 }
 
 impl RequestContext {
+    /// A copy of `request`'s metadata for logging, taken before the request
+    /// moves into its route: no body and no path parameters.
+    pub(crate) fn observed(api: &ApiContext, route: Option<&Route>, request: &Request) -> Self {
+        let mut snapshot = axum::http::Request::new(());
+        *snapshot.method_mut() = request.method().clone();
+        *snapshot.uri_mut() = request.uri().clone();
+        *snapshot.headers_mut() = request.headers().clone();
+        if let Some(id) = request.extensions().get::<RequestId>() {
+            snapshot.extensions_mut().insert(*id);
+        }
+        if let Some(identity) = request.extensions().get::<ClientIdentity>() {
+            snapshot.extensions_mut().insert(identity.clone());
+        }
+        let (parts, ()) = snapshot.into_parts();
+        Self::new(api, route, parts, Vec::new())
+    }
+
     /// Captures a request before its body is read. `route` is `None` for
     /// requests that matched no route.
     pub(crate) fn new(

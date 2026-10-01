@@ -10,6 +10,8 @@
 
 pub(crate) mod context;
 
+use std::time::Instant;
+
 use axum::body::{Body, Bytes};
 use axum::extract::{FromRequestParts as _, RawPathParams, Request};
 use axum::http::header;
@@ -22,6 +24,7 @@ use crate::gateway::{ApiContext, AuthorizationMode, GatewayError, MAX_BODY_BYTES
 use crate::gateway_response::Failure;
 use crate::integration::{Integration, MockResponse};
 use crate::model::Protection;
+use crate::observability::IntegrationTiming;
 use crate::route::Route;
 
 /// One route's handling of one request.
@@ -65,10 +68,15 @@ impl<'a> Pipeline<'a> {
             Ok(body) => ctx.body = body,
             Err(error) => return self.fail(&ctx, &error.failure(self.api.kind)),
         }
-        match self.integrate(&mut ctx).await {
+        let started = Instant::now();
+        let result = self.integrate(&mut ctx).await;
+        let timing = IntegrationTiming(started.elapsed());
+        let mut response = match result {
             Ok(response) => response,
             Err(error) => self.fail(&ctx, &error.failure(self.api.kind)),
-        }
+        };
+        response.extensions_mut().insert(timing);
+        response
     }
 
     fn fail(&self, ctx: &RequestContext, failure: &Failure) -> Response {

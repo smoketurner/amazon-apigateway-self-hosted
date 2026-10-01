@@ -45,6 +45,30 @@
           }
         }
       },
+      "/lambda-v2/{proxy+}": {
+        "x-amazon-apigateway-any-method": {
+          "x-amazon-apigateway-integration": {
+            "type": "aws_proxy",
+            "httpMethod": "POST",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations",
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "passthroughBehavior": "when_no_match",
+            "payloadFormatVersion": "2.0"
+          }
+        }
+      },
+      "/lambda-v1/{proxy+}": {
+        "x-amazon-apigateway-any-method": {
+          "x-amazon-apigateway-integration": {
+            "type": "aws_proxy",
+            "httpMethod": "POST",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations",
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "passthroughBehavior": "when_no_match",
+            "payloadFormatVersion": "1.0"
+          }
+        }
+      },
       "/authz/jwt": {
         "get": {
           "x-amazon-apigateway-integration": {
