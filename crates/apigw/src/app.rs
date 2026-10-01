@@ -18,6 +18,7 @@ use crate::authz::KeyStore;
 use crate::aws::AwsClients;
 #[cfg(test)]
 use crate::aws::{CredentialsMode, LambdaEndpoints};
+use crate::cache::CacheScope;
 use crate::canary::{CanaryRelease, CanaryStructure, CanarySummary, Release, TrafficShare};
 use crate::config::Config;
 use crate::cors::Cors;
@@ -149,6 +150,12 @@ impl Builder {
                 release,
             ),
             release,
+            cache: CacheScope::of(
+                model.stage.cache_cluster_enabled,
+                release,
+                snapshot.stage_settings.canary.as_ref(),
+                snapshot.stamp.deployment_id.as_deref(),
+            ),
         });
         let (router, routes) = router::build(&model, &ctx, &self.base_path);
         Ok(BuiltRelease {
@@ -785,17 +792,13 @@ mod tests {
         let mut snapshot = snapshot();
         snapshot.openapi =
             json!({"x-amazon-apigateway-binary-media-types": ["image/png"], "paths": {}});
-        snapshot.stage_settings.cache_cluster_enabled = true;
         let inputs = Inputs {
             snapshot,
             overrides: IntegrationOverrides::default(),
         };
         let loaded = builder(None).build(&inputs).unwrap();
         let rendered = serde_json::to_value(&loaded.summary).unwrap();
-        assert_eq!(
-            rendered["unenforced"],
-            json!(["binary_media_types", "response_caching"])
-        );
+        assert_eq!(rendered["unenforced"], json!(["binary_media_types"]));
     }
 
     #[tokio::test]

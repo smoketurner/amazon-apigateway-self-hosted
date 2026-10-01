@@ -4,6 +4,7 @@
 mod app;
 mod authz;
 mod aws;
+mod cache;
 mod canary;
 mod client_cert;
 mod config;

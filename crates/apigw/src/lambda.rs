@@ -756,6 +756,7 @@ mod tests {
             authorizer: RouteAuthorizer::None,
             policy: RoutePolicy::None,
             throttle: None,
+            cache: None,
             unenforced: Vec::new(),
         }
     }

@@ -27,6 +27,7 @@ use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::queue::{LogEvent, LogQueue};
+use crate::cache::CacheOutcome;
 use crate::model::ApiKind;
 
 /// The namespace published metrics go under.
@@ -95,6 +96,8 @@ pub(crate) struct MetricKey {
 /// What one finished request contributes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RequestMetrics {
+    /// Whether the response came from the response cache, for routes that use it.
+    pub(crate) cache: Option<CacheOutcome>,
     pub(crate) status: u16,
     pub(crate) latency_ms: u64,
     pub(crate) integration_latency_ms: Option<u64>,
@@ -154,6 +157,8 @@ struct Series {
     server_errors: u64,
     latency: Reservoir,
     integration_latency: Reservoir,
+    /// Cache hits and misses; `None` until a request consults the cache.
+    cache: Option<(u64, u64)>,
 }
 
 impl Series {
@@ -164,10 +169,18 @@ impl Series {
             server_errors: 0,
             latency: Reservoir::new(),
             integration_latency: Reservoir::new(),
+            cache: None,
         }
     }
 
     fn record(&mut self, request: RequestMetrics) {
+        if let Some(outcome) = request.cache {
+            let (hits, misses) = self.cache.unwrap_or_default();
+            self.cache = Some(match outcome {
+                CacheOutcome::Hit => (hits.saturating_add(1), misses),
+                CacheOutcome::Miss => (hits, misses.saturating_add(1)),
+            });
+        }
         self.count = self.count.saturating_add(1);
         match request.status {
             400..=499 => self.client_errors = self.client_errors.saturating_add(1),
@@ -267,6 +280,12 @@ impl MetricsAggregator {
                 json!(series.integration_latency.values),
             );
         }
+        if let Some((hits, misses)) = series.cache {
+            metrics.push(json!({"Name": "CacheHitCount", "Unit": "Count"}));
+            metrics.push(json!({"Name": "CacheMissCount", "Unit": "Count"}));
+            body.insert("CacheHitCount".to_owned(), json!(hits));
+            body.insert("CacheMissCount".to_owned(), json!(misses));
+        }
         body.insert(key.api_dimension().to_owned(), json!(key.api));
         body.insert("Stage".to_owned(), json!(key.stage));
         if let Some(ref route) = key.route {
@@ -344,6 +363,7 @@ mod tests {
 
     fn request(status: u16, latency_ms: u64, integration: Option<u64>) -> RequestMetrics {
         RequestMetrics {
+            cache: None,
             status,
             latency_ms,
             integration_latency_ms: integration,
@@ -401,6 +421,40 @@ mod tests {
             aggregator.drain(0).is_empty(),
             "draining empties the window"
         );
+    }
+
+    #[test]
+    fn cache_hits_and_misses_are_published_once_the_cache_is_consulted() {
+        let aggregator = MetricsAggregator::new(MetricsNamespace::default());
+        let stage = key(ApiKind::Rest, None);
+        let cached = |outcome| RequestMetrics {
+            cache: Some(outcome),
+            ..request(200, 1, None)
+        };
+        aggregator.record(&stage, cached(CacheOutcome::Hit));
+        aggregator.record(&stage, cached(CacheOutcome::Hit));
+        aggregator.record(&stage, cached(CacheOutcome::Miss));
+        aggregator.record(&stage, request(200, 1, None));
+        let docs = drained(&aggregator);
+        assert_eq!(docs[0]["CacheHitCount"], 2);
+        assert_eq!(docs[0]["CacheMissCount"], 1);
+        assert_eq!(docs[0]["Count"], 4);
+        let names: Vec<&str> = docs[0]["_aws"]["CloudWatchMetrics"][0]["Metrics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["Name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"CacheHitCount") && names.contains(&"CacheMissCount"));
+    }
+
+    #[test]
+    fn series_that_never_consult_the_cache_publish_no_cache_metrics() {
+        let aggregator = MetricsAggregator::new(MetricsNamespace::default());
+        aggregator.record(&key(ApiKind::Rest, None), request(200, 1, None));
+        let docs = drained(&aggregator);
+        assert!(docs[0].get("CacheHitCount").is_none());
+        assert!(docs[0].get("CacheMissCount").is_none());
     }
 
     #[test]

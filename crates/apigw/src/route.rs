@@ -2,6 +2,7 @@
 //! executes.
 
 use crate::authz::{Authorizers, ResourcePolicies, RouteAuthorizer, RoutePolicy};
+use crate::cache::RouteCache;
 use crate::integration::{Integration, StageVariables};
 use crate::model::{ApiKind, Feature, MethodMatch, Operation, Protections, RouteKey, RoutePath};
 use crate::throttle::{RouteThrottle, ThrottleSettings};
@@ -18,6 +19,7 @@ pub(crate) struct Route {
     pub(crate) policy: RoutePolicy,
     pub(crate) unenforced: Vec<Feature>,
     pub(crate) throttle: Option<RouteThrottle>,
+    pub(crate) cache: Option<RouteCache>,
 }
 
 impl Route {
@@ -45,6 +47,7 @@ impl Route {
             policy: policies.for_route(operation),
             unenforced: operation.unenforced(),
             throttle: throttling.for_route(&operation.method, &operation.path),
+            cache: None,
         }
     }
 }

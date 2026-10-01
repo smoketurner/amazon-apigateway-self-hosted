@@ -20,6 +20,7 @@ use axum::response::{IntoResponse as _, Response};
 pub(crate) use context::RequestContext;
 
 use crate::authz::{AuthRequest, Denial};
+use crate::cache::CacheOutcome;
 use crate::cors::Cors;
 use crate::gateway::{ApiContext, GatewayError, MAX_BODY_BYTES};
 use crate::gateway_response::Failure;
@@ -102,15 +103,42 @@ impl<'a> Pipeline<'a> {
             Ok(body) => ctx.body = body,
             Err(error) => return self.fail(ctx, &error.failure(self.api.kind)),
         }
+        let plan = match self.route.cache.as_ref().map(|cache| cache.plan(ctx)) {
+            Some(Ok(plan)) => plan,
+            Some(Err(failure)) => return self.fail(ctx, &failure),
+            None => None,
+        };
+        if let Some(ref plan) = plan
+            && let Some(hit) = plan.lookup(&self.api.state).await
+        {
+            return hit;
+        }
         let started = Instant::now();
         let result = self.integrate(ctx).await;
         let timing = IntegrationTiming(started.elapsed());
+        let succeeded = result.is_ok();
         let mut response = match result {
             Ok(response) => response,
             Err(error) => self.fail(ctx, &error.failure(self.api.kind)),
         };
         response.extensions_mut().insert(timing);
-        response
+        match plan {
+            Some(plan) if succeeded => match plan.store(&self.api.state, response).await {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::warn!(%error, "the integration response failed while being read");
+                    self.fail(
+                        ctx,
+                        &GatewayError::IntegrationFailure.failure(self.api.kind),
+                    )
+                }
+            },
+            Some(plan) => {
+                plan.finish(&mut response, CacheOutcome::Miss);
+                response
+            }
+            None => response,
+        }
     }
 
     /// The failure for a request over the route's throttle limit. Runs before

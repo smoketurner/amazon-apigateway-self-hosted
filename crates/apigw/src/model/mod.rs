@@ -18,8 +18,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[cfg(test)]
-pub(crate) use stage::{AccessLogSettings, CanarySettings, MethodSettings, SettingsScope};
-pub(crate) use stage::{DeploymentStamp, ExecutionLogging, LoggingLevel, StageSettings};
+pub(crate) use stage::{AccessLogSettings, SettingsScope};
+pub(crate) use stage::{
+    CanarySettings, DeploymentStamp, ExecutionLogging, LoggingLevel, MethodSettings, StageSettings,
+};
 
 /// Which API Gateway product the definition came from. The two differ in Lambda
 /// payload defaults, error bodies, and response headers.
@@ -339,9 +341,6 @@ impl IntegrationSpec {
         if self.content_handling.is_some() {
             features.push(Feature::ContentHandling);
         }
-        if !self.cache_key_parameters.is_empty() {
-            features.push(Feature::ResponseCaching);
-        }
         features
     }
 }
@@ -534,7 +533,6 @@ impl ApiModel {
         if self.settings.minimum_compression_size.is_some() {
             features.push(Feature::Compression);
         }
-        features.extend(self.stage.unenforced());
         features
     }
 }
@@ -547,7 +545,6 @@ pub(crate) enum Feature {
     BinaryMediaTypes,
     Compression,
     ContentHandling,
-    ResponseCaching,
 }
 
 impl fmt::Display for Feature {
@@ -556,7 +553,6 @@ impl fmt::Display for Feature {
             Self::BinaryMediaTypes => "binary media types",
             Self::Compression => "compression",
             Self::ContentHandling => "content handling",
-            Self::ResponseCaching => "response caching",
         };
         f.write_str(name)
     }
