@@ -122,6 +122,7 @@ previous routes keep serving), so a typo never goes unnoticed.
 | [docs/architecture.md](docs/architecture.md) | Modules, request flow, the accept loop, router swapping |
 | [docs/crypto.md](docs/crypto.md) | aws-lc-rs as the only crypto provider |
 | [docs/ci-cd.md](docs/ci-cd.md) | CI jobs |
+| [reference/README.md](reference/README.md) | Terraform stack that deploys the reference APIs parity is measured against |
 
 ## Development
 

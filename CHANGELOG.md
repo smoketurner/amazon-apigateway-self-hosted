@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `reference/terraform/`: a Terraform stack that deploys REGIONAL REST and HTTP reference APIs
+  (plus an echo Lambda, authorizers, Cognito, service targets, and a GitHub OIDC role) to measure
+  parity against real API Gateway. See `reference/README.md`.
+
 ### Fixed
 
 - Resource policies and request validators were silently ignored because the REST export did
