@@ -19,7 +19,7 @@ use super::queue::{LogEvent, LogQueue};
 use super::trace::{Sampler, SegmentOutcome, Trace};
 use crate::canary::Release;
 use crate::gateway::ApiContext;
-use crate::model::{ApiKind, ApiModel, ExecutionLogging, RouteKey};
+use crate::model::{ApiKind, ApiModel, ExecutionLogging, MethodMatch, RouteKey};
 use crate::pipeline::RequestContext;
 use crate::pipeline::context::{ApiInfo, IntegrationOutcome};
 use crate::route::Route;
@@ -158,8 +158,8 @@ impl StageObserver {
                 .flatten();
             let detailed = settings.detailed_metrics().then(|| {
                 let method = match operation.method {
-                    crate::model::MethodMatch::Any => None,
-                    crate::model::MethodMatch::Exact(ref method) => Some(method.to_string()),
+                    MethodMatch::Any => None,
+                    MethodMatch::Exact(ref method) => Some(method.to_string()),
                 };
                 (method, operation.path.to_string())
             });
@@ -438,10 +438,12 @@ mod tests {
     use crate::aws::{AwsClients, CredentialsMode, LambdaEndpoints};
     use crate::gateway::{ApiContext, AuthorizationMode, Enforcement, RequestId, Unsupported};
     use crate::gateway_response::GatewayResponses;
-    use crate::model::{IntegrationOverrides, MethodSettings, SettingsScope, StageSettings};
+    use crate::model::{
+        AccessLogSettings, IntegrationOverrides, MethodSettings, SettingsScope, StageSettings,
+    };
     use crate::observability::testing::MockAws;
     use crate::observability::{
-        Delivery, LogGroup, MetricsNamespace, MetricsSettings, Settings, TraceDelivery,
+        Delivery, LogGroup, MetricsNamespace, MetricsSettings, Settings, StreamName, TraceDelivery,
     };
     use crate::router::{BasePath, build};
     use crate::state::{InMemory, InMemoryLimits, StateBackend};
@@ -465,7 +467,7 @@ mod tests {
 
     fn stage_settings(detailed: bool, logging: Option<&str>) -> StageSettings {
         let mut stage = StageSettings {
-            access_log: Some(crate::model::AccessLogSettings {
+            access_log: Some(AccessLogSettings {
                 destination_arn: Some(format!("arn:aws:logs:us-east-1:1:log-group:{ACCESS_GROUP}")),
                 format: Some(
                     r#"{"id":"$context.requestId","m":"$context.httpMethod","p":"$context.resourcePath","s":"$context.status","l":"$context.integrationLatency","ip":"$context.identity.sourceIp"}"#
@@ -496,7 +498,7 @@ mod tests {
                 group: LogGroup::new("metrics-group"),
                 namespace: MetricsNamespace::default(),
             }),
-            stream: crate::observability::StreamName::for_pod(
+            stream: StreamName::for_pod(
                 Some("pod-1"),
                 None,
                 jiff::Timestamp::UNIX_EPOCH,
@@ -1011,7 +1013,7 @@ mod tests {
         let aws = MockAws::start().await;
         let addr = upstream().await;
         let mut stage = tracing_stage();
-        stage.access_log = Some(crate::model::AccessLogSettings {
+        stage.access_log = Some(AccessLogSettings {
             destination_arn: Some(format!("arn:aws:logs:us-east-1:1:log-group:{ACCESS_GROUP}")),
             format: Some("$context.xrayTraceId".to_owned()),
         });

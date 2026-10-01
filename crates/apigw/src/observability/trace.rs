@@ -186,11 +186,12 @@ impl FromStr for TraceHeader {
 
 impl fmt::Display for TraceHeader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut separator = "";
-        if let Some(root) = self.root {
+        let mut separator = if let Some(root) = self.root {
             write!(f, "Root={root}")?;
-            separator = ";";
-        }
+            ";"
+        } else {
+            ""
+        };
         if let Some(parent) = self.parent {
             write!(f, "{separator}Parent={parent}")?;
             separator = ";";

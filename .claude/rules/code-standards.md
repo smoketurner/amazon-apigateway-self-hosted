@@ -48,6 +48,11 @@ Invariants the compiler does **not** catch. Read before implementing or reviewin
       added to `[workspace.dependencies]` (current version looked up). No comments in
       `Cargo.toml` files.
 - [ ] Panics opt out narrowly in tests only (`#[expect(..., reason = "...")]`).
+- [ ] Own-crate items are imported with `use`, never spelled as `crate::a::b::C` in code
+      (`clippy::absolute_paths`). A new dependency in `[workspace.dependencies]` is also added
+      to `absolute-paths-allowed-crates` in `.clippy.toml`.
+- [ ] IDs use `Uuid::now_v7()` and time uses `jiff` (`clippy::disallowed_methods` enforces
+      both).
 - [ ] `thiserror` for module errors, `anyhow` at the binary edge; `tracing`, never `println!`.
 
 ## Before opening a PR

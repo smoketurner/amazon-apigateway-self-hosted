@@ -393,7 +393,7 @@ mod tests {
     use aws_sdk_apigateway::primitives::DateTime;
     use aws_sdk_apigateway::types::{CanarySettings as RestCanary, MethodSetting};
     use aws_sdk_apigatewayv2::operation::get_stage::GetStageOutput as HttpStage;
-    use aws_sdk_apigatewayv2::types::{LoggingLevel, RouteSettings};
+    use aws_sdk_apigatewayv2::types::{LoggingLevel as SdkLoggingLevel, RouteSettings};
 
     use super::*;
 
@@ -526,7 +526,7 @@ mod tests {
             .route_settings(
                 "GET /pets",
                 RouteSettings::builder()
-                    .logging_level(LoggingLevel::Error)
+                    .logging_level(SdkLoggingLevel::Error)
                     .build(),
             )
             .build();
@@ -626,14 +626,14 @@ mod tests {
         assert_eq!(
             logging(Some("info"), true),
             Some(ExecutionLogging {
-                level: crate::model::LoggingLevel::Info,
+                level: LoggingLevel::Info,
                 data_trace: true
             })
         );
         assert_eq!(
             logging(Some("ERROR"), false),
             Some(ExecutionLogging {
-                level: crate::model::LoggingLevel::Error,
+                level: LoggingLevel::Error,
                 data_trace: false
             })
         );

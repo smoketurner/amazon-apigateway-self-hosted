@@ -358,10 +358,12 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::aws::{CredentialsMode, LambdaEndpoints};
     use crate::gateway::{AuthorizationMode, Unsupported};
     use crate::gateway_response::GatewayResponses;
     use crate::model::{IntegrationOverrides, Protection, StageSettings};
     use crate::model::{MethodSettings, SettingsScope};
+    use crate::observability::StageObserver;
     use crate::state::{InMemory, InMemoryLimits, StateBackend};
     use std::num::NonZeroU32;
 
@@ -383,8 +385,8 @@ mod tests {
             .build();
         Arc::new(AwsClients::new(
             config,
-            crate::aws::CredentialsMode::Assume,
-            crate::aws::LambdaEndpoints::default(),
+            CredentialsMode::Assume,
+            LambdaEndpoints::default(),
             reqwest::Client::new(),
         ))
     }
@@ -405,7 +407,7 @@ mod tests {
             enforcement,
             http: reqwest::Client::new(),
             aws: aws(),
-            observer: crate::observability::StageObserver::disabled(),
+            observer: StageObserver::disabled(),
             release: None,
         })
     }
@@ -990,7 +992,7 @@ mod tests {
 
     #[tokio::test]
     async fn lambda_routes_invoke_through_endpoint_overrides() {
-        let app = axum::Router::new().route(
+        let app = Router::new().route(
             "/invoke",
             axum::routing::post(|headers: axum::http::HeaderMap, body: axum::body::Bytes| async move {
                 let event: Value = serde_json::from_slice(&body).unwrap();
@@ -1013,8 +1015,8 @@ mod tests {
         let endpoint = reqwest::Url::parse(&format!("http://{addr}/invoke")).unwrap();
         let aws = Arc::new(AwsClients::new(
             config,
-            crate::aws::CredentialsMode::Assume,
-            crate::aws::LambdaEndpoints::from_iter([("items".to_owned(), endpoint)]),
+            CredentialsMode::Assume,
+            LambdaEndpoints::from_iter([("items".to_owned(), endpoint)]),
             reqwest::Client::new(),
         ));
         let doc = json!({"paths": {"/items/{id}": {"put": {"x-amazon-apigateway-integration": {
@@ -1039,7 +1041,7 @@ mod tests {
             enforcement: STRICT,
             http: reqwest::Client::new(),
             aws,
-            observer: crate::observability::StageObserver::disabled(),
+            observer: StageObserver::disabled(),
             release: None,
         });
         let (router, _) = build(&model, &api, &BasePath::default());
@@ -1055,7 +1057,7 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), 1024)
             .await
             .unwrap();
-        assert_eq!(&body[..], b"PUT 42");
+        assert_eq!(&*body, b"PUT 42");
     }
 
     #[test]

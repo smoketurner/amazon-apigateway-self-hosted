@@ -186,7 +186,7 @@ impl Tls {
             provider: Arc::clone(&provider),
             current: RwLock::new((stamp, Arc::new(key))),
         });
-        let resolver: Arc<dyn ResolvesServerCert> = certs.clone();
+        let resolver: Arc<dyn ResolvesServerCert> = Arc::<CertStore>::clone(&certs);
         let mut config = rustls::ServerConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()?
             .with_no_client_auth()
@@ -885,11 +885,11 @@ mod tests {
 
     #[tokio::test]
     async fn connection_cap_queues_extra_clients() {
-        let cert = std::sync::Arc::new(generate());
+        let cert = Arc::new(generate());
         let (addr, shutdown, _handle) = start(&cert, 1).await;
         let held = cert.connect(addr).await;
         let waiting = {
-            let cert = std::sync::Arc::clone(&cert);
+            let cert = Arc::clone(&cert);
             tokio::spawn(async move { cert.request(addr, GET_PEER, b"").await })
         };
         tokio::time::sleep(Duration::from_millis(100)).await;

@@ -527,8 +527,8 @@ mod tests {
     use super::*;
     use crate::aws::{CredentialsMode, LambdaEndpoints};
     use crate::gateway::{AuthorizationMode, Unsupported};
-    use crate::model::{ApiKind, DeploymentStamp, StageSettings};
-    use crate::source::Source;
+    use crate::model::{ApiKind, CanarySettings, DeploymentStamp, StageSettings};
+    use crate::source::{CanarySnapshot, Source};
 
     fn sdk_config() -> aws_config::SdkConfig {
         aws_config::SdkConfig::builder()
@@ -791,7 +791,7 @@ mod tests {
             BTreeMap::from([("backend".to_owned(), "prod.internal".to_owned())]);
         snapshot.openapi = json!({"paths": {"/pets": {"get": {"x-amazon-apigateway-integration":
             {"type": "http_proxy", "uri": "https://${stageVariables.backend}/pets"}}}}});
-        snapshot.stage_settings.canary = Some(crate::model::CanarySettings {
+        snapshot.stage_settings.canary = Some(CanarySettings {
             percent_traffic: percent,
             deployment_id: Some("d2".to_owned()),
             stage_variable_overrides: overrides
@@ -840,7 +840,7 @@ mod tests {
     #[tokio::test]
     async fn local_stage_variable_overrides_win_over_the_canarys() {
         let mut snapshot = snapshot();
-        snapshot.stage_settings.canary = Some(crate::model::CanarySettings {
+        snapshot.stage_settings.canary = Some(CanarySettings {
             percent_traffic: 25.0,
             deployment_id: None,
             stage_variable_overrides: BTreeMap::from([(
@@ -860,7 +860,7 @@ mod tests {
     #[tokio::test]
     async fn a_shadow_stage_supplies_the_canary_routes() {
         let mut snapshot = canary_snapshot(10.0, &[]);
-        snapshot.canary = Some(crate::source::CanarySnapshot {
+        snapshot.canary = Some(CanarySnapshot {
             stage: "shadow".to_owned(),
             stamp: DeploymentStamp {
                 deployment_id: Some("d2".to_owned()),
@@ -998,7 +998,7 @@ mod tests {
             lines(aws, "metrics-group")
                 .iter()
                 .map(|m| {
-                    let doc: serde_json::Value = serde_json::from_str(m).unwrap();
+                    let doc: Value = serde_json::from_str(m).unwrap();
                     doc["Stage"].as_str().unwrap().to_owned()
                 })
                 .collect()

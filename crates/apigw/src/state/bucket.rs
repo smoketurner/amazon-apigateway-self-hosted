@@ -174,7 +174,7 @@ mod tests {
                 }
                 #[expect(clippy::cast_precision_loss, reason = "test millisecond counts are small")]
                 let seconds = now as f64 / 1000.0;
-                prop_assert!(f64::from(admitted) <= limits.capacity() + rate * seconds + 1e-6);
+                prop_assert!(f64::from(admitted) <= rate.mul_add(seconds, limits.capacity()) + 1e-6);
                 prop_assert!(bucket.tokens >= 0.0);
                 prop_assert!(bucket.tokens <= limits.capacity() + 1e-9);
             }
