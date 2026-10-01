@@ -7,6 +7,7 @@ use crate::integration::{Integration, StageVariables};
 use crate::model::{ApiKind, Feature, MethodMatch, Operation, Protections, RouteKey, RoutePath};
 use crate::throttle::{RouteThrottle, ThrottleSettings};
 use crate::usage::{ApiKeyRules, RouteApiKey};
+use crate::validation::{RequestValidators, RouteValidation};
 use crate::vpc_link::VpcLinks;
 
 #[derive(Debug, Clone)]
@@ -19,16 +20,18 @@ pub(crate) struct Route {
     pub(crate) authorizer: RouteAuthorizer,
     pub(crate) policy: RoutePolicy,
     pub(crate) api_key: RouteApiKey,
+    pub(crate) validation: RouteValidation,
     pub(crate) unenforced: Vec<Feature>,
     pub(crate) throttle: Option<RouteThrottle>,
     pub(crate) cache: Option<RouteCache>,
 }
 
-/// What decides who may call the routes of one API definition.
+/// What decides which requests the routes of one API definition admit.
 pub(crate) struct AccessRules<'a> {
     pub(crate) authorizers: &'a Authorizers,
     pub(crate) policies: &'a ResourcePolicies,
     pub(crate) api_keys: &'a ApiKeyRules,
+    pub(crate) validators: &'a RequestValidators,
 }
 
 impl Route {
@@ -64,6 +67,7 @@ impl Route {
             authorizer: access.authorizers.for_route(operation),
             policy: access.policies.for_route(operation),
             api_key: access.api_keys.for_route(operation),
+            validation: access.validators.for_route(operation),
             unenforced: operation.unenforced(),
             throttle: throttling.for_route(&operation.method, &operation.path),
             cache: None,

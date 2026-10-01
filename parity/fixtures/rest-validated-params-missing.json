@@ -1,5 +1,5 @@
 {
-  "name": "rest-validated-missing-parameters",
+  "name": "rest-validated-params-missing",
   "source": "hand_written",
   "api": "rest",
   "response": {

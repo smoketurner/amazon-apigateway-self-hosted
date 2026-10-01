@@ -148,13 +148,42 @@ cases:
     compare:
       headers: [content-type]
 
-  # Request validation is not run yet; API Gateway rejects before the integration
+  # Request validators: required parameters and the Item body model
   - name: rest-validated-missing-parameters
     api: rest
     method: POST
     path: /validated/1
     headers: {content-type: application/json}
     body: '{"name":"widget"}'
-    known_gap: "#36"
+    compare:
+      headers: [x-reference-gateway-response]
+      body: ignore
+
+  - name: rest-validated-invalid-body
+    api: rest
+    method: POST
+    path: /validated/1
+    query: {page: "1"}
+    headers: {content-type: application/json, x-required: "yes"}
+    body: '{"count":2}'
+    compare:
+      headers: [x-reference-gateway-response]
+      body: ignore
+
+  - name: rest-validated-params-missing
+    api: rest
+    path: /validated-params
+    compare:
+      headers: [x-reference-gateway-response]
+      body: ignore
+
+  - name: rest-validated-ok
+    api: rest
+    method: POST
+    path: /validated/1
+    query: {page: "1"}
+    headers: {content-type: application/json, x-required: "yes"}
+    body: '{"name":"widget","count":2}'
     compare:
       body: ignore
+      echo: {fields: [method, path, query, body], headers: [content-type]}

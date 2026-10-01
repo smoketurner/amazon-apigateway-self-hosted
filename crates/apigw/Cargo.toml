@@ -31,6 +31,7 @@ hyper                = { workspace = true, features = ["http1", "http2", "server
 hyper-util           = { workspace = true, features = ["server-auto", "service", "tokio"] }
 ipnet                = { workspace = true, features = ["std"] }
 jiff                 = { workspace = true, features = ["std"] }
+jsonschema           = { workspace = true }
 jsonwebtoken         = { workspace = true, features = ["aws_lc_rs"] }
 matchit              = { workspace = true }
 proxy-header         = { workspace = true, features = ["tokio"] }

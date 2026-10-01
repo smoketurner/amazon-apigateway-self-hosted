@@ -264,7 +264,7 @@ Gateway answers a caller who fails that check, and lists each one per route on `
 | IAM (`AWS_IAM`) | REST `403 Missing Authentication Token`, HTTP `403 Forbidden` | `--insecure-skip-authorization` |
 | An authorizer that cannot be evaluated (see `/routes`) | `401 Unauthorized` | `--insecure-skip-authorization` |
 | API key on a route of an HTTP API or an `--openapi-file` source (keys cannot be read) | `403 Forbidden` | `--insecure-skip-authorization` |
-| Request validator | `501` | `--unsupported-validation=ignore` |
+| Request validator whose model cannot be compiled (see `/routes`) | `501` | none: request validation is never skipped |
 
 Checks run in API Gateway's order, so a request gets the first applicable response. If
 authentication happens in front of `apigw` (an Istio `RequestAuthentication` +

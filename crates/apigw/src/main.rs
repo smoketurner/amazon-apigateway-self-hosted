@@ -38,6 +38,7 @@ mod source;
 mod state;
 mod throttle;
 mod usage;
+mod validation;
 mod vpc_link;
 
 use clap::Parser as _;

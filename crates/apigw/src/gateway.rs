@@ -39,20 +39,10 @@ pub(crate) enum AuthorizationMode {
     Skip,
 }
 
-/// What to do with request validators, which this gateway cannot run yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub(crate) enum Unsupported {
-    /// Refuse the request so the backend is never reached unprotected.
-    Reject,
-    /// Serve the route as if the protection were absent.
-    Ignore,
-}
-
 /// How the gateway treats protections it does not evaluate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Enforcement {
     pub(crate) authorization: AuthorizationMode,
-    pub(crate) request_validation: Unsupported,
 }
 
 impl Enforcement {
@@ -60,11 +50,6 @@ impl Enforcement {
         if self.authorization == AuthorizationMode::Skip {
             tracing::warn!(
                 "serving routes that require authorization WITHOUT checking credentials"
-            );
-        }
-        if self.request_validation == Unsupported::Ignore {
-            tracing::warn!(
-                "forwarding requests to routes with request validators WITHOUT validating them"
             );
         }
     }
@@ -82,7 +67,7 @@ impl Enforcement {
                 self.authorization == AuthorizationMode::Enforce && route.api_key.is_unevaluable()
             }
             Protection::Iam => self.authorization == AuthorizationMode::Enforce,
-            Protection::RequestValidation => self.request_validation == Unsupported::Reject,
+            Protection::RequestValidation => route.validation.is_unevaluable(),
         }
     }
 
@@ -109,7 +94,7 @@ impl Protection {
             (Self::Authorizer, _) => Failure::new(ResponseType::Unauthorized),
             (Self::RequestValidation, _) => Failure::gateway(
                 StatusCode::NOT_IMPLEMENTED,
-                "Request validation is not supported by this gateway",
+                "The request validator of this route cannot be run by this gateway",
             ),
         }
     }
@@ -125,7 +110,8 @@ impl Protection {
                     .unwrap_or("it could not be read")
             ),
             Self::Iam => {
-                "requires IAM authorization, which cannot be verified outside AWS; answering 403".to_owned()
+                "requires IAM authorization, which cannot be verified outside AWS; answering 403"
+                    .to_owned()
             }
             Self::Authorizer => format!(
                 "requires an authorizer this gateway cannot evaluate: {}; answering 401",
@@ -141,9 +127,13 @@ impl Protection {
                     .unevaluable_reason()
                     .unwrap_or("it has no usage plans")
             ),
-            Self::RequestValidation => {
-                "has a request validator, which this gateway does not run; answering 501 (--unsupported-validation=ignore serves it)".to_owned()
-            }
+            Self::RequestValidation => format!(
+                "has a request validator this gateway cannot run: {}; answering 501",
+                route
+                    .validation
+                    .unevaluable_reason()
+                    .unwrap_or("it could not be compiled")
+            ),
         }
     }
 }

@@ -106,6 +106,6 @@ which is how they get confirmed or corrected. Recorded files carry `"source": "r
   the echo reports (`method`, `path`, `query`, `body`, headers, plus `resource` and
   `path_parameters`); `requestContext` parity is tracked in
   [#13](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/13).
-- Authorizers, API keys, validators, resource policies, mapping templates, and parameter mapping are
-  not implemented in `apigw`; the seed cases that exercise them are marked `known_gap`.
+- Mapping templates are not implemented in `apigw` yet; the seed case that exercises them is marked
+  `known_gap`.
 - Time-dependent behavior (throttles, quotas, cache TTLs) is covered by property tests, not fixtures.

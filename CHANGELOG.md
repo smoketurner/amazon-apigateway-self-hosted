@@ -7,6 +7,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Request validators are evaluated for REST APIs. Required query string and header parameters
+  (present and not blank) answer `400` `BAD_REQUEST_PARAMETERS` with `Missing required request
+  parameters: [...]`, and request bodies are validated against the method's JSON Schema draft 4 model
+  for the request's content type (`$default` otherwise), resolving `$ref`s against the API's models,
+  answering `400` `BAD_REQUEST_BODY`. API-customized gateway responses apply, and
+  `$context.error.validationErrorString` is available to their templates. A route whose model
+  cannot be compiled answers `501`. Adds the `jsonschema` dependency without its HTTP and file
+  reference resolvers.
 - Non-proxy REST integrations: `HTTP` and `MOCK` integrations run `requestParameters`, a Velocity
   request template chosen by `Content-Type` (`passthroughBehavior`, `415 Unsupported Media Type`,
   `contentHandling` by `binaryMediaTypes`), the backend call, `selectionPattern` selection, and
@@ -208,6 +216,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Removed
 
+- `--unsupported-validation` (`APIGW_UNSUPPORTED_VALIDATION`): request validators are
+  evaluated, so routes no longer answer `501` for every validator.
 - `--unsupported-resource-policy` (`APIGW_UNSUPPORTED_RESOURCE_POLICY`): resource policies are
   evaluated, so routes no longer answer `403` for every policy. A policy that cannot be read still
   refuses its routes.

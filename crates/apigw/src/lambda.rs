@@ -580,6 +580,7 @@ mod tests {
     use crate::pipeline::context::tests::request;
     use crate::pipeline::context::{AuthorizerContext, QueryString};
     use crate::usage::RouteApiKey;
+    use crate::validation::RouteValidation;
 
     fn variables() -> StageVariables {
         StageVariables::new(BTreeMap::from([("env".to_owned(), "local".to_owned())]))
@@ -833,6 +834,7 @@ mod tests {
             authorizer: RouteAuthorizer::None,
             policy: RoutePolicy::None,
             api_key: RouteApiKey::NotRequired,
+            validation: RouteValidation::None,
             throttle: None,
             cache: None,
             unenforced: Vec::new(),

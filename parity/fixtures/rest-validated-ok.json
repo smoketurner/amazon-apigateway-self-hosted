@@ -1,0 +1,20 @@
+{
+  "name": "rest-validated-ok",
+  "source": "hand_written",
+  "api": "rest",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    }
+  },
+  "echo": {
+    "method": "POST",
+    "path": "/validated/1",
+    "query": "page=1",
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": "{\"name\":\"widget\",\"count\":2}"
+  }
+}

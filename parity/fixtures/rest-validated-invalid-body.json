@@ -1,0 +1,11 @@
+{
+  "name": "rest-validated-invalid-body",
+  "source": "hand_written",
+  "api": "rest",
+  "response": {
+    "status": 422,
+    "headers": {
+      "x-reference-gateway-response": "bad-request-body"
+    }
+  }
+}
