@@ -356,7 +356,7 @@ impl LambdaProxy {
     /// Extracts the function ARN from a Lambda integration URI. REST APIs use the
     /// `arn:aws:apigateway:{region}:lambda:path/2015-03-31/functions/{arn}/invocations`
     /// form; HTTP APIs may also give the function ARN directly.
-    fn function_arn(uri: &str) -> Option<String> {
+    pub(crate) fn function_arn(uri: &str) -> Option<String> {
         if let Some((_, rest)) = uri.split_once(":lambda:path/") {
             let (_, functions) = rest.split_once("/functions/")?;
             let function = functions.strip_suffix("/invocations").unwrap_or(functions);

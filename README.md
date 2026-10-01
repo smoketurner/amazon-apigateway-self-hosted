@@ -26,7 +26,8 @@ Management's
 | `AWS_PROXY` (Lambda) integrations | Invoked with the API Gateway proxy event, payload format 1.0 or 2.0 |
 | `MOCK` integrations | Status, literal response headers, and response template returned (templates are not evaluated as VTL) |
 | Stage variables | Read from the stage and substituted into integration URIs; overridable locally |
-| Lambda/Cognito/JWT authorizers | **Not evaluated yet.** Answer `401` unless `--insecure-skip-authorization` is set |
+| Lambda authorizers | `TOKEN` and `REQUEST` (REST), `REQUEST` with payload 1.0/2.0 and simple responses (HTTP): invoked, cached by identity source, and the returned policy evaluated per method; `--insecure-skip-authorization` skips them |
+| Cognito/JWT authorizers | **Not evaluated yet.** Answer `401` unless `--insecure-skip-authorization` is set |
 | API keys | **Not checked yet.** Answer `403 Forbidden` unless `--insecure-skip-authorization` is set |
 | IAM (`AWS_IAM`) auth | Cannot be verified outside AWS. REST answers `403 Missing Authentication Token`, HTTP `403 Forbidden`, unless `--insecure-skip-authorization` is set |
 | Resource policies | **Not evaluated yet.** Every route of an API with a policy answers `403` unless `--unsupported-resource-policy=ignore` (not affected by `--insecure-skip-authorization`) |
@@ -169,8 +170,8 @@ are flushed every 5 seconds, when a batch is full, and at shutdown.
 |---|---|---|
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/restapis/<id>/stages/<stage>/exports/oas30`, `.../restapis/<id>/stages/<stage>` | REST APIs |
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/apis/<id>/exports/OAS30`, `.../apis/<id>/stages/<stage>` | HTTP APIs |
-| `lambda:InvokeFunction` | each integrated function | `AWS_PROXY` routes |
-| `sts:AssumeRole` | each integration `credentials` role | integrations with a role, unless `--integration-credentials=gateway` |
+| `lambda:InvokeFunction` | each integrated function and each Lambda authorizer function | `AWS_PROXY` routes and Lambda authorizers |
+| `sts:AssumeRole` | each integration `credentials` and each `authorizerCredentials` role | integrations and authorizers with a role, unless `--integration-credentials=gateway` |
 | `logs:CreateLogStream`, `logs:PutLogEvents` | each access log group, the metrics log group, and `arn:aws:logs:<region>:<account>:log-group:API-Gateway-Execution-Logs_<id>/<stage>:*` | access logs, metrics, execution logs |
 | `logs:CreateLogGroup` | `arn:aws:logs:<region>:<account>:log-group:API-Gateway-Execution-Logs_*` | execution logs (the only log group the gateway creates) |
 | `firehose:PutRecordBatch` | each access log delivery stream | access logs to Firehose |

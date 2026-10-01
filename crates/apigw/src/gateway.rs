@@ -66,10 +66,14 @@ impl Enforcement {
 }
 
 impl Enforcement {
-    fn refuses(self, protection: Protection) -> bool {
+    fn refuses(self, protection: Protection, route: &Route) -> bool {
         match protection {
             Protection::ResourcePolicy => self.resource_policy == Unsupported::Reject,
-            Protection::Iam | Protection::Authorizer | Protection::ApiKey => {
+            Protection::Authorizer => {
+                self.authorization == AuthorizationMode::Enforce
+                    && route.authorizer.is_unevaluable()
+            }
+            Protection::Iam | Protection::ApiKey => {
                 self.authorization == AuthorizationMode::Enforce
             }
             Protection::RequestValidation => self.request_validation == Unsupported::Reject,
@@ -79,7 +83,10 @@ impl Enforcement {
     /// The protections on `route` that refuse requests, in evaluation order;
     /// a request gets the first one's response.
     pub(crate) fn refusals(self, route: &Route) -> impl Iterator<Item = Protection> + '_ {
-        route.protections.iter().filter(move |&p| self.refuses(p))
+        route
+            .protections
+            .iter()
+            .filter(move |&p| self.refuses(p, route))
     }
 }
 
@@ -102,20 +109,24 @@ impl Protection {
     }
 
     /// Why a route with this protection is refused, for `/routes` and logs.
-    pub(crate) fn refusal_reason(self) -> &'static str {
+    pub(crate) fn refusal_reason(self, route: &Route) -> String {
         match self {
             Self::ResourcePolicy => {
-                "has a resource policy, which this gateway does not evaluate; answering 403 (--unsupported-resource-policy=ignore serves it)"
+                "has a resource policy, which this gateway does not evaluate; answering 403 (--unsupported-resource-policy=ignore serves it)".to_owned()
             }
             Self::Iam => {
-                "requires IAM authorization, which cannot be verified outside AWS; answering 403"
+                "requires IAM authorization, which cannot be verified outside AWS; answering 403".to_owned()
             }
-            Self::Authorizer => {
-                "requires an authorizer, which this gateway does not evaluate; answering 401"
-            }
-            Self::ApiKey => "requires an API key, which this gateway does not check; answering 403",
+            Self::Authorizer => format!(
+                "requires an authorizer this gateway cannot evaluate: {}; answering 401",
+                route
+                    .authorizer
+                    .unevaluable_reason()
+                    .unwrap_or("it has no definition")
+            ),
+            Self::ApiKey => "requires an API key, which this gateway does not check; answering 403".to_owned(),
             Self::RequestValidation => {
-                "has a request validator, which this gateway does not run; answering 501 (--unsupported-validation=ignore serves it)"
+                "has a request validator, which this gateway does not run; answering 501 (--unsupported-validation=ignore serves it)".to_owned()
             }
         }
     }
