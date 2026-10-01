@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use clap::{ArgGroup, Parser, ValueEnum};
 
+use crate::aws::{CredentialsMode, LambdaEndpoint, LambdaEndpoints};
 use crate::gateway::{AuthorizationMode, Enforcement, Unsupported};
 use crate::identity::{TrustedProxies, TrustedProxy};
 use crate::listener::{Edge, ProxyProtocol};
@@ -69,6 +70,23 @@ pub(crate) struct Config {
     /// front of the gateway; by default such routes answer 401.
     #[arg(long, env = "APIGW_INSECURE_SKIP_AUTHORIZATION")]
     pub(crate) insecure_skip_authorization: bool,
+
+    /// Whose credentials integrations with a `credentials` role use: `assume`
+    /// assumes that role (its trust policy must allow the gateway's principal),
+    /// `gateway` uses the gateway's own credentials.
+    #[arg(long, env = "APIGW_INTEGRATION_CREDENTIALS", value_enum, default_value_t = CredentialsMode::Assume)]
+    pub(crate) integration_credentials: CredentialsMode,
+
+    /// Serve a Lambda function from a URL speaking Lambda's Invoke protocol, such
+    /// as the Lambda Runtime Interface Emulator in a pod (repeatable;
+    /// `FUNCTION` is a function name or ARN).
+    #[arg(
+        long = "lambda-endpoint",
+        value_name = "FUNCTION=URL",
+        env = "APIGW_LAMBDA_ENDPOINTS",
+        value_delimiter = ','
+    )]
+    pub(crate) lambda_endpoints: Vec<LambdaEndpoint>,
 
     /// What to do with routes under a resource policy, which this gateway does
     /// not evaluate yet: `reject` answers 403, `ignore` serves them unrestricted.
@@ -156,6 +174,13 @@ impl Config {
                 kind: self.api_type,
             },
         }
+    }
+
+    pub(crate) fn lambda_endpoints(&self) -> LambdaEndpoints {
+        self.lambda_endpoints
+            .iter()
+            .map(|LambdaEndpoint(function, url)| (function.clone(), url.clone()))
+            .collect()
     }
 
     pub(crate) fn enforcement(&self) -> Enforcement {

@@ -1,202 +1,216 @@
 //! `HTTP_PROXY` integrations: forward the request to the integration URI and
 //! stream the response back unchanged.
 
+use std::time::Instant;
+
 use axum::body::Body;
-use axum::http::{HeaderName, HeaderValue, StatusCode};
+use axum::http::{HeaderName, HeaderValue};
 use axum::response::Response;
 
-use crate::gateway::{self, Incoming, is_hop_by_hop};
+use crate::gateway::{GatewayError, HeaderNameExt as _};
 use crate::integration::{HttpProxy, ParamSource};
-use crate::model::{ApiKind, RoutePath};
+use crate::model::RoutePath;
+use crate::pipeline::RequestContext;
 use crate::route::Route;
 
-pub(crate) async fn forward(
-    client: &reqwest::Client,
-    kind: ApiKind,
-    target: &HttpProxy,
-    route: &Route,
-    incoming: Incoming,
-) -> Response {
-    let url = match target_url(target, route, &incoming) {
-        Ok(url) => url,
-        Err(err) => {
-            tracing::error!(route = %route.key, uri = target.uri, %err, "invalid integration URI");
-            return internal_error();
-        }
-    };
-    let method = target
-        .method
-        .clone()
-        .unwrap_or_else(|| incoming.method.clone());
-    let mut headers = reqwest::header::HeaderMap::new();
-    for (name, value) in &incoming.headers {
-        if name != axum::http::header::HOST
-            && name != axum::http::header::CONTENT_LENGTH
-            && !is_hop_by_hop(name)
-        {
-            headers.append(name.clone(), value.clone());
-        }
-    }
-    for (name, source) in &target.headers {
-        let Some(value) = resolve(source, &incoming) else {
-            continue;
-        };
-        match (
-            HeaderName::try_from(name.as_str()),
-            HeaderValue::try_from(value),
-        ) {
-            (Ok(name), Ok(value)) => {
-                headers.insert(name, value);
+impl HttpProxy {
+    pub(crate) async fn forward(
+        &self,
+        client: &reqwest::Client,
+        route: &Route,
+        mut ctx: RequestContext,
+    ) -> Response {
+        let kind = ctx.api.kind;
+        let url = match self.target_url(&route.path, &ctx) {
+            Ok(url) => url,
+            Err(err) => {
+                tracing::error!(route = %route.key, uri = self.uri, %err, "invalid integration URI");
+                return GatewayError::IntegrationFailure.response(kind);
             }
-            (Err(_), _) | (_, Err(_)) => {
-                tracing::warn!(header = name, "mapped header is not a valid HTTP header");
+        };
+        let method = self.method.clone().unwrap_or_else(|| ctx.method.clone());
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (name, value) in &ctx.headers {
+            if name != axum::http::header::HOST
+                && name != axum::http::header::CONTENT_LENGTH
+                && !name.is_hop_by_hop()
+            {
+                headers.append(name.clone(), value.clone());
             }
         }
-    }
-    let result = client
-        .request(method, url)
-        .headers(headers)
-        .body(incoming.body)
-        .timeout(target.timeout)
-        .send()
-        .await;
-    let upstream = match result {
-        Ok(upstream) => upstream,
-        Err(err) if err.is_timeout() => {
-            tracing::warn!(route = %route.key, "integration timed out");
-            return timeout_error(kind);
+        for (name, source) in &self.headers {
+            let Some(value) = source.resolve(&ctx) else {
+                continue;
+            };
+            match (
+                HeaderName::try_from(name.as_str()),
+                HeaderValue::try_from(value),
+            ) {
+                (Ok(name), Ok(value)) => {
+                    headers.insert(name, value);
+                }
+                (Err(_), _) | (_, Err(_)) => {
+                    tracing::warn!(header = name, "mapped header is not a valid HTTP header");
+                }
+            }
         }
-        Err(err) => {
-            tracing::warn!(route = %route.key, err = %err, "integration request failed");
-            return internal_error();
-        }
-    };
-    let mut response = Response::new(Body::empty());
-    *response.status_mut() = upstream.status();
-    for (name, value) in upstream.headers() {
-        if !is_hop_by_hop(name) {
-            response.headers_mut().append(name.clone(), value.clone());
-        }
-    }
-    *response.body_mut() = Body::from_stream(upstream.bytes_stream());
-    response
-}
-
-fn internal_error() -> Response {
-    gateway::error(StatusCode::BAD_GATEWAY, "Internal server error")
-}
-
-pub(crate) fn timeout_error(kind: ApiKind) -> Response {
-    match kind {
-        ApiKind::Rest => gateway::error(StatusCode::GATEWAY_TIMEOUT, "Endpoint request timed out"),
-        ApiKind::Http => gateway::error(StatusCode::GATEWAY_TIMEOUT, "Service Unavailable"),
-    }
-}
-
-fn resolve(source: &ParamSource, incoming: &Incoming) -> Option<String> {
-    match *source {
-        ParamSource::Path(ref name) => incoming.path_param(name).map(str::to_owned),
-        ParamSource::Query(ref name) => incoming
-            .query_pairs()
-            .into_iter()
-            .rev()
-            .find(|(key, _)| key == name)
-            .map(|(_, value)| value),
-        ParamSource::Header(ref name) => incoming.header_str(name).map(str::to_owned),
-        ParamSource::Literal(ref value) => Some(value.clone()),
-    }
-}
-
-/// Fills `{name}` placeholders in the integration URI and carries the client's
-/// query string over, as API Gateway does for proxy integrations.
-fn target_url(
-    target: &HttpProxy,
-    route: &Route,
-    incoming: &Incoming,
-) -> Result<reqwest::Url, String> {
-    let greedy = greedy_param(&route.path);
-    let mut url = String::with_capacity(target.uri.len());
-    let mut rest = target.uri.as_str();
-    while let Some(open) = rest.find('{') {
-        let (before, after) = rest.split_at(open);
-        url.push_str(before);
-        let Some((name, tail)) = after.trim_start_matches('{').split_once('}') else {
-            return Err("unterminated placeholder".to_owned());
+        let started = Instant::now();
+        let result = client
+            .request(method, url)
+            .headers(headers)
+            .body(std::mem::take(&mut ctx.body))
+            .timeout(self.timeout)
+            .send()
+            .await;
+        let upstream = match result {
+            Ok(upstream) => upstream,
+            Err(err) if err.is_timeout() => {
+                tracing::warn!(route = %route.key, "integration timed out");
+                return GatewayError::IntegrationTimeout.response(kind);
+            }
+            Err(err) => {
+                tracing::warn!(route = %route.key, err = %err, "integration request failed");
+                return GatewayError::IntegrationFailure.response(kind);
+            }
         };
-        let value = match target.path_params.get(name) {
-            Some(source) => resolve(source, incoming),
-            None => incoming.path_param(name).map(str::to_owned),
-        };
-        let Some(value) = value else {
-            return Err(format!("no value for placeholder {{{name}}}"));
-        };
-        encode_path_value(&value, greedy == Some(name), &mut url);
-        rest = tail;
+        tracing::debug!(
+            route = %route.key,
+            status = upstream.status().as_u16(),
+            latency_ms = started.elapsed().as_millis(),
+            "integration responded"
+        );
+        let mut response = Response::new(Body::empty());
+        *response.status_mut() = upstream.status();
+        for (name, value) in upstream.headers() {
+            if !name.is_hop_by_hop() {
+                response.headers_mut().append(name.clone(), value.clone());
+            }
+        }
+        *response.body_mut() = Body::from_stream(upstream.bytes_stream());
+        response
     }
-    url.push_str(rest);
-    let mut url = reqwest::Url::parse(&url).map_err(|e| e.to_string())?;
-    let mut query = url.query().map(str::to_owned).unwrap_or_default();
-    if let Some(ref incoming_query) = incoming.query {
-        append_query(&mut query, incoming_query);
+
+    /// Fills `{name}` placeholders in the integration URI and carries the
+    /// client's query string over, as API Gateway does for proxy integrations.
+    fn target_url(
+        &self,
+        route_path: &RoutePath,
+        ctx: &RequestContext,
+    ) -> Result<reqwest::Url, String> {
+        let greedy = route_path.greedy_param();
+        let mut url = String::with_capacity(self.uri.len());
+        let mut rest = self.uri.as_str();
+        while let Some(open) = rest.find('{') {
+            let (before, after) = rest.split_at(open);
+            url.push_str(before);
+            let Some((name, tail)) = after.trim_start_matches('{').split_once('}') else {
+                return Err("unterminated placeholder".to_owned());
+            };
+            let value = match self.path_params.get(name) {
+                Some(source) => source.resolve(ctx),
+                None => ctx.path_param(name).map(str::to_owned),
+            };
+            let Some(value) = value else {
+                return Err(format!("no value for placeholder {{{name}}}"));
+            };
+            UrlEncoder(&mut url).path_value(&value, greedy == Some(name));
+            rest = tail;
+        }
+        url.push_str(rest);
+        let mut url = reqwest::Url::parse(&url).map_err(|e| e.to_string())?;
+        let mut query = QueryBuilder(url.query().map(str::to_owned).unwrap_or_default());
+        if let Some(raw) = ctx.query.raw() {
+            query.append(raw);
+        }
+        for (name, source) in &self.query_params {
+            if let Some(value) = source.resolve(ctx) {
+                let mut pair = String::new();
+                UrlEncoder(&mut pair).component(name);
+                pair.push('=');
+                UrlEncoder(&mut pair).component(&value);
+                query.append(&pair);
+            }
+        }
+        url.set_query((!query.0.is_empty()).then_some(query.0.as_str()));
+        Ok(url)
     }
-    for (name, source) in &target.query_params {
-        if let Some(value) = resolve(source, incoming) {
-            let mut pair = String::new();
-            encode_component(name, &mut pair);
-            pair.push('=');
-            encode_component(&value, &mut pair);
-            append_query(&mut query, &pair);
+}
+
+impl ParamSource {
+    pub(crate) fn resolve(&self, ctx: &RequestContext) -> Option<String> {
+        match *self {
+            Self::Path(ref name) => ctx.path_param(name).map(str::to_owned),
+            Self::Query(ref name) => ctx
+                .query
+                .pairs()
+                .into_iter()
+                .rev()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value),
+            Self::Header(ref name) => ctx.header_str(name).map(str::to_owned),
+            Self::Literal(ref value) => Some(value.clone()),
         }
     }
-    url.set_query((!query.is_empty()).then_some(query.as_str()));
-    Ok(url)
 }
 
-fn append_query(query: &mut String, pair: &str) {
-    if pair.is_empty() {
-        return;
+impl RoutePath {
+    /// The name of the route's `{name+}` greedy parameter, whose value keeps
+    /// its `/`s.
+    fn greedy_param(&self) -> Option<&str> {
+        let Self::Resource(path) = self else {
+            return None;
+        };
+        path.rsplit('/')
+            .next()
+            .and_then(|segment| segment.strip_prefix('{'))
+            .and_then(|segment| segment.strip_suffix("+}"))
     }
-    if !query.is_empty() {
-        query.push('&');
+}
+
+/// A query string being assembled from `name=value` pairs.
+struct QueryBuilder(String);
+
+impl QueryBuilder {
+    fn append(&mut self, pair: &str) {
+        if pair.is_empty() {
+            return;
+        }
+        if !self.0.is_empty() {
+            self.0.push('&');
+        }
+        self.0.push_str(pair);
     }
-    query.push_str(pair);
 }
 
-/// The name of a route's `{name+}` greedy parameter, whose value keeps its `/`s.
-fn greedy_param(path: &RoutePath) -> Option<&str> {
-    let RoutePath::Resource(path) = path else {
-        return None;
-    };
-    path.rsplit('/')
-        .next()
-        .and_then(|segment| segment.strip_prefix('{'))
-        .and_then(|segment| segment.strip_suffix("+}"))
-}
+/// Percent-encodes into a buffer, leaving only RFC 3986 unreserved bytes bare.
+struct UrlEncoder<'a>(&'a mut String);
 
-fn encode_path_value(value: &str, keep_slashes: bool, out: &mut String) {
-    for byte in value.bytes() {
-        if byte == b'/' && keep_slashes {
-            out.push('/');
+impl UrlEncoder<'_> {
+    fn path_value(&mut self, value: &str, keep_slashes: bool) {
+        for byte in value.bytes() {
+            if byte == b'/' && keep_slashes {
+                self.0.push('/');
+            } else {
+                self.byte(byte);
+            }
+        }
+    }
+
+    fn component(&mut self, value: &str) {
+        for byte in value.bytes() {
+            self.byte(byte);
+        }
+    }
+
+    fn byte(&mut self, byte: u8) {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            self.0.push(char::from(byte));
         } else {
-            encode_byte(byte, out);
-        }
-    }
-}
-
-fn encode_component(value: &str, out: &mut String) {
-    for byte in value.bytes() {
-        encode_byte(byte, out);
-    }
-}
-
-fn encode_byte(byte: u8, out: &mut String) {
-    if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-        out.push(char::from(byte));
-    } else {
-        out.push('%');
-        for nibble in [byte >> 4, byte & 0x0f] {
-            let digit = char::from_digit(u32::from(nibble), 16).unwrap_or('0');
-            out.push(digit.to_ascii_uppercase());
+            self.0.push('%');
+            for nibble in [byte >> 4, byte & 0x0f] {
+                let digit = char::from_digit(u32::from(nibble), 16).unwrap_or('0');
+                self.0.push(digit.to_ascii_uppercase());
+            }
         }
     }
 }
@@ -209,30 +223,25 @@ mod tests {
     use std::time::Duration;
 
     use axum::body::Bytes;
-    use axum::http::{HeaderMap, Method};
+    use axum::http::{Method, StatusCode};
     use proptest::prelude::*;
 
     use super::*;
     use crate::integration::Integration;
-    use crate::model::{MethodMatch, Protections, RouteKey};
+    use crate::model::{ApiKind, MethodMatch, Protections, RouteKey};
+    use crate::pipeline::QueryString;
 
-    fn incoming(params: &[(&str, &str)], query: Option<&str>) -> Incoming {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-tenant", HeaderValue::from_static("acme"));
-        Incoming {
-            request_id: uuid::Uuid::now_v7(),
-            received: jiff::Timestamp::now(),
-            method: Method::GET,
-            path: "/".to_owned(),
-            query: query.map(str::to_owned),
-            headers,
-            path_params: params
-                .iter()
-                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-                .collect(),
-            source_ip: None,
-            body: Bytes::new(),
-        }
+    fn incoming(params: &[(&str, &str)], query: Option<&str>) -> RequestContext {
+        let mut ctx = crate::pipeline::context::tests::request(ApiKind::Rest);
+        ctx.headers
+            .insert("x-tenant", HeaderValue::from_static("acme"));
+        ctx.method = Method::GET;
+        ctx.query = QueryString::new(query);
+        ctx.path_params = params
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        ctx
     }
 
     fn proxy(uri: &str) -> HttpProxy {
@@ -261,21 +270,21 @@ mod tests {
     #[test]
     fn greedy_values_keep_slashes_and_others_are_encoded() {
         let target = proxy("http://up/{proxy}?fixed=1");
-        let url = target_url(
-            &target,
-            &route("/{proxy+}", &target),
-            &incoming(&[("proxy", "a b/c")], Some("x=1")),
-        )
-        .unwrap();
+        let url = target
+            .target_url(
+                &route("/{proxy+}", &target).path,
+                &incoming(&[("proxy", "a b/c")], Some("x=1")),
+            )
+            .unwrap();
         assert_eq!(url.as_str(), "http://up/a%20b/c?fixed=1&x=1");
 
         let target = proxy("http://up/items/{id}");
-        let url = target_url(
-            &target,
-            &route("/items/{id}", &target),
-            &incoming(&[("id", "a/b")], None),
-        )
-        .unwrap();
+        let url = target
+            .target_url(
+                &route("/items/{id}", &target).path,
+                &incoming(&[("id", "a/b")], None),
+            )
+            .unwrap();
         assert_eq!(url.as_str(), "http://up/items/a%2Fb");
     }
 
@@ -296,12 +305,12 @@ mod tests {
             "missing".to_owned(),
             ParamSource::Query("absent".to_owned()),
         );
-        let url = target_url(
-            &target,
-            &route("/items/{id}", &target),
-            &incoming(&[("id", "7")], Some("search=a&search=b%20c")),
-        )
-        .unwrap();
+        let url = target
+            .target_url(
+                &route("/items/{id}", &target).path,
+                &incoming(&[("id", "7")], Some("search=a&search=b%20c")),
+            )
+            .unwrap();
         assert_eq!(
             url.as_str(),
             "http://up/v2/7?search=a&search=b%20c&q=b%20c&tenant=acme"
@@ -311,24 +320,36 @@ mod tests {
     #[test]
     fn missing_or_malformed_placeholders_are_errors() {
         let target = proxy("http://up/{nope}");
-        assert!(target_url(&target, &route("/x", &target), &incoming(&[], None)).is_err());
+        assert!(
+            target
+                .target_url(&route("/x", &target).path, &incoming(&[], None))
+                .is_err()
+        );
         let target = proxy("http://up/{open");
-        assert!(target_url(&target, &route("/x", &target), &incoming(&[], None)).is_err());
+        assert!(
+            target
+                .target_url(&route("/x", &target).path, &incoming(&[], None))
+                .is_err()
+        );
         let target = proxy("not a url");
-        assert!(target_url(&target, &route("/x", &target), &incoming(&[], None)).is_err());
+        assert!(
+            target
+                .target_url(&route("/x", &target).path, &incoming(&[], None))
+                .is_err()
+        );
     }
 
     #[test]
     fn greedy_param_only_matches_trailing_plus_segment() {
         assert_eq!(
-            greedy_param(&RoutePath::Resource("/a/{proxy+}".to_owned())),
+            RoutePath::Resource("/a/{proxy+}".to_owned()).greedy_param(),
             Some("proxy")
         );
         assert_eq!(
-            greedy_param(&RoutePath::Resource("/a/{id}".to_owned())),
+            RoutePath::Resource("/a/{id}".to_owned()).greedy_param(),
             None
         );
-        assert_eq!(greedy_param(&RoutePath::Default), None);
+        assert_eq!(RoutePath::Default.greedy_param(), None);
     }
 
     async fn upstream() -> std::net::SocketAddr {
@@ -369,16 +390,11 @@ mod tests {
         addr
     }
 
-    async fn send(target: HttpProxy, route_path: &str, request: Incoming) -> Response {
+    async fn send(target: HttpProxy, route_path: &str, request: RequestContext) -> Response {
         let route = route(route_path, &target);
-        forward(
-            &reqwest::Client::new(),
-            ApiKind::Rest,
-            &target,
-            &route,
-            request,
-        )
-        .await
+        target
+            .forward(&reqwest::Client::new(), &route, request)
+            .await
     }
 
     #[tokio::test]
@@ -391,7 +407,6 @@ mod tests {
         let mut request = incoming(&[("proxy", "a/b")], Some("x=1"));
         request.method = Method::POST;
         request.body = Bytes::from_static(b"payload");
-        request.source_ip = Some("192.0.2.9".to_owned());
         request
             .headers
             .insert("connection", HeaderValue::from_static("keep-alive"));
@@ -465,7 +480,7 @@ mod tests {
         #[test]
         fn encoded_components_round_trip(value in ".*") {
             let mut encoded = String::new();
-            encode_component(&value, &mut encoded);
+            UrlEncoder(&mut encoded).component(&value);
             prop_assert!(encoded.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._~%".contains(&b)));
             let decoded = reqwest::Url::parse(&format!("http://h/?k={encoded}")).unwrap();
             let pairs: Vec<(String, String)> = decoded.query_pairs().into_owned().collect();

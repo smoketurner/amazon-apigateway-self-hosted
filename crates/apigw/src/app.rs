@@ -11,6 +11,7 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+use crate::aws::AwsClients;
 use crate::config::Config;
 use crate::gateway::{ApiContext, Enforcement};
 use crate::integration::StageVariables;
@@ -28,7 +29,7 @@ struct Builder {
     stage_variable_overrides: BTreeMap<String, String>,
     overrides_path: Option<PathBuf>,
     http: reqwest::Client,
-    lambda: aws_sdk_lambda::Client,
+    aws: Arc<AwsClients>,
 }
 
 /// The inputs a router was built from; a refresh rebuilds only when they change.
@@ -68,7 +69,7 @@ impl Builder {
             stage_variables: StageVariables::new(model.stage.variables.clone()),
             enforcement: self.enforcement,
             http: self.http.clone(),
-            lambda: self.lambda.clone(),
+            aws: Arc::clone(&self.aws),
         });
         let (router, routes) = router::build(&model, &ctx, &self.base_path);
         for route in &routes {
@@ -313,13 +314,19 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("failed to build the HTTP client")?;
+    let aws = Arc::new(AwsClients::new(
+        sdk_config.clone(),
+        config.integration_credentials,
+        config.lambda_endpoints(),
+        http.clone(),
+    ));
     let builder = Builder {
         base_path: config.base_path.clone(),
         enforcement: config.enforcement(),
         stage_variable_overrides: config.stage_variable_overrides(std::env::vars()),
         overrides_path: config.integration_overrides.clone(),
+        aws: Arc::clone(&aws),
         http,
-        lambda: aws_sdk_lambda::Client::new(&sdk_config),
     };
     builder.enforcement.warn_if_relaxed();
     let loader = Loader {
@@ -359,7 +366,7 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         tasks.spawn(listener::serve(
             admin,
             tls.clone(),
-            router::admin(routes),
+            router::admin(routes, Arc::clone(&aws)),
             ConnLimits::DEFAULT,
             config.max_connections,
             Edge::direct(),
@@ -397,6 +404,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::aws::{CredentialsMode, LambdaEndpoints};
     use crate::gateway::{AuthorizationMode, Unsupported};
     use crate::model::{ApiKind, StageSettings};
     use crate::source::Source;
@@ -421,7 +429,12 @@ mod tests {
             )]),
             overrides_path,
             http: reqwest::Client::new(),
-            lambda: aws_sdk_lambda::Client::new(&sdk_config()),
+            aws: Arc::new(AwsClients::new(
+                sdk_config(),
+                CredentialsMode::Assume,
+                LambdaEndpoints::default(),
+                reqwest::Client::new(),
+            )),
         }
     }
 
