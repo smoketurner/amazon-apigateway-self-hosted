@@ -6,7 +6,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::Feature;
+use super::{Feature, MethodMatch, RoutePath};
 
 /// Identifies one deployed version of a stage. A refresh re-exports only when
 /// this changes.
@@ -75,6 +75,21 @@ impl SettingsScope {
         })
     }
 
+    /// The scope of the settings entry that names exactly this route: a REST
+    /// method (`/pets/{petId}` and `GET`) or an HTTP API route key.
+    pub(crate) fn for_route(method: &MethodMatch, path: &RoutePath) -> Self {
+        match *path {
+            RoutePath::Default => Self::Method {
+                path: "$default".to_owned(),
+                method: "*".to_owned(),
+            },
+            RoutePath::Resource(ref path) => Self::Method {
+                path: path.clone(),
+                method: method.to_string(),
+            },
+        }
+    }
+
     /// Parses an HTTP API `routeSettings` key (a route key).
     fn from_route_key(key: &str) -> Option<Self> {
         if key == "$default" {
@@ -134,11 +149,6 @@ pub(crate) struct MethodSettings {
 }
 
 impl MethodSettings {
-    fn throttles(&self) -> bool {
-        self.throttling_burst_limit.is_some_and(|b| b >= 0)
-            || self.throttling_rate_limit.is_some_and(|r| r >= 0.0)
-    }
-
     fn logs_executions(&self) -> bool {
         self.logging_level
             .as_deref()
@@ -219,9 +229,6 @@ impl StageSettings {
     pub(crate) fn unenforced(&self) -> Vec<Feature> {
         let settings = || self.method_settings.values();
         let mut features = Vec::new();
-        if settings().any(MethodSettings::throttles) {
-            features.push(Feature::Throttling);
-        }
         if self.cache_cluster_enabled {
             features.push(Feature::ResponseCaching);
         }
@@ -443,7 +450,6 @@ mod tests {
         assert_eq!(
             settings.unenforced(),
             vec![
-                Feature::Throttling,
                 Feature::ResponseCaching,
                 Feature::AccessLogs,
                 Feature::ExecutionLogs,
@@ -481,10 +487,7 @@ mod tests {
         let settings = StageSettings::from(&stage);
         assert_eq!(settings.method_settings.len(), 2);
         assert!(settings.method_settings.contains_key(&SettingsScope::All));
-        assert_eq!(
-            settings.unenforced(),
-            vec![Feature::Throttling, Feature::ExecutionLogs]
-        );
+        assert_eq!(settings.unenforced(), vec![Feature::ExecutionLogs]);
     }
 
     #[test]

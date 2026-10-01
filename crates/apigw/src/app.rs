@@ -1,6 +1,7 @@
 //! Startup, configuration refresh, and shutdown.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,6 +21,7 @@ use crate::listener::{self, ConnLimits, Edge, Tls};
 use crate::model::{ApiModel, DeploymentStamp, IntegrationOverrides};
 use crate::router::{self, BasePath, LoadSummary, Loaded};
 use crate::source::{Fetch, Fetcher, Snapshot, SourceError};
+use crate::state::{InMemory, InMemoryLimits, StateBackend};
 
 const CERT_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -31,6 +33,8 @@ struct Builder {
     overrides_path: Option<PathBuf>,
     http: reqwest::Client,
     aws: Arc<AwsClients>,
+    state: Arc<StateBackend>,
+    replicas: NonZeroU32,
 }
 
 /// The inputs a router was built from; a refresh rebuilds only when they change.
@@ -69,6 +73,8 @@ impl Builder {
             stage: snapshot.stage.clone(),
             stage_variables: Arc::new(StageVariables::new(model.stage.variables.clone())),
             responses: GatewayResponses::compile(model.kind, &model.gateway_responses),
+            state: Arc::clone(&self.state),
+            replicas: self.replicas,
             enforcement: self.enforcement,
             http: self.http.clone(),
             aws: Arc::clone(&self.aws),
@@ -329,6 +335,10 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         overrides_path: config.integration_overrides.clone(),
         aws: Arc::clone(&aws),
         http,
+        state: Arc::new(StateBackend::InMemory(InMemory::new(
+            InMemoryLimits::default(),
+        ))),
+        replicas: config.replicas,
     };
     builder.enforcement.warn_if_relaxed();
     let loader = Loader {
@@ -430,6 +440,10 @@ mod tests {
                 "local.internal".to_owned(),
             )]),
             overrides_path,
+            state: Arc::new(StateBackend::InMemory(InMemory::new(
+                InMemoryLimits::default(),
+            ))),
+            replicas: NonZeroU32::MIN,
             http: reqwest::Client::new(),
             aws: Arc::new(AwsClients::new(
                 sdk_config(),

@@ -3,6 +3,7 @@
 
 use crate::integration::{Integration, StageVariables};
 use crate::model::{ApiKind, Feature, MethodMatch, Operation, Protections, RouteKey, RoutePath};
+use crate::throttle::{RouteThrottle, ThrottleSettings};
 
 #[derive(Debug, Clone)]
 pub(crate) struct Route {
@@ -12,6 +13,7 @@ pub(crate) struct Route {
     pub(crate) integration: Integration,
     pub(crate) protections: Protections,
     pub(crate) unenforced: Vec<Feature>,
+    pub(crate) throttle: Option<RouteThrottle>,
 }
 
 impl Route {
@@ -19,6 +21,7 @@ impl Route {
         operation: &Operation,
         kind: ApiKind,
         variables: &StageVariables,
+        throttling: &ThrottleSettings,
     ) -> Self {
         Self {
             method: operation.method.clone(),
@@ -27,6 +30,7 @@ impl Route {
             integration: Integration::compile(operation.integration.as_ref(), kind, variables),
             protections: operation.protections.clone(),
             unenforced: operation.unenforced(kind),
+            throttle: throttling.for_route(&operation.method, &operation.path),
         }
     }
 }

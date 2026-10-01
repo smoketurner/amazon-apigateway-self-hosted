@@ -17,7 +17,7 @@ use axum::http::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub(crate) use stage::{DeploymentStamp, StageSettings};
+pub(crate) use stage::{DeploymentStamp, MethodSettings, SettingsScope, StageSettings};
 
 /// Which API Gateway product the definition came from. The two differ in Lambda
 /// payload defaults, error bodies, and response headers.
@@ -556,7 +556,6 @@ pub(crate) enum Feature {
     ContentHandling,
     IntegrationTlsConfig,
     ParameterMapping,
-    Throttling,
     ResponseCaching,
     AccessLogs,
     ExecutionLogs,
@@ -574,7 +573,6 @@ impl fmt::Display for Feature {
             Self::ContentHandling => "content handling",
             Self::IntegrationTlsConfig => "integration TLS config",
             Self::ParameterMapping => "parameter mapping",
-            Self::Throttling => "throttling",
             Self::ResponseCaching => "response caching",
             Self::AccessLogs => "access logs",
             Self::ExecutionLogs => "execution logs",

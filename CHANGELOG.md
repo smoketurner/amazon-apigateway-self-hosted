@@ -34,6 +34,13 @@ All notable changes to this project are documented here. The format follows
   `DEFAULT_4XX`/`DEFAULT_5XX` fallback. Error responses carry `x-amzn-ErrorType` and
   `x-amz-apigw-id`. The 413 response is not customizable. HTTP APIs keep fixed messages.
 
+- Stage throttling: REST `methodSettings` (including the `*/*` default) and HTTP API route
+  settings (including the default route settings) limit each method or route with a token
+  bucket and answer `429` (`THROTTLED` gateway response for REST, `{"message":"Too Many
+  Requests"}` for HTTP). `--replicas` (`APIGW_REPLICAS`) divides the limits per replica.
+- A `StateBackend` (in-memory, bounded, with LRU eviction) holding token buckets, calendar-aligned
+  day/week/month quota counters, and a TTL cache, for usage plans and response caching to use.
+
 ### Changed
 
 - An `HTTP_PROXY` backend that cannot be reached now answers REST clients 504 `Network error

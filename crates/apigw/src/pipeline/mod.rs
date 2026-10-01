@@ -20,8 +20,9 @@ pub(crate) use context::RequestContext;
 use crate::gateway::{ApiContext, GatewayError, MAX_BODY_BYTES};
 use crate::gateway_response::Failure;
 use crate::integration::{Integration, MockResponse};
-use crate::model::Protection;
+use crate::model::{Protection, ResponseType};
 use crate::route::Route;
+use crate::state::Admission;
 
 /// One route's handling of one request.
 pub(crate) struct Pipeline<'a> {
@@ -54,6 +55,9 @@ impl<'a> Pipeline<'a> {
         if let Some(protection) = self.refusal() {
             return self.fail(&ctx, &protection.refusal(self.api.kind));
         }
+        if let Some(failure) = self.throttled().await {
+            return self.fail(&ctx, &failure);
+        }
         if !readable {
             return self.fail(&ctx, &GatewayError::InvalidRequest.failure(self.api.kind));
         }
@@ -64,6 +68,16 @@ impl<'a> Pipeline<'a> {
         match self.integrate(&mut ctx).await {
             Ok(response) => response,
             Err(error) => self.fail(&ctx, &error.failure(self.api.kind)),
+        }
+    }
+
+    /// The failure for a request over the route's throttle limit. Runs before
+    /// the body is read, so a throttled request costs no buffering.
+    async fn throttled(&self) -> Option<Failure> {
+        let throttle = self.route.throttle.as_ref()?;
+        match throttle.admit(&self.api.state).await {
+            Admission::Admitted => None,
+            Admission::Throttled => Some(Failure::new(ResponseType::Throttled)),
         }
     }
 

@@ -265,6 +265,7 @@ mod tests {
             integration: Integration::HttpProxy(target.clone()),
             protections: Protections::default(),
             unenforced: Vec::new(),
+            throttle: None,
         }
     }
 

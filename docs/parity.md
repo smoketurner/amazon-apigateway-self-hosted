@@ -28,13 +28,13 @@ API on the admin `/routes` endpoint, and unevaluated protections fail closed (se
 | Route-selection specificity | Partial | Partial | Static, then `{param}`, then greedy through `matchit`; not yet verified against every API Gateway tie-break ([#19](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/19)) |
 | Stage prefix | Supported | Supported | `--base-path /stage` serves routes as an `execute-api` URL does |
 | Unknown route | Supported | Supported | REST `403 Missing Authentication Token`, HTTP `404 Not Found` |
-| Request ID header | Supported | Supported | `x-amzn-requestid` (REST), `apigw-requestid` (HTTP); `x-amz-apigw-id` and `x-amzn-ErrorType` follow with [#15](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/15) |
+| Request ID header | Supported | Supported | `x-amzn-requestid` (REST), `apigw-requestid` (HTTP); REST error responses also carry `x-amz-apigw-id` and `x-amzn-ErrorType` |
 | Stage variables | Supported | Supported | Substituted into integration URIs and sent in Lambda events; overridable with `--stage-variable` |
 | Request and URL size limits | Partial | Partial | 10 MB body cap answers `413`; the REST URL/header and HTTP request-line limits are not enforced ([#17](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/17)) |
 | Header handling (`X-Amzn-Remapped-*`, dropped headers, `X-HTTP-Method-Override`, `;` in query strings, HTTP API `Forwarded`) | Planned | Planned | Hop-by-hop headers are dropped and `X-Forwarded-For` is rewritten from the client address ([#16](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/16)) |
 | Binary media types and `contentHandling` | Planned | n/a | Lambda bodies are decoded by `isBase64Encoded` only; the setting is imported and reported ([#18](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/18)) |
 | Response compression, request decompression | Planned | n/a | Imported and reported ([#18](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/18)) |
-| Gateway responses (defaults and customization) | Planned | Planned | Errors use API Gateway's stock status and message (HTTP APIs have fixed messages); REST customizations are imported and reported ([#15](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/15)) |
+| Gateway responses (defaults and customization) | Partial | Supported | REST: every response type has API Gateway's default status and message and applies the API's customizations (status, `gatewayresponse.header.*`, body templates with `$context`/`$stageVariables`/`$method.request.*` substitution, `DEFAULT_4XX`/`DEFAULT_5XX` fallback; the 413 is not customizable). Default messages for some 500-class types are not yet checked against recorded AWS responses. HTTP APIs have fixed messages |
 | CORS | Supported | Planned | REST CORS is a `MOCK` `OPTIONS` method and works as one; HTTP API CORS is imported and reported ([#19](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/19)) |
 | Custom domains and API mappings | Planned | Planned | Serve behind your own ingress, with `--base-path` for a stage prefix ([#40](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/40)) |
 | Mutual TLS, `$context.identity.clientCert` | Planned | Planned | TLS is always on; client certificates are not requested ([#40](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/40)) |
@@ -44,7 +44,7 @@ API on the admin `/routes` endpoint, and unevaluated protections fail closed (se
 
 | Feature | REST | HTTP | Behavior today / issue |
 |---|---|---|---|
-| `HTTP_PROXY` | Partial | Partial | Forwards method, headers, body, and query string; path, query, and header mappings from method request parameters and literals; `timeoutInMillis`; streams the response. Mappings from `stageVariables.*` and `context.*` are ignored with a warning ([#26](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/26)); `tlsConfig` is not applied ([#16](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/16)) |
+| `HTTP_PROXY` | Partial | Partial | Forwards method, headers, body, and query string; path, query, and header mappings from method request parameters and literals; `timeoutInMillis`; streams the response. Mappings from `method.request.*`, `context.*`, `stageVariables.*`, and literals work; other sources are ignored with a warning ([#26](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/26)); `tlsConfig` is not applied ([#16](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/16)) |
 | HTTP API parameter mapping (`overwrite:`, `append:`, `remove:`, response mapping) | n/a | Planned | Imported and reported ([#19](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/19)) |
 | `AWS_PROXY` Lambda, payload 1.0 and 2.0 | Partial | Partial | Events and responses (including `multiValueHeaders`, cookies, base64 bodies, and 2.0 response inference) follow the published formats; region from the function ARN, qualified ARNs, assumed integration roles, per-function endpoints (`--lambda-endpoint`), timeouts. `requestContext` is incomplete (empty `accountId`, partial `identity`) ([#13](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/13)); payload limits are not enforced ([#17](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/17)) |
 | `MOCK` | Partial | n/a | Status from the request template's `statusCode`, literal response headers, and the response template, returned verbatim ([#23](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/23), [#27](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/27)) |
@@ -88,8 +88,8 @@ Routes whose protection is not evaluated yet are refused, never served unprotect
 
 | Feature | REST | HTTP | Behavior today / issue |
 |---|---|---|---|
-| Stage, method, and route throttling (`429`) | Planned | Planned | Imported and reported, not enforced ([#21](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/21)) |
-| Shared limiter state across replicas | Planned | Planned | In-memory per replica, quotas divided by replica count, with an optional Valkey backend ([#21](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/21), [#35](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/35)) |
+| Stage, method, and route throttling (`429`) | Partial | Partial | Token buckets per method (REST `methodSettings`, `*/*` default) and per route (HTTP route settings, default route settings); `429` through the `THROTTLED` gateway response (REST) or `{"message":"Too Many Requests"}` (HTTP). Account-level and usage-plan throttles are not applied; limits are per replica (see below) |
+| Shared limiter state across replicas | Partial | Partial | In-memory per replica; `--replicas N` divides throttle rates and bursts by `N`, so the API-wide rate is approximately the configured one (a replica's bucket holds at least one token, so with more replicas than burst tokens the API-wide burst is larger). An optional Valkey backend that makes limits exact is planned ([#35](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/35)) |
 | Response caching | Planned | n/a | Cache settings and key parameters are imported and reported ([#38](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/38)) |
 | Canary releases | Planned | n/a | The deployed stage is served; the canary split is reported ([#39](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/39)) |
 
@@ -143,11 +143,9 @@ Imported settings that are not enforced yet map to issues as follows:
 
 | `/routes` feature | Issue |
 |---|---|
-| `gateway_responses` | [#15](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/15) |
 | `binary_media_types`, `compression`, `content_handling` | [#18](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/18) |
 | `cors`, `parameter_mapping` | [#19](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/19) |
 | `integration_tls_config` | [#16](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/16) |
-| `throttling` | [#21](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/21) |
 | `response_caching` | [#38](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/38) |
 | `canary` | [#39](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/39) |
 | `access_logs` | [#41](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/41) |
