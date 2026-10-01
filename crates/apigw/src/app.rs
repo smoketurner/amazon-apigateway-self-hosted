@@ -7,21 +7,23 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
+use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::aws::AwsClients;
+use crate::canary::{CanaryRelease, CanaryStructure, CanarySummary, Release, TrafficShare};
 use crate::config::Config;
 use crate::cors::Cors;
 use crate::gateway::{ApiContext, Enforcement};
 use crate::gateway_response::GatewayResponses;
 use crate::integration::StageVariables;
 use crate::listener::{self, ConnLimits, Edge, Tls};
-use crate::model::{ApiModel, DeploymentStamp, IntegrationOverrides};
+use crate::model::{ApiModel, Feature, IntegrationOverrides, StageSettings};
 use crate::observability::{Observability, StageObserver};
-use crate::router::{self, BasePath, LoadSummary, Loaded};
+use crate::router::{self, BasePath, LoadSummary, Loaded, RouteSummary};
 use crate::source::{Fetch, Fetcher, Snapshot, SourceError};
 use crate::state::{InMemory, InMemoryLimits, StateBackend};
 
@@ -38,6 +40,13 @@ struct Builder {
     state: Arc<StateBackend>,
     replicas: NonZeroU32,
     observability: Arc<Observability>,
+}
+
+/// One release's router and what to report about it.
+struct BuiltRelease {
+    router: axum::Router,
+    routes: Vec<RouteSummary>,
+    unenforced: Vec<Feature>,
 }
 
 /// The inputs a router was built from; a refresh rebuilds only when they change.
@@ -63,13 +72,20 @@ impl Builder {
         })
     }
 
-    fn build(&self, inputs: &Inputs) -> anyhow::Result<Loaded> {
+    /// Builds one release of the stage: `openapi` imported with `stage` settings
+    /// (local stage variable overrides applied on top).
+    fn build_release(
+        &self,
+        inputs: &Inputs,
+        openapi: &Value,
+        mut stage: StageSettings,
+        release: Option<Release>,
+    ) -> anyhow::Result<BuiltRelease> {
         let snapshot = &inputs.snapshot;
-        let mut stage = snapshot.stage_settings.clone();
         stage
             .variables
             .extend(self.stage_variable_overrides.clone());
-        let model = ApiModel::import(&snapshot.openapi, snapshot.kind, stage, &inputs.overrides)?;
+        let model = ApiModel::import(openapi, snapshot.kind, stage, &inputs.overrides)?;
         let ctx = Arc::new(ApiContext {
             kind: snapshot.kind,
             api_id: snapshot.api_id.clone(),
@@ -87,9 +103,83 @@ impl Builder {
                 &model,
                 &snapshot.api_id,
                 snapshot.stage.as_deref(),
+                release,
             ),
+            release,
         });
         let (router, routes) = router::build(&model, &ctx, &self.base_path);
+        Ok(BuiltRelease {
+            router,
+            routes,
+            unenforced: model.unenforced(),
+        })
+    }
+
+    /// The canary release, when the stage has one that receives traffic: the
+    /// stage's routes (or the shadow stage's, when `--canary-export-stage`
+    /// supplied them) with the canary's stage variable overrides applied.
+    fn build_canary(
+        &self,
+        inputs: &Inputs,
+    ) -> anyhow::Result<Option<(CanaryRelease, CanarySummary)>> {
+        let snapshot = &inputs.snapshot;
+        let Some(ref settings) = snapshot.stage_settings.canary else {
+            return Ok(None);
+        };
+        let share = TrafficShare::from_percent(settings.percent_traffic);
+        if share.is_none() {
+            return Ok(None);
+        }
+        let (openapi, structure) = if let Some(ref shadow) = snapshot.canary {
+            (
+                &shadow.openapi,
+                CanaryStructure::ShadowStage(shadow.stage.clone()),
+            )
+        } else {
+            tracing::warn!(
+                "the canary release serves the stage's routes with the canary's stage variables; set --canary-export-stage to a stage holding the canary deployment to serve its routes"
+            );
+            (&snapshot.openapi, CanaryStructure::StageExport)
+        };
+        let mut stage = snapshot.stage_settings.clone();
+        stage
+            .variables
+            .extend(settings.stage_variable_overrides.clone());
+        let built = self.build_release(inputs, openapi, stage, Some(Release::Canary))?;
+        Ok(Some((
+            CanaryRelease {
+                router: built.router,
+                share,
+            },
+            CanarySummary {
+                percent_traffic: settings.percent_traffic,
+                deployment_id: settings.deployment_id.clone(),
+                use_stage_cache: settings.use_stage_cache,
+                structure,
+                stage_variable_overrides: settings.stage_variable_overrides.clone(),
+                routes: built.routes,
+            },
+        )))
+    }
+
+    fn build(&self, inputs: &Inputs) -> anyhow::Result<Loaded> {
+        let snapshot = &inputs.snapshot;
+        let release = snapshot
+            .stage_settings
+            .canary
+            .as_ref()
+            .map(|_| Release::Production);
+        let BuiltRelease {
+            router,
+            routes,
+            unenforced,
+        } = self.build_release(
+            inputs,
+            &snapshot.openapi,
+            snapshot.stage_settings.clone(),
+            release,
+        )?;
+        let canary = self.build_canary(inputs)?;
         for route in &routes {
             if route.problems.is_empty() {
                 tracing::debug!(
@@ -107,7 +197,6 @@ impl Builder {
                 );
             }
         }
-        let unenforced = model.unenforced();
         if !unenforced.is_empty() {
             tracing::warn!(
                 features = unenforced
@@ -125,10 +214,16 @@ impl Builder {
             routes = routes.len(),
             "API definition loaded"
         );
+        let (canary, canary_summary) = match canary {
+            Some((release, summary)) => (Some(release), Some(summary)),
+            None => (None, None),
+        };
         Ok(Loaded {
             router,
+            canary,
             kind: snapshot.kind,
             summary: LoadSummary {
+                canary: canary_summary,
                 api_id: snapshot.api_id.clone(),
                 stage: snapshot.stage.clone(),
                 deployment_id: snapshot.stamp.deployment_id.clone(),
@@ -147,7 +242,7 @@ struct Loader {
 }
 
 impl Loader {
-    async fn fetch(&self, current: Option<&DeploymentStamp>) -> Result<Fetch, SourceError> {
+    async fn fetch(&self, current: Option<&Snapshot>) -> Result<Fetch, SourceError> {
         let fetched = self.fetcher.fetch(current).await?;
         if let (Fetch::Changed(snapshot), Some(cache)) = (&fetched, &self.cache)
             && let Err(err) = snapshot.store(cache).await
@@ -263,7 +358,7 @@ impl Refresher {
     }
 
     async fn next_inputs(&self) -> anyhow::Result<Inputs> {
-        let snapshot = match self.loader.fetch(Some(&self.inputs.snapshot.stamp)).await? {
+        let snapshot = match self.loader.fetch(Some(&self.inputs.snapshot)).await? {
             Fetch::Unchanged => self.inputs.snapshot.clone(),
             Fetch::Changed(snapshot) => *snapshot,
         };
@@ -434,8 +529,8 @@ mod tests {
     use super::*;
     use crate::aws::{CredentialsMode, LambdaEndpoints};
     use crate::gateway::{AuthorizationMode, Unsupported};
-    use crate::model::{ApiKind, StageSettings};
-    use crate::source::Source;
+    use crate::model::{ApiKind, CanarySettings, DeploymentStamp, StageSettings};
+    use crate::source::{CanarySnapshot, Source};
 
     fn sdk_config() -> aws_config::SdkConfig {
         aws_config::SdkConfig::builder()
@@ -486,6 +581,7 @@ mod tests {
             },
             openapi: json!({"paths": {"/pets": {"get": {"x-amazon-apigateway-integration":
                 {"type": "http_proxy", "uri": "https://${stageVariables.host}/pets"}}}}}),
+            canary: None,
         }
     }
 
@@ -527,7 +623,7 @@ mod tests {
         let mut snapshot = snapshot();
         snapshot.openapi =
             json!({"x-amazon-apigateway-binary-media-types": ["image/png"], "paths": {}});
-        snapshot.stage_settings.tracing_enabled = true;
+        snapshot.stage_settings.cache_cluster_enabled = true;
         let inputs = Inputs {
             snapshot,
             overrides: IntegrationOverrides::default(),
@@ -536,7 +632,7 @@ mod tests {
         let rendered = serde_json::to_value(&loaded.summary).unwrap();
         assert_eq!(
             rendered["unenforced"],
-            json!(["binary_media_types", "tracing"])
+            json!(["binary_media_types", "response_caching"])
         );
     }
 
@@ -690,5 +786,257 @@ mod tests {
         shutdown.cancel();
         task.await.unwrap();
         tokio::fs::remove_file(&doc).await.unwrap();
+    }
+
+    fn canary_snapshot(percent: f64, overrides: &[(&str, &str)]) -> Snapshot {
+        let mut snapshot = snapshot();
+        snapshot.stage_settings.variables =
+            BTreeMap::from([("backend".to_owned(), "prod.internal".to_owned())]);
+        snapshot.openapi = json!({"paths": {"/pets": {"get": {"x-amazon-apigateway-integration":
+            {"type": "http_proxy", "uri": "https://${stageVariables.backend}/pets"}}}}});
+        snapshot.stage_settings.canary = Some(CanarySettings {
+            percent_traffic: percent,
+            deployment_id: Some("d2".to_owned()),
+            stage_variable_overrides: overrides
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+            use_stage_cache: false,
+        });
+        snapshot
+    }
+
+    fn build(snapshot: Snapshot) -> Loaded {
+        let inputs = Inputs {
+            snapshot,
+            overrides: IntegrationOverrides::default(),
+        };
+        builder(None).build(&inputs).unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_canary_release_has_its_own_stage_variables() {
+        let loaded = build(canary_snapshot(25.0, &[("backend", "canary.internal")]));
+        assert_eq!(
+            loaded.summary.routes[0].target.as_deref(),
+            Some("https://prod.internal/pets")
+        );
+        let canary = loaded.summary.canary.as_ref().unwrap();
+        assert_eq!(
+            canary.routes[0].target.as_deref(),
+            Some("https://canary.internal/pets")
+        );
+        assert_eq!(canary.percent_traffic.to_bits(), 25.0_f64.to_bits());
+        assert_eq!(canary.deployment_id.as_deref(), Some("d2"));
+        assert!(loaded.canary.is_some());
+        let rendered = serde_json::to_value(&loaded.summary).unwrap();
+        assert_eq!(
+            rendered["canary"]["structure"],
+            json!({"source": "stage_export"})
+        );
+        assert_eq!(
+            rendered["canary"]["stage_variable_overrides"]["backend"],
+            "canary.internal"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_stage_variable_overrides_win_over_the_canarys() {
+        let mut snapshot = snapshot();
+        snapshot.stage_settings.canary = Some(CanarySettings {
+            percent_traffic: 25.0,
+            deployment_id: None,
+            stage_variable_overrides: BTreeMap::from([(
+                "host".to_owned(),
+                "canary.example".to_owned(),
+            )]),
+            use_stage_cache: false,
+        });
+        let loaded = build(snapshot);
+        let canary = loaded.summary.canary.as_ref().unwrap();
+        assert_eq!(
+            canary.routes[0].target.as_deref(),
+            Some("https://local.internal/pets")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shadow_stage_supplies_the_canary_routes() {
+        let mut snapshot = canary_snapshot(10.0, &[]);
+        snapshot.canary = Some(CanarySnapshot {
+            stage: "shadow".to_owned(),
+            stamp: DeploymentStamp {
+                deployment_id: Some("d2".to_owned()),
+                last_updated_epoch_ms: None,
+            },
+            openapi: json!({"paths": {
+                "/pets": {"get": {"x-amazon-apigateway-integration":
+                    {"type": "http_proxy", "uri": "https://${stageVariables.backend}/pets"}}},
+                "/new": {"get": {"x-amazon-apigateway-integration":
+                    {"type": "http_proxy", "uri": "https://${stageVariables.backend}/new"}}}}}),
+        });
+        let loaded = build(snapshot);
+        let routes: Vec<&str> = loaded
+            .summary
+            .routes
+            .iter()
+            .map(|r| r.route_key.as_str())
+            .collect();
+        assert_eq!(routes, ["GET /pets"]);
+        let canary = loaded.summary.canary.as_ref().unwrap();
+        let canary_routes: Vec<&str> = canary.routes.iter().map(|r| r.route_key.as_str()).collect();
+        assert_eq!(canary_routes, ["GET /new", "GET /pets"]);
+        let rendered = serde_json::to_value(&loaded.summary).unwrap();
+        assert_eq!(
+            rendered["canary"]["structure"],
+            json!({"source": "shadow_stage", "stage": "shadow"})
+        );
+    }
+
+    #[tokio::test]
+    async fn a_canary_without_traffic_builds_nothing() {
+        let loaded = build(canary_snapshot(0.0, &[("backend", "canary.internal")]));
+        assert!(loaded.canary.is_none());
+        assert!(loaded.summary.canary.is_none());
+        let rendered = serde_json::to_value(&loaded.summary).unwrap();
+        assert!(rendered.get("canary").is_none());
+    }
+
+    #[tokio::test]
+    async fn stages_without_canary_settings_are_unchanged() {
+        let loaded = build(snapshot());
+        assert!(loaded.canary.is_none());
+        assert!(loaded.summary.canary.is_none());
+    }
+
+    mod traffic {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+
+        use super::*;
+        use crate::model::{AccessLogSettings, MethodSettings, SettingsScope};
+        use crate::observability::testing::MockAws;
+        use crate::observability::{
+            Delivery, LogGroup, MetricsNamespace, MetricsSettings, Settings, StreamName,
+            TraceDelivery,
+        };
+
+        const ACCESS_GROUP: &str = "/aws/apigw/access";
+
+        fn observed_snapshot(percent: f64) -> Snapshot {
+            let mut snapshot = canary_snapshot(percent, &[]);
+            snapshot.openapi = json!({"paths": {"/pets": {"get": {"x-amazon-apigateway-integration":
+                {"type": "mock",
+                 "requestTemplates": {"application/json": "{\"statusCode\": 200}"},
+                 "responses": {"default": {"statusCode": "200",
+                    "responseTemplates": {"application/json": "{}"}}}}}}}});
+            snapshot.stage_settings.access_log = Some(AccessLogSettings {
+                destination_arn: Some(format!("arn:aws:logs:us-east-1:1:log-group:{ACCESS_GROUP}")),
+                format: Some("$context.stage $context.isCanaryRequest".to_owned()),
+            });
+            snapshot.stage_settings.method_settings.insert(
+                SettingsScope::All,
+                MethodSettings {
+                    metrics_enabled: Some(false),
+                    ..MethodSettings::default()
+                },
+            );
+            snapshot
+        }
+
+        async fn run(aws: &MockAws, snapshot: Snapshot, requests: usize) {
+            let observability = Observability::start(
+                aws.sdk_config(),
+                Settings {
+                    access_logs: Delivery::Aws,
+                    execution_logs: Delivery::Off,
+                    metrics: Some(MetricsSettings {
+                        group: LogGroup::new("metrics-group"),
+                        namespace: MetricsNamespace::default(),
+                    }),
+                    tracing: TraceDelivery::Off,
+                    sampling_percent: 0,
+                    stream: StreamName::for_pod(
+                        Some("pod"),
+                        None,
+                        jiff::Timestamp::UNIX_EPOCH,
+                        uuid::Uuid::nil(),
+                    ),
+                },
+            );
+            let mut builder = builder(None);
+            builder.observability = Arc::clone(&observability);
+            let loaded = builder
+                .build(&Inputs {
+                    snapshot,
+                    overrides: IntegrationOverrides::default(),
+                })
+                .unwrap();
+            let (_tx, rx) = watch::channel(Arc::new(loaded));
+            let app = router::dispatcher(rx);
+            for _ in 0..requests {
+                let request = Request::builder()
+                    .uri("/pets")
+                    .header("host", "h")
+                    .body(Body::empty())
+                    .unwrap();
+                assert_eq!(app.clone().oneshot(request).await.unwrap().status(), 200);
+            }
+            observability.close().await;
+        }
+
+        fn lines(aws: &MockAws, group: &str) -> Vec<String> {
+            aws.calls()
+                .into_iter()
+                .filter(|c| {
+                    c.target == "Logs_20140328.PutLogEvents" && c.body["logGroupName"] == group
+                })
+                .flat_map(|c| c.body["logEvents"].as_array().cloned().unwrap_or_default())
+                .map(|e| e["message"].as_str().unwrap().to_owned())
+                .collect()
+        }
+
+        fn stages(aws: &MockAws) -> Vec<String> {
+            lines(aws, "metrics-group")
+                .iter()
+                .map(|m| {
+                    let doc: Value = serde_json::from_str(m).unwrap();
+                    doc["Stage"].as_str().unwrap().to_owned()
+                })
+                .collect()
+        }
+
+        #[tokio::test]
+        async fn canary_requests_are_logged_and_counted_for_the_canary_too() {
+            let aws = MockAws::start().await;
+            run(&aws, observed_snapshot(100.0), 3).await;
+            assert_eq!(lines(&aws, ACCESS_GROUP), ["prod true"; 3]);
+            assert_eq!(
+                lines(&aws, &format!("{ACCESS_GROUP}/Canary")),
+                ["prod true"; 3]
+            );
+            let mut stages = stages(&aws);
+            stages.sort();
+            assert_eq!(stages, ["prod", "prod/Canary"]);
+        }
+
+        #[tokio::test]
+        async fn production_requests_report_that_they_are_not_canary_requests() {
+            let aws = MockAws::start().await;
+            run(&aws, observed_snapshot(0.0), 2).await;
+            assert_eq!(lines(&aws, ACCESS_GROUP), ["prod false"; 2]);
+            assert!(lines(&aws, &format!("{ACCESS_GROUP}/Canary")).is_empty());
+            assert_eq!(stages(&aws), ["prod"]);
+        }
+
+        #[tokio::test]
+        async fn stages_without_a_canary_leave_the_variable_unset() {
+            let aws = MockAws::start().await;
+            let mut snapshot = observed_snapshot(0.0);
+            snapshot.stage_settings.canary = None;
+            run(&aws, snapshot, 1).await;
+            assert_eq!(lines(&aws, ACCESS_GROUP), ["prod -"]);
+        }
     }
 }

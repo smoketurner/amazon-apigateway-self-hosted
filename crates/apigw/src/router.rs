@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::authz::Authorizers;
 use crate::aws::{AwsClients, RoleArn, RoleStatus};
+use crate::canary::{CanaryRelease, CanarySummary};
 use crate::gateway::{ApiContext, Enforcement, RequestId};
 use crate::http_routes::{HttpRoutes, PathPattern};
 use crate::integration::Integration;
@@ -47,10 +48,10 @@ impl BasePath {
         Router::new()
             .without_v07_checks()
             .nest(prefix, router)
-            .fallback(move |request: Request| {
+            .fallback(move |mut request: Request| {
                 let ctx = Arc::clone(&ctx);
                 async move {
-                    let pending = ctx.observer.begin(&ctx, &request, None);
+                    let pending = ctx.observer.begin(&ctx, &mut request, None);
                     let response = ctx.reject_unrouted(request);
                     ctx.observer.finish(pending, response)
                 }
@@ -75,8 +76,21 @@ impl std::str::FromStr for BasePath {
 /// One loaded API definition, as served and as reported on the admin listener.
 pub(crate) struct Loaded {
     pub(crate) router: Router,
+    /// The canary release of the stage, when it has one that receives traffic.
+    pub(crate) canary: Option<CanaryRelease>,
     pub(crate) kind: ApiKind,
     pub(crate) summary: LoadSummary,
+}
+
+impl Loaded {
+    /// The router for one request: the canary's for the share of requests the
+    /// stage's canary settings send there, the stage's otherwise.
+    fn router_for_request(&self) -> &Router {
+        match self.canary {
+            Some(ref canary) if canary.share.picks_canary() => &canary.router,
+            Some(_) | None => &self.router,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -88,6 +102,9 @@ pub(crate) struct LoadSummary {
     /// API- and stage-level features imported but not enforced yet.
     pub(crate) unenforced: Vec<Feature>,
     pub(crate) routes: Vec<RouteSummary>,
+    /// The canary release, when the stage has one that receives traffic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) canary: Option<CanarySummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -153,9 +170,9 @@ impl PathRoutes {
             .or(self.default.as_deref())
     }
 
-    async fn handle(&self, request: Request) -> Response {
+    async fn handle(&self, mut request: Request) -> Response {
         let route = self.select(request.method());
-        let pending = self.ctx.observer.begin(&self.ctx, &request, route);
+        let pending = self.ctx.observer.begin(&self.ctx, &mut request, route);
         let response = match route {
             // The pipeline future holds whole SDK calls; box it once here.
             Some(route) => Box::pin(Pipeline::new(&self.ctx, route).run(request)).await,
@@ -173,12 +190,12 @@ struct HttpHandler {
 }
 
 impl HttpHandler {
-    async fn handle(&self, request: Request) -> Response {
+    async fn handle(&self, mut request: Request) -> Response {
         let selection = self.routes.select(request.uri().path(), request.method());
         let pending =
             self.ctx
                 .observer
-                .begin(&self.ctx, &request, selection.as_ref().map(|s| s.route));
+                .begin(&self.ctx, &mut request, selection.as_ref().map(|s| s.route));
         let response = match selection {
             Some(selection) => {
                 let pipeline =
@@ -337,7 +354,12 @@ pub(crate) fn dispatcher(current: watch::Receiver<Arc<Loaded>>) -> Router {
             request.extensions_mut().insert(RequestId(request_id));
             let method = request.method().clone();
             let path = request.uri().path().to_owned();
-            let mut response = loaded.router.clone().oneshot(request).await.into_response();
+            let mut response = loaded
+                .router_for_request()
+                .clone()
+                .oneshot(request)
+                .await
+                .into_response();
             if let Ok(value) = HeaderValue::try_from(request_id.to_string()) {
                 response
                     .headers_mut()
@@ -391,11 +413,13 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::aws::{CredentialsMode, LambdaEndpoints};
     use crate::cors::Cors;
     use crate::gateway::{AuthorizationMode, Unsupported};
     use crate::gateway_response::GatewayResponses;
     use crate::model::{IntegrationOverrides, Protection, StageSettings};
     use crate::model::{MethodSettings, SettingsScope};
+    use crate::observability::StageObserver;
     use crate::state::{InMemory, InMemoryLimits, StateBackend};
     use std::num::NonZeroU32;
 
@@ -417,8 +441,8 @@ mod tests {
             .build();
         Arc::new(AwsClients::new(
             config,
-            crate::aws::CredentialsMode::Assume,
-            crate::aws::LambdaEndpoints::default(),
+            CredentialsMode::Assume,
+            LambdaEndpoints::default(),
             reqwest::Client::new(),
         ))
     }
@@ -441,7 +465,8 @@ mod tests {
             enforcement,
             http: reqwest::Client::new(),
             aws: aws(),
-            observer: crate::observability::StageObserver::disabled(),
+            observer: StageObserver::disabled(),
+            release: None,
         })
     }
 
@@ -1170,7 +1195,9 @@ mod tests {
                     loaded_at: String::new(),
                     unenforced: Vec::new(),
                     routes: summary,
+                    canary: None,
                 },
+                canary: None,
             })
         };
         let (tx, rx) = watch::channel(loaded(first, summary));
@@ -1199,7 +1226,7 @@ mod tests {
 
     #[tokio::test]
     async fn lambda_routes_invoke_through_endpoint_overrides() {
-        let app = axum::Router::new().route(
+        let app = Router::new().route(
             "/invoke",
             axum::routing::post(|headers: axum::http::HeaderMap, body: axum::body::Bytes| async move {
                 let event: Value = serde_json::from_slice(&body).unwrap();
@@ -1222,8 +1249,8 @@ mod tests {
         let endpoint = reqwest::Url::parse(&format!("http://{addr}/invoke")).unwrap();
         let aws = Arc::new(AwsClients::new(
             config,
-            crate::aws::CredentialsMode::Assume,
-            crate::aws::LambdaEndpoints::from_iter([("items".to_owned(), endpoint)]),
+            CredentialsMode::Assume,
+            LambdaEndpoints::from_iter([("items".to_owned(), endpoint)]),
             reqwest::Client::new(),
         ));
         let doc = json!({"paths": {"/items/{id}": {"put": {"x-amazon-apigateway-integration": {
@@ -1249,7 +1276,8 @@ mod tests {
             enforcement: STRICT,
             http: reqwest::Client::new(),
             aws,
-            observer: crate::observability::StageObserver::disabled(),
+            observer: StageObserver::disabled(),
+            release: None,
         });
         let (router, _) = build(&model, &api, &BasePath::default());
         let request = Request::builder()
@@ -1264,7 +1292,7 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), 1024)
             .await
             .unwrap();
-        assert_eq!(&body[..], b"PUT 42");
+        assert_eq!(&*body, b"PUT 42");
     }
 
     #[test]

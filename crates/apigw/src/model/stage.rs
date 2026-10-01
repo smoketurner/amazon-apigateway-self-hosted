@@ -284,16 +284,6 @@ impl StageSettings {
         if self.cache_cluster_enabled {
             features.push(Feature::ResponseCaching);
         }
-        if self.tracing_enabled {
-            features.push(Feature::Tracing);
-        }
-        if self
-            .canary
-            .as_ref()
-            .is_some_and(|c| c.percent_traffic > 0.0)
-        {
-            features.push(Feature::Canary);
-        }
         features
     }
 }
@@ -403,7 +393,7 @@ mod tests {
     use aws_sdk_apigateway::primitives::DateTime;
     use aws_sdk_apigateway::types::{CanarySettings as RestCanary, MethodSetting};
     use aws_sdk_apigatewayv2::operation::get_stage::GetStageOutput as HttpStage;
-    use aws_sdk_apigatewayv2::types::{LoggingLevel, RouteSettings};
+    use aws_sdk_apigatewayv2::types::{LoggingLevel as SdkLoggingLevel, RouteSettings};
 
     use super::*;
 
@@ -513,10 +503,7 @@ mod tests {
                 .map(String::as_str),
             Some("b")
         );
-        assert_eq!(
-            settings.unenforced(),
-            vec![Feature::ResponseCaching, Feature::Tracing, Feature::Canary]
-        );
+        assert_eq!(settings.unenforced(), vec![Feature::ResponseCaching]);
         assert_eq!(
             DeploymentStamp::from(&stage),
             DeploymentStamp {
@@ -539,7 +526,7 @@ mod tests {
             .route_settings(
                 "GET /pets",
                 RouteSettings::builder()
-                    .logging_level(LoggingLevel::Error)
+                    .logging_level(SdkLoggingLevel::Error)
                     .build(),
             )
             .build();
@@ -639,14 +626,14 @@ mod tests {
         assert_eq!(
             logging(Some("info"), true),
             Some(ExecutionLogging {
-                level: crate::model::LoggingLevel::Info,
+                level: LoggingLevel::Info,
                 data_trace: true
             })
         );
         assert_eq!(
             logging(Some("ERROR"), false),
             Some(ExecutionLogging {
-                level: crate::model::LoggingLevel::Error,
+                level: LoggingLevel::Error,
                 data_trace: false
             })
         );

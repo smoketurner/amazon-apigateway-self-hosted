@@ -4,8 +4,10 @@
 mod app;
 mod authz;
 mod aws;
+mod canary;
 mod config;
 mod cors;
+mod entropy;
 mod gateway;
 mod gateway_response;
 mod http_routes;

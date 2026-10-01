@@ -49,6 +49,20 @@ All notable changes to this project are documented here. The format follows
   dimensions when the stage enables detailed metrics.
 - Execution logs: REST stages with `loggingLevel` `ERROR` or `INFO` (and `dataTraceEnabled`)
   write a request trace to `API-Gateway-Execution-Logs_{apiId}/{stage}` (`--execution-logs`).
+- X-Ray: REST stages with tracing enabled send one segment per sampled request with
+  `PutTraceSegments`. A caller's `X-Amzn-Trace-Id` (or W3C `traceparent`) is continued and its
+  sampling decision honored; otherwise X-Ray's default rule applies (the first request each
+  second, then `--xray-sampling-percent`, default 5). The trace is passed on per request in
+  `X-Amzn-Trace-Id` (HTTP backends and Lambda) and `traceparent` (HTTP backends), with this
+  gateway's segment as the parent, and `$context.xrayTraceId` is available to access logs.
+  `--tracing off` disables all of it.
+- Canary releases: a REST stage with canary settings serves a second release to
+  `percentTraffic` percent of requests, chosen at random per request, with the canary's stage
+  variable overrides applied (local `--stage-variable` overrides still win). `$context.isCanaryRequest`
+  is `true` or `false` on stages with a canary. Canary requests are also written to the
+  `{log group}/Canary` access and execution log groups and counted under `Stage` `{stage}/Canary`.
+  `--canary-export-stage` names a stage holding the canary deployment, whose export builds the
+  canary's routes; `/routes` reports the canary release.
 - Log delivery uses bounded queues that drop (and count) events instead of slowing requests,
   and flushes everything on shutdown.
 - REST gateway responses: every error the gateway generates (missing authentication token,
@@ -88,8 +102,8 @@ All notable changes to this project are documented here. The format follows
 - `$context.extendedRequestId` is a 12-character token, the same value as the `x-amz-apigw-id`
   response header.
 - `requestParameters` mappings accept `context.*` and `stageVariables.*` sources.
-- Access logs, execution logs, and detailed metrics are no longer listed as unenforced on
-  `/routes`.
+- Access logs, execution logs, detailed metrics, tracing, and canary settings are no longer
+  listed as unenforced on `/routes`.
 - `X-Forwarded-For` sent by a client that is not a trusted proxy is no longer forwarded to
   `HTTP_PROXY` integrations: it is replaced by the client's address. `X-Forwarded-Client-Cert` is
   removed from such requests. Set `--trusted-proxies` to keep forwarding a proxy's headers.

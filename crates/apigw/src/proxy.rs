@@ -37,6 +37,11 @@ impl HttpProxy {
                 headers.append(name.clone(), value.clone());
             }
         }
+        if let Some(trace) = ctx.trace
+            && let Ok(value) = HeaderValue::try_from(trace.traceparent())
+        {
+            headers.insert(HeaderName::from_static("traceparent"), value);
+        }
         for (name, source) in &self.headers {
             let Some(value) = source.resolve(ctx) else {
                 continue;
@@ -257,9 +262,10 @@ mod tests {
     use crate::mapping::{RequestMapping, ResponseMapping};
     use crate::model::{ApiKind, MethodMatch, Protections, RouteKey};
     use crate::pipeline::context::QueryString;
+    use crate::pipeline::context::tests::request;
 
     fn incoming(params: &[(&str, &str)], query: Option<&str>) -> RequestContext {
-        let mut ctx = crate::pipeline::context::tests::request(ApiKind::Rest);
+        let mut ctx = request(ApiKind::Rest);
         ctx.headers
             .insert("x-tenant", HeaderValue::from_static("acme"));
         ctx.method = Method::GET;

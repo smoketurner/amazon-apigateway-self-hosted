@@ -164,6 +164,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::authz::RouteAuthorizer;
     use crate::integration::Integration;
     use crate::model::{Protections, RouteKey, RoutePath};
 
@@ -176,7 +177,7 @@ mod tests {
                 reason: key.to_owned(),
             },
             protections: Protections::default(),
-            authorizer: crate::authz::RouteAuthorizer::None,
+            authorizer: RouteAuthorizer::None,
             unenforced: Vec::new(),
             throttle: None,
         }

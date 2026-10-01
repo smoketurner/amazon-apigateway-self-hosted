@@ -92,7 +92,7 @@ Routes whose protection is not evaluated yet are refused, never served unprotect
 | Stage, method, and route throttling (`429`) | Partial | Partial | Token buckets per method (REST `methodSettings`, `*/*` default) and per route (HTTP route settings, default route settings); `429` through the `THROTTLED` gateway response (REST) or `{"message":"Too Many Requests"}` (HTTP). Account-level and usage-plan throttles are not applied; limits are per replica (see below) |
 | Shared limiter state across replicas | Partial | Partial | In-memory per replica; `--replicas N` divides throttle rates and bursts by `N`, so the API-wide rate is approximately the configured one (a replica's bucket holds at least one token, so with more replicas than burst tokens the API-wide burst is larger). An optional Valkey backend that makes limits exact is planned ([#35](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/35)) |
 | Response caching | Planned | n/a | Cache settings and key parameters are imported and reported ([#38](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/38)) |
-| Canary releases | Planned | n/a | The deployed stage is served; the canary split is reported ([#39](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/39)) |
+| Canary releases | Partial | n/a | Traffic is split by `percentTraffic` with the canary's stage variable overrides, `$context.isCanaryRequest`, and separate canary logs and metrics. The canary's structure comes from `--canary-export-stage` (a stage holding the canary deployment); without it only stage variables differ. `useStageCache` waits for [#38](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/38) ([#39](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/39)) |
 
 ## Observability
 
@@ -100,7 +100,7 @@ Routes whose protection is not evaluated yet are refused, never served unprotect
 |---|---|---|---|
 | Access logs to CloudWatch Logs or Firehose | Supported | Supported | The stage's `$context` format is rendered per request and written to the stage's log group (one stream per process) or Firehose stream, standard output otherwise. `$context.responseLength` is `-` for streamed responses of unknown length; variables for features not implemented yet render `-` ([#41](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/41)) |
 | CloudWatch metrics | Partial | Partial | Published as embedded metric format events under `--metrics-namespace` (not `AWS/ApiGateway`), aggregated per minute, with API Gateway's metric names and dimensions. Use `Sum` for `Count` and error metrics; latency percentiles are estimated from at most 100 samples per minute. No cache metrics until [#38](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/38), no `DataProcessed` ([#42](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/42)) |
-| X-Ray tracing | Planned | Planned | A client's `X-Amzn-Trace-Id` is passed to Lambda invocations; no segments are sent ([#43](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/43)) |
+| X-Ray tracing | Partial | n/a | REST stages with tracing send one segment per sampled request and pass `X-Amzn-Trace-Id` (and `traceparent` to HTTP backends) downstream; callers' sampling decisions are honored, otherwise X-Ray's default rule (1 per second, then 5%) is used without fetching sampling rules. No integration subsegment, no passive mode ([#43](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/43)) |
 | Execution logs | Partial | n/a | `loggingLevel` and `dataTraceEnabled` write a request trace to `API-Gateway-Execution-Logs_{apiId}/{stage}`; steps this gateway does not perform are not logged and bodies are not logged ([#44](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/44)) |
 
 ## Operating the gateway
@@ -147,8 +147,6 @@ Imported settings that are not enforced yet map to issues as follows:
 | `binary_media_types`, `compression`, `content_handling` | [#18](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/18) |
 | `integration_tls_config` | [#16](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/16) |
 | `response_caching` | [#38](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/38) |
-| `canary` | [#39](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/39) |
-| `tracing` | [#43](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/43) |
 
 ## Fidelity limits of the export
 
@@ -156,7 +154,7 @@ Imported settings that are not enforced yet map to issues as follows:
   deployment. Only `GetExport` for a stage and HTTP `ExportApi` with a stage name reflect what
   is deployed, so the export is the structural source and usage plans, API keys, and domain
   mappings are read live.
-- A canary deployment cannot be exported; only the stage's main deployment is served until
-  [#39](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/39).
+- A canary deployment cannot be exported. The canary release is built from the stage's export
+  unless `--canary-export-stage` supplies a stage that holds the canary deployment.
 - Control-plane calls share a 10 requests per second per-account limit, so refreshes are
   conditional and jittered.

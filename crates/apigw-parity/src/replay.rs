@@ -206,6 +206,8 @@ impl Replay {
 #[expect(clippy::unwrap_used, reason = "tests assert on known-good fixtures")]
 mod tests {
     use super::*;
+    use crate::case::Compare;
+    use crate::fixture::{Observation, Observed};
 
     fn case(known_gap: Option<&str>) -> Case {
         let mut case: Case = serde_saphyr::from_str("name: c\napi: rest\npath: /x\n").unwrap();
@@ -214,8 +216,8 @@ mod tests {
     }
 
     fn mismatch() -> Vec<Mismatch> {
-        let a = crate::fixture::Observation {
-            response: crate::fixture::Observed {
+        let a = Observation {
+            response: Observed {
                 status: 200,
                 ..Default::default()
             },
@@ -223,7 +225,7 @@ mod tests {
         };
         let mut b = a.clone();
         b.response.status = 500;
-        crate::case::Compare::default().diff(&a, &b)
+        Compare::default().diff(&a, &b)
     }
 
     #[test]

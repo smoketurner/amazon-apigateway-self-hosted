@@ -11,6 +11,7 @@ use axum::response::Response;
 use uuid::Uuid;
 
 use crate::aws::AwsClients;
+use crate::canary::Release;
 use crate::cors::Cors;
 use crate::gateway_response::{Failure, GatewayResponses};
 use crate::integration::StageVariables;
@@ -153,6 +154,9 @@ pub(crate) struct ApiContext {
     pub(crate) http: reqwest::Client,
     pub(crate) aws: Arc<AwsClients>,
     pub(crate) observer: StageObserver,
+    /// Which release of a canary stage this context serves; `None` when the
+    /// stage has no canary.
+    pub(crate) release: Option<Release>,
 }
 
 impl ApiContext {

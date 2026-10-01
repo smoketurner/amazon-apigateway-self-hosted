@@ -52,22 +52,22 @@ const DOTTED_I: &str = "Java compares case-insensitive Unicode text through toUp
 
 const KNOWN_DIVERGENCES: &[Divergence] = &[
     Divergence {
-        pattern: r"(^)*a",
+        pattern: "(^)*a",
         input: None,
         reason: EMPTY_ITERATION,
     },
     Divergence {
-        pattern: r"(a*)*",
+        pattern: "(a*)*",
         input: None,
         reason: EMPTY_ITERATION,
     },
     Divergence {
-        pattern: r"(a*)+",
+        pattern: "(a*)+",
         input: None,
         reason: EMPTY_ITERATION,
     },
     Divergence {
-        pattern: r"(a?)*",
+        pattern: "(a?)*",
         input: None,
         reason: EMPTY_ITERATION,
     },
@@ -87,12 +87,12 @@ const KNOWN_DIVERGENCES: &[Divergence] = &[
         reason: COMBINING_MARKS,
     },
     Divergence {
-        pattern: r"(?iu)i",
+        pattern: "(?iu)i",
         input: Some("\u{130}"),
         reason: DOTTED_I,
     },
     Divergence {
-        pattern: r"(?iu)i",
+        pattern: "(?iu)i",
         input: Some("\u{131}"),
         reason: DOTTED_I,
     },

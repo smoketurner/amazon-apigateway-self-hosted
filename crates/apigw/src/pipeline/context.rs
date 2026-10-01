@@ -14,10 +14,12 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
+use crate::canary::Release;
 use crate::gateway::{ApiContext, RequestId};
 use crate::identity::ClientIdentity;
 use crate::integration::StageVariables;
 use crate::model::{ApiKind, PayloadVersion, RouteKey};
+use crate::observability::Trace;
 use crate::route::Route;
 
 /// The API and stage a request was received on.
@@ -26,6 +28,8 @@ pub(crate) struct ApiInfo {
     pub(crate) kind: ApiKind,
     pub(crate) api_id: String,
     pub(crate) stage: Option<String>,
+    /// Which release serves the request, for stages that have a canary.
+    pub(crate) release: Option<Release>,
 }
 
 impl ApiInfo {
@@ -172,6 +176,8 @@ pub(crate) struct RequestContext {
     pub(crate) body: Bytes,
     pub(crate) authorizer: AuthorizerContext,
     pub(crate) stage_variables: Arc<StageVariables>,
+    /// This request's place in an X-Ray trace, when the stage traces.
+    pub(crate) trace: Option<Trace>,
     pub(crate) integration: IntegrationOutcome,
 }
 
@@ -222,6 +228,9 @@ impl RequestContext {
         if let Some(identity) = request.extensions().get::<ClientIdentity>() {
             snapshot.extensions_mut().insert(identity.clone());
         }
+        if let Some(trace) = request.extensions().get::<Trace>() {
+            snapshot.extensions_mut().insert(*trace);
+        }
         let (parts, ()) = snapshot.into_parts();
         Self::new(api, route, parts, Vec::new())
     }
@@ -244,6 +253,7 @@ impl RequestContext {
         let request_id = extensions
             .get::<RequestId>()
             .map_or_else(Uuid::now_v7, |id| id.0);
+        let trace = extensions.get::<Trace>().copied();
         let identity = extensions.remove::<ClientIdentity>().unwrap_or_else(|| {
             tracing::warn!("request reached the pipeline without a client identity");
             ClientIdentity::unknown()
@@ -257,6 +267,7 @@ impl RequestContext {
                 kind: api.kind,
                 api_id: api.api_id.clone(),
                 stage: api.stage.clone(),
+                release: api.release,
             },
             route_key,
             resource_path,
@@ -271,6 +282,7 @@ impl RequestContext {
             body: Bytes::new(),
             authorizer: AuthorizerContext::default(),
             stage_variables: Arc::clone(&api.stage_variables),
+            trace,
             integration: IntegrationOutcome::default(),
         }
     }
@@ -349,6 +361,12 @@ impl RequestContext {
             "stage": self.api.stage_name(),
             "authorizer": Value::Object(self.authorizer.values().clone()),
         });
+        if let (Value::Object(fields), Some(trace)) = (&mut context, self.trace) {
+            fields.insert("xrayTraceId".to_owned(), json!(trace.id().to_string()));
+        }
+        if let (Value::Object(fields), Some(release)) = (&mut context, self.api.release) {
+            fields.insert("isCanaryRequest".to_owned(), json!(release.is_canary()));
+        }
         let mut integration = BTreeMap::new();
         if let Some(status) = self.integration.status {
             integration.insert("status", json!(status));
@@ -389,6 +407,7 @@ pub(crate) mod tests {
                 kind,
                 api_id: "abc123".to_owned(),
                 stage: Some("prod".to_owned()),
+                release: None,
             },
             route_key: RouteKey::from("POST /pets/{petId}"),
             resource_path: "/pets/{petId}".to_owned(),
@@ -402,6 +421,7 @@ pub(crate) mod tests {
             identity,
             body: Bytes::new(),
             authorizer: AuthorizerContext::default(),
+            trace: None,
             stage_variables: Arc::default(),
             integration: IntegrationOutcome::default(),
         }
@@ -489,6 +509,7 @@ pub(crate) mod tests {
             kind: ApiKind::Http,
             api_id: "a".to_owned(),
             stage: None,
+            release: None,
         };
         assert_eq!(info.stage_name(), "$default");
     }
