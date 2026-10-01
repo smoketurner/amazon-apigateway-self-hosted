@@ -27,6 +27,7 @@ use crate::model::{ApiKind, ApiModel, IntegrationOverrides, StageSettings};
 use crate::observability::StageObserver;
 use crate::router::{BasePath, RouteSummary, build};
 use crate::state::{InMemory, InMemoryLimits, StateBackend};
+use crate::usage::UsageStore;
 use crate::vpc_link::VpcLinks;
 
 const AUTH_FUNCTION: &str = "arn:aws:lambda:us-east-1:123456789012:function:auth";
@@ -134,6 +135,11 @@ fn verdict(event: &Value) -> (Option<&'static str>, String) {
         ),
         "garbage" => (None, "not json".to_owned()),
         "not-an-object" => (None, "[]".to_owned()),
+        keyed if keyed.starts_with("keyed:") => {
+            let mut value = policy("Allow", arn);
+            value["usageIdentifierKey"] = json!(keyed.trim_start_matches("keyed:"));
+            ok(value)
+        }
         // "deny", and anything unrecognised.
         _ => ok(policy("Deny", arn)),
     }
@@ -156,6 +162,26 @@ impl Harness {
         kind: ApiKind,
         mode: AuthorizationMode,
         keys: KeyStore,
+    ) -> Self {
+        Self::start_full(doc, kind, mode, keys, None).await
+    }
+
+    /// A harness whose API has `usage` as its API keys and usage plans.
+    pub(super) async fn start_with_usage(
+        doc: &Value,
+        mode: AuthorizationMode,
+        usage: Arc<UsageStore>,
+    ) -> Self {
+        let keys = KeyStore::new(reqwest::Client::new(), []);
+        Self::start_full(doc, ApiKind::Rest, mode, keys, Some(usage)).await
+    }
+
+    async fn start_full(
+        doc: &Value,
+        kind: ApiKind,
+        mode: AuthorizationMode,
+        keys: KeyStore,
+        usage: Option<Arc<UsageStore>>,
     ) -> Self {
         let auth_calls = Arc::new(Calls::default());
         let backend_calls = Arc::new(Calls::default());
@@ -238,6 +264,7 @@ impl Harness {
             http: reqwest::Client::new(),
             aws,
             keys: Arc::new(keys),
+            usage,
         });
         let (router, summaries) = build(&model, &api, &BasePath::default());
         Self {

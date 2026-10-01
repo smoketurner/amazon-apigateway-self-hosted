@@ -15,6 +15,8 @@ mod policy;
 mod resource_policy;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod usage_tests;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -26,6 +28,7 @@ pub(crate) use policy::MethodArn;
 pub(crate) use resource_policy::{ResourcePolicies, RoutePolicy};
 
 use crate::aws::AwsClients;
+use crate::digest::Sha256Digest;
 use crate::gateway::AuthorizationMode;
 use crate::gateway_response::Failure;
 use crate::integration::StageVariables;
@@ -122,6 +125,8 @@ pub(crate) struct Authorized {
     pub(crate) context: AuthorizerContext,
     /// Allow, an explicit deny, or (no statement applied) an implicit deny.
     pub(crate) decision: Decision,
+    /// The API key a Lambda authorizer named in `usageIdentifierKey`, hashed.
+    pub(crate) usage_key: Option<Sha256Digest>,
 }
 
 impl Authorized {
@@ -129,8 +134,16 @@ impl Authorized {
         Self {
             context,
             decision: Decision::Allow,
+            usage_key: None,
         }
     }
+}
+
+/// What the authorization of a request leaves for later stages.
+#[derive(Debug, Default)]
+pub(crate) struct Admitted {
+    pub(crate) context: AuthorizerContext,
+    pub(crate) usage_key: Option<Sha256Digest>,
 }
 
 /// What an authorizer needs to know about the request being authorized.
@@ -158,7 +171,7 @@ impl AuthRequest<'_> {
         &self,
         route: &Route,
         mode: AuthorizationMode,
-    ) -> Result<AuthorizerContext, Denial> {
+    ) -> Result<Admitted, Denial> {
         let policy = match route.policy {
             RoutePolicy::Evaluated(ref policy) => Some(policy),
             RoutePolicy::None | RoutePolicy::Unevaluable(_) => None,
@@ -204,7 +217,12 @@ impl AuthRequest<'_> {
             (Some(_), None, _) => return Err(Denial::Unauthorized),
         };
         match verdict {
-            Verdict::Allow => Ok(authorized.map(|a| a.context).unwrap_or_default()),
+            Verdict::Allow => Ok(authorized
+                .map(|a| Admitted {
+                    context: a.context,
+                    usage_key: a.usage_key,
+                })
+                .unwrap_or_default()),
             Verdict::Deny {
                 explicit,
                 by: DeniedBy::ResourcePolicy,

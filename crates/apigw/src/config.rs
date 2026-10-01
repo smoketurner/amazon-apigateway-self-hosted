@@ -92,6 +92,13 @@ pub(crate) struct Config {
     #[arg(long, env = "APIGW_REFRESH_SECONDS", default_value_t = 60)]
     pub(crate) refresh_seconds: u64,
 
+    /// Seconds between reads of a REST API's API keys, usage plans, and their
+    /// associations, which change independently of deployments; 0 reads them
+    /// once at startup. Keys disabled in API Gateway keep working until the
+    /// next read. Reads are paced for the account's control-plane limit.
+    #[arg(long, env = "APIGW_USAGE_REFRESH_SECONDS", default_value_t = 60)]
+    pub(crate) usage_refresh_seconds: u64,
+
     /// Last-known-good configuration, written after every successful download
     /// and used at startup when API Gateway cannot be reached.
     #[arg(long = "config-cache", env = "APIGW_CONFIG_CACHE")]
@@ -355,6 +362,10 @@ impl Config {
         }
     }
 
+    pub(crate) fn usage_refresh_interval(&self) -> Option<Duration> {
+        (self.usage_refresh_seconds > 0).then(|| Duration::from_secs(self.usage_refresh_seconds))
+    }
+
     pub(crate) fn refresh_interval(&self) -> Option<Duration> {
         (self.refresh_seconds > 0).then(|| Duration::from_secs(self.refresh_seconds))
     }
@@ -517,6 +528,21 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn usage_plans_are_read_every_minute_unless_told_otherwise() {
+        let read = |extra: &[&str]| {
+            let mut args = vec!["--rest-api-id", "a", "--stage", "s"];
+            args.extend_from_slice(extra);
+            parse(&args).unwrap().usage_refresh_interval()
+        };
+        assert_eq!(read(&[]), Some(Duration::from_secs(60)));
+        assert_eq!(
+            read(&["--usage-refresh-seconds", "5"]),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(read(&["--usage-refresh-seconds", "0"]), None);
     }
 
     #[test]

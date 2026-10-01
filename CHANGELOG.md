@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- API keys and usage plans are enforced for REST APIs. A method that requires a key admits an enabled
+  key that belongs to a usage plan of the stage (`403 Forbidden` otherwise), with the key taken from
+  `x-api-key` or, for key source `AUTHORIZER`, from the Lambda authorizer's `usageIdentifierKey`. The
+  plan's throttles (plan-wide and per method) and day/week/month quotas count each key and answer
+  `429`. Keys are read with their values, held only as SHA-256 hashes, and refreshed every
+  `--usage-refresh-seconds` with paged reads paced for the control plane's rate limit. Authorizer
+  results no longer hold the `usageIdentifierKey` in the cache.
 - Resource policies are evaluated as API Gateway evaluates them: an explicit `Deny` ends the request
   before authentication, then the policy is combined with the authorizer's decision per the
   authorization-flow tables (no authorizer, Lambda authorizer, Cognito user pool). `aws:SourceIp`

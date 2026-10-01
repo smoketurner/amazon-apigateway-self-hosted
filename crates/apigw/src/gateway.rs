@@ -21,6 +21,7 @@ use crate::observability::StageObserver;
 use crate::pipeline::RequestContext;
 use crate::route::Route;
 use crate::state::StateBackend;
+use crate::usage::UsageStore;
 use crate::vpc_link::VpcLinks;
 
 /// API Gateway's maximum payload size.
@@ -74,9 +75,10 @@ impl Enforcement {
                 self.authorization == AuthorizationMode::Enforce
                     && route.authorizer.is_unevaluable()
             }
-            Protection::Iam | Protection::ApiKey => {
-                self.authorization == AuthorizationMode::Enforce
+            Protection::ApiKey => {
+                self.authorization == AuthorizationMode::Enforce && route.api_key.is_unevaluable()
             }
+            Protection::Iam => self.authorization == AuthorizationMode::Enforce,
             Protection::RequestValidation => self.request_validation == Unsupported::Reject,
         }
     }
@@ -129,7 +131,13 @@ impl Protection {
                     .unevaluable_reason()
                     .unwrap_or("it has no definition")
             ),
-            Self::ApiKey => "requires an API key, which this gateway does not check; answering 403".to_owned(),
+            Self::ApiKey => format!(
+                "requires an API key this gateway cannot check: {}; answering 403",
+                route
+                    .api_key
+                    .unevaluable_reason()
+                    .unwrap_or("it has no usage plans")
+            ),
             Self::RequestValidation => {
                 "has a request validator, which this gateway does not run; answering 501 (--unsupported-validation=ignore serves it)".to_owned()
             }
@@ -155,6 +163,9 @@ pub(crate) struct ApiContext {
     pub(crate) http: reqwest::Client,
     pub(crate) aws: Arc<AwsClients>,
     pub(crate) keys: Arc<KeyStore>,
+    /// The stage's API keys and usage plans; `None` when they cannot be read
+    /// (HTTP APIs, and APIs read from a file).
+    pub(crate) usage: Option<Arc<UsageStore>>,
     pub(crate) observer: StageObserver,
     /// Which release of a canary stage this context serves; `None` when the
     /// stage has no canary.

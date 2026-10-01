@@ -24,8 +24,9 @@ use crate::http_routes::{HttpRoutes, PathPattern};
 use crate::integration::Integration;
 use crate::model::{ApiKind, ApiModel, Feature, MethodMatch, Protections, RouteKey, RoutePath};
 use crate::pipeline::Pipeline;
-use crate::route::Route;
+use crate::route::{AccessRules, Route};
 use crate::throttle::ThrottleSettings;
+use crate::usage::ApiKeyRules;
 
 /// A stage prefix such as `/prod` that every route is served under, as on an
 /// `execute-api` endpoint. Empty serves routes at the root, as on a custom domain.
@@ -233,20 +234,23 @@ fn axum_path(path: &str) -> Result<String, String> {
     Ok(out)
 }
 
-pub(crate) fn build(
-    model: &ApiModel,
-    ctx: &Arc<ApiContext>,
-    base: &BasePath,
-) -> (Router, Vec<RouteSummary>) {
+/// Compiles every operation of the model into a runtime route.
+fn compile_routes(model: &ApiModel, ctx: &ApiContext) -> Vec<Route> {
     let authorizers = Authorizers::compile(model, &ctx.stage_variables);
     let policies = ResourcePolicies::compile(model, &ctx.api_id);
+    let api_keys = ApiKeyRules::compile(model, ctx.usage.as_deref());
+    let access = AccessRules {
+        authorizers: &authorizers,
+        policies: &policies,
+        api_keys: &api_keys,
+    };
     let throttling = ThrottleSettings::new(
         &ctx.api_id,
         ctx.stage.as_deref(),
         model.stage.clone(),
         ctx.replicas,
     );
-    let routes: Vec<Route> = model
+    model
         .operations
         .iter()
         .map(|operation| {
@@ -254,13 +258,20 @@ pub(crate) fn build(
                 operation,
                 model.kind,
                 &ctx.stage_variables,
-                &authorizers,
-                &policies,
+                &access,
                 &throttling,
                 &ctx.vpc_links,
             )
         })
-        .collect();
+        .collect()
+}
+
+pub(crate) fn build(
+    model: &ApiModel,
+    ctx: &Arc<ApiContext>,
+    base: &BasePath,
+) -> (Router, Vec<RouteSummary>) {
+    let routes = compile_routes(model, ctx);
     let mut summaries = Vec::with_capacity(routes.len());
     let mut default = None;
     let mut by_path: BTreeMap<String, BTreeMap<MethodMatch, Route>> = BTreeMap::new();
@@ -576,6 +587,7 @@ mod tests {
             http: reqwest::Client::new(),
             aws: aws(),
             keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
+            usage: None,
             observer: StageObserver::disabled(),
             release: None,
         })
@@ -1400,6 +1412,7 @@ mod tests {
             http: reqwest::Client::new(),
             aws,
             keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
+            usage: None,
             observer: StageObserver::disabled(),
             release: None,
         });

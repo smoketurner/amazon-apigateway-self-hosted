@@ -75,6 +75,16 @@ impl StateBackend {
     }
 }
 
+impl StateBackend {
+    /// Whether every replica sees the same state, so limits are exact rather
+    /// than shared out between replicas.
+    pub(crate) fn is_shared(&self) -> bool {
+        match self {
+            Self::InMemory(_) => false,
+        }
+    }
+}
+
 #[expect(
     clippy::unused_async,
     clippy::unused_async_trait_impl,

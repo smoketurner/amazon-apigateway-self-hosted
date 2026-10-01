@@ -348,7 +348,7 @@ impl<'a> ProxyEvent<'a> {
     /// The `identity` block of payload 1.0: fields API Gateway fills only for
     /// IAM, Cognito, and mutual TLS callers are present as `null`.
     fn identity(&self) -> Value {
-        json!({
+        let mut identity = json!({
             "accessKey": null,
             "accountId": null,
             "caller": null,
@@ -361,7 +361,12 @@ impl<'a> ProxyEvent<'a> {
             "user": null,
             "userAgent": self.ctx.header_str("user-agent"),
             "userArn": null,
-        })
+        });
+        if let (Value::Object(fields), Some(key)) = (&mut identity, self.ctx.api_key.as_ref()) {
+            fields.insert("apiKey".to_owned(), json!(key.value()));
+            fields.insert("apiKeyId".to_owned(), json!(key.id()));
+        }
+        identity
     }
 
     fn v1(&self) -> Value {
@@ -492,6 +497,7 @@ mod tests {
     use crate::model::{MethodMatch, Protections, RouteKey, RoutePath};
     use crate::pipeline::context::tests::request;
     use crate::pipeline::context::{AuthorizerContext, QueryString};
+    use crate::usage::RouteApiKey;
 
     fn variables() -> StageVariables {
         StageVariables::new(BTreeMap::from([("env".to_owned(), "local".to_owned())]))
@@ -679,6 +685,7 @@ mod tests {
             protections: Protections::default(),
             authorizer: RouteAuthorizer::None,
             policy: RoutePolicy::None,
+            api_key: RouteApiKey::NotRequired,
             throttle: None,
             unenforced: Vec::new(),
         }

@@ -167,6 +167,7 @@ mod tests {
     use crate::authz::{RouteAuthorizer, RoutePolicy};
     use crate::integration::Integration;
     use crate::model::{Protections, RouteKey, RoutePath};
+    use crate::usage::RouteApiKey;
 
     fn route(key: &str, method: MethodMatch) -> Route {
         Route {
@@ -179,6 +180,7 @@ mod tests {
             protections: Protections::default(),
             authorizer: RouteAuthorizer::None,
             policy: RoutePolicy::None,
+            api_key: RouteApiKey::NotRequired,
             unenforced: Vec::new(),
             throttle: None,
         }

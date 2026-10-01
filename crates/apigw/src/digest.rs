@@ -31,6 +31,23 @@ impl Sha256Digest {
     }
 }
 
+impl Sha256Digest {
+    /// The digest written by [`Display`](fmt::Display), or `None` for any other
+    /// text.
+    pub(crate) fn from_hex(text: &str) -> Option<Self> {
+        if text.len() != 64 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let mut digest = [0_u8; 32];
+        let (pairs, _) = text.as_bytes().as_chunks::<2>();
+        for (slot, pair) in digest.iter_mut().zip(pairs) {
+            let pair = std::str::from_utf8(pair).ok()?;
+            *slot = u8::from_str_radix(pair, 16).ok()?;
+        }
+        Some(Self(digest))
+    }
+}
+
 impl fmt::Display for Sha256Digest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for byte in self.0 {
@@ -53,6 +70,30 @@ mod tests {
             empty.to_string(),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+    }
+
+    #[test]
+    fn hex_round_trips_and_rejects_anything_else() {
+        let digest = Sha256Digest::of_parts(&["token"]);
+        assert_eq!(Sha256Digest::from_hex(&digest.to_string()), Some(digest));
+        let text = Sha256Digest::of_parts(&["x"]).to_string();
+        assert!(
+            Sha256Digest::from_hex(&text.to_uppercase()).is_some(),
+            "case is not significant"
+        );
+        let short: String = text.chars().take(63).collect();
+        let tail: String = text.chars().skip(1).collect();
+        for bad in [
+            String::new(),
+            "abc".to_owned(),
+            short,
+            format!("{text}0"),
+            format!("g{tail}"),
+            "\u{e9}".repeat(32),
+            format!("+{tail}"),
+        ] {
+            assert_eq!(Sha256Digest::from_hex(&bad), None, "{bad:?}");
+        }
     }
 
     #[test]

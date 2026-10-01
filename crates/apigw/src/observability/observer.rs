@@ -553,6 +553,7 @@ mod tests {
             http: reqwest::Client::new(),
             aws: clients,
             keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
+            usage: None,
             observer: StageObserver::new(&observability, &model, "abc", Some("prod"), None),
             release: None,
         });

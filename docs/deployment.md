@@ -263,7 +263,7 @@ Gateway answers a caller who fails that check, and lists each one per route on `
 | Resource policy that cannot be read (see `/routes`) | `403 Forbidden` | none: resource policies are never skipped |
 | IAM (`AWS_IAM`) | REST `403 Missing Authentication Token`, HTTP `403 Forbidden` | `--insecure-skip-authorization` |
 | An authorizer that cannot be evaluated (see `/routes`) | `401 Unauthorized` | `--insecure-skip-authorization` |
-| API key | `403 Forbidden` | `--insecure-skip-authorization` |
+| API key on a route of an HTTP API or an `--openapi-file` source (keys cannot be read) | `403 Forbidden` | `--insecure-skip-authorization` |
 | Request validator | `501` | `--unsupported-validation=ignore` |
 
 Checks run in API Gateway's order, so a request gets the first applicable response. If
