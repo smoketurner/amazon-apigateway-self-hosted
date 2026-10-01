@@ -1,0 +1,156 @@
+openapi: "3.0.1"
+info:
+  title: "${name}"
+  version: "1.0"
+x-amazon-apigateway-cors:
+  allowOrigins:
+    - "${cors_origin}"
+  allowMethods:
+    - GET
+    - POST
+    - OPTIONS
+  allowHeaders:
+    - content-type
+    - x-auth
+  exposeHeaders:
+    - x-reference-exposed
+  maxAge: 300
+  allowCredentials: false
+paths:
+  /$default:
+    x-amazon-apigateway-any-method:
+      isDefaultRoute: true
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        payloadFormatVersion: "2.0"
+  /lambda-v2/{proxy+}:
+    x-amazon-apigateway-any-method:
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        payloadFormatVersion: "2.0"
+  /lambda-v1/{proxy+}:
+    x-amazon-apigateway-any-method:
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        payloadFormatVersion: "1.0"
+  /http-proxy/{proxy+}:
+    x-amazon-apigateway-any-method:
+      x-amazon-apigateway-integration:
+        type: http_proxy
+        httpMethod: ANY
+        uri: "https://$${stageVariables.echo_host}/http-proxy/{proxy}"
+        payloadFormatVersion: "1.0"
+        timeoutInMillis: 5000
+        requestParameters:
+          "overwrite:header.x-echo-secret": "$stageVariables.echo_secret"
+  /mapped/{id}:
+    get:
+      x-amazon-apigateway-integration:
+        type: http_proxy
+        httpMethod: GET
+        uri: "https://$${stageVariables.echo_host}/http-mapped/{id}"
+        payloadFormatVersion: "1.0"
+        timeoutInMillis: 5000
+        requestParameters:
+          "overwrite:path": "/http-mapped/$request.path.id"
+          "overwrite:querystring.fixed": "literal"
+          "append:querystring.appended": "$context.stage"
+          "append:header.x-appended": "$context.stage"
+          "overwrite:header.x-echo-secret": "$stageVariables.echo_secret"
+          "remove:header.x-remove-me": ""
+        responseParameters:
+          "200":
+            "append:header.x-reference-response": "mapped"
+  /throttled:
+    get:
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        payloadFormatVersion: "2.0"
+  /authz/jwt:
+    get:
+      security:
+        - jwt: []
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        payloadFormatVersion: "2.0"
+  /authz/jwt-scoped:
+    get:
+      security:
+        - jwt:
+            - aws.cognito.signin.user.admin
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        payloadFormatVersion: "2.0"
+  /authz/lambda-simple:
+    get:
+      security:
+        - lambda_simple: []
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        payloadFormatVersion: "2.0"
+  /authz/lambda-iam:
+    get:
+      security:
+        - lambda_iam: []
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        payloadFormatVersion: "2.0"
+components:
+  securitySchemes:
+    jwt:
+      type: oauth2
+      flows: {}
+      x-amazon-apigateway-authorizer:
+        type: jwt
+        jwtConfiguration:
+          issuer: "${cognito_issuer}"
+          audience:
+            - "${cognito_client_id}"
+        identitySource: "$request.header.Authorization"
+    lambda_simple:
+      type: apiKey
+      name: x-auth
+      in: header
+      x-amazon-apigateway-authorizer:
+        type: request
+        identitySource: "$request.header.x-auth"
+        authorizerUri: "${authorizer_invocation_uri}"
+        authorizerCredentials: "${invoke_role_arn}"
+        authorizerPayloadFormatVersion: "2.0"
+        authorizerResultTtlInSeconds: 0
+        enableSimpleResponses: true
+    lambda_iam:
+      type: apiKey
+      name: x-auth
+      in: header
+      x-amazon-apigateway-authorizer:
+        type: request
+        identitySource: "$request.header.x-auth"
+        authorizerUri: "${authorizer_invocation_uri}"
+        authorizerCredentials: "${invoke_role_arn}"
+        authorizerPayloadFormatVersion: "1.0"
+        authorizerResultTtlInSeconds: 0
