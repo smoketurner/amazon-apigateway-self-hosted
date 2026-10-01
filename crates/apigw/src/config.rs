@@ -9,7 +9,7 @@ use clap::{ArgGroup, Parser, ValueEnum};
 use crate::authz::IssuerEndpoint;
 use crate::aws::{CredentialsMode, LambdaEndpoint, LambdaEndpoints};
 use crate::domain::DomainName;
-use crate::gateway::{AuthorizationMode, Enforcement, Unsupported};
+use crate::gateway::{AuthorizationMode, Enforcement};
 use crate::identity::{TrustedProxies, TrustedProxy};
 use crate::listener::{DomainCert, Edge, ProxyProtocol};
 use crate::model::ApiKind;
@@ -140,11 +140,6 @@ pub(crate) struct Config {
         value_delimiter = ','
     )]
     pub(crate) issuer_endpoints: Vec<IssuerEndpoint>,
-
-    /// What to do with routes that have a request validator, which this gateway
-    /// does not run yet: `reject` answers 501, `ignore` forwards unvalidated requests.
-    #[arg(long, env = "APIGW_UNSUPPORTED_VALIDATION", value_enum, default_value_t = Unsupported::Reject)]
-    pub(crate) unsupported_validation: Unsupported,
 
     /// Address for API traffic.
     #[arg(long, env = "APIGW_LISTEN", default_value = "0.0.0.0:8443")]
@@ -332,7 +327,6 @@ impl Config {
             } else {
                 AuthorizationMode::Enforce
             },
-            request_validation: self.unsupported_validation,
         }
     }
 
@@ -508,13 +502,12 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_protections_are_rejected_unless_ignored() {
+    fn authorization_is_enforced_unless_skipped() {
         let config = parse(&["--http-api-id", "a", "--stage", "s"]).unwrap();
         assert_eq!(
             config.enforcement(),
             Enforcement {
                 authorization: AuthorizationMode::Enforce,
-                request_validation: Unsupported::Reject,
             }
         );
         let config = parse(&[
@@ -523,17 +516,18 @@ mod tests {
             "--stage",
             "s",
             "--insecure-skip-authorization",
-            "--unsupported-validation",
-            "ignore",
         ])
         .unwrap();
         assert_eq!(
             config.enforcement(),
             Enforcement {
                 authorization: AuthorizationMode::Skip,
-                request_validation: Unsupported::Ignore,
             }
         );
+    }
+
+    #[test]
+    fn the_unsupported_validation_flag_no_longer_exists() {
         assert!(
             parse(&[
                 "--http-api-id",
@@ -541,7 +535,7 @@ mod tests {
                 "--stage",
                 "s",
                 "--unsupported-validation",
-                "maybe"
+                "ignore"
             ])
             .is_err()
         );

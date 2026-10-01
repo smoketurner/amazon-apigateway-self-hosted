@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 apigw-regex          = { workspace = true }
+apigw-vtl            = { workspace = true }
 anyhow               = { workspace = true, features = ["std"] }
 aws-lc-rs            = { workspace = true, features = ["aws-lc-sys", "alloc"] }
 aws-config           = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio", "credentials-process", "sso"] }
@@ -31,6 +32,7 @@ hyper                = { workspace = true, features = ["http1", "http2", "server
 hyper-util           = { workspace = true, features = ["server-auto", "service", "tokio"] }
 ipnet                = { workspace = true, features = ["std"] }
 jiff                 = { workspace = true, features = ["std"] }
+jsonschema           = { workspace = true }
 jsonwebtoken         = { workspace = true, features = ["aws_lc_rs"] }
 matchit              = { workspace = true }
 proxy-header         = { workspace = true, features = ["tokio"] }

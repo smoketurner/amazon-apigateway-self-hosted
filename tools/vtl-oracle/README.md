@@ -27,12 +27,14 @@ case: `{"name", "output", "context"}`, or `{"name", "error"}` when Velocity thre
 | `builtins.json` | `$input`, `$util`, `$context`, and the String, List, and Map methods | hand-written |
 | `jsonpath.json` | JSON path syntax, filters, functions, and Jayway's quirks | hand-written |
 | `gateway-templates.json` | templates in the shape real APIs use: DynamoDB, SQS, Lambda wrappers, error mapping, response overrides | hand-written |
-| `operators.json` | every arithmetic and comparison operator over 23 operand types | `generate.py operators` |
+| `operators-arithmetic.json` | every arithmetic operator over 23 operand types, plus unary `!` and bare conditions | `generate.py operators-arithmetic` |
+| `operators-comparison.json` | every comparison and logical operator over 23 operand types | `generate.py operators-comparison` |
 | `whitespace.json` | directive and reference placement against spaces, tabs, and line endings | `generate.py whitespace` |
 | `random.json` | 1,500 random nestings of directives, references, and text | `generate.py random 1 1500` |
 
 `generate.py` is deterministic: the same arguments always produce the same file, so the
-workflow regenerates the generated files and fails on any diff.
+workflow regenerates the generated files and fails on any diff. Every committed file stays under
+1 MB (the `check-added-large-files` hook limit), which is why the operator matrix is two files.
 
 ## Known divergences
 

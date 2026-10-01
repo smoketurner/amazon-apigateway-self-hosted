@@ -168,6 +168,7 @@ mod tests {
     use crate::integration::Integration;
     use crate::model::{Protections, RouteKey, RoutePath};
     use crate::usage::RouteApiKey;
+    use crate::validation::RouteValidation;
 
     fn route(key: &str, method: MethodMatch) -> Route {
         Route {
@@ -181,6 +182,7 @@ mod tests {
             authorizer: RouteAuthorizer::None,
             policy: RoutePolicy::None,
             api_key: RouteApiKey::NotRequired,
+            validation: RouteValidation::None,
             unenforced: Vec::new(),
             throttle: None,
             cache: None,

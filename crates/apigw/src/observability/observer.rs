@@ -441,7 +441,7 @@ mod tests {
     use crate::authz::KeyStore;
     use crate::aws::{AwsClients, CredentialsMode, LambdaEndpoints};
     use crate::cache::CacheScope;
-    use crate::gateway::{ApiContext, AuthorizationMode, Enforcement, RequestId, Unsupported};
+    use crate::gateway::{ApiContext, AuthorizationMode, Enforcement, RequestId};
     use crate::gateway_response::GatewayResponses;
     use crate::model::{
         AccessLogSettings, IntegrationOverrides, MethodSettings, SettingsScope, StageSettings,
@@ -549,7 +549,6 @@ mod tests {
             vpc_links: VpcLinks::default(),
             enforcement: Enforcement {
                 authorization: AuthorizationMode::Enforce,
-                request_validation: Unsupported::Reject,
             },
             http: reqwest::Client::new(),
             aws: clients,

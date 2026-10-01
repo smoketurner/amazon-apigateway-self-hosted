@@ -2,10 +2,12 @@
 //! of API Gateway's `$context` variables. Lambda events, mapping templates,
 //! gateway responses, and access logs all read `$context` from here.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
+use apigw_vtl::{JsonPath, Value as VtlValue};
 use axum::body::Bytes;
 use axum::extract::OriginalUri;
 use axum::extract::Request;
@@ -263,6 +265,23 @@ pub(crate) struct RequestContext {
     pub(crate) integration: IntegrationOutcome,
 }
 
+/// The value at `expression` (`items[0].id` or `$.items[0].id`) in a JSON
+/// document, as text: strings as they are, everything else as compact JSON. A
+/// document that is not JSON, a missing field, and `null` have no value.
+pub(crate) fn json_path_text(document: &str, expression: &str) -> Option<String> {
+    let document = VtlValue::from_json(document).ok()?;
+    let found = expression
+        .parse::<JsonPath>()
+        .ok()?
+        .evaluate(&document)
+        .ok()?;
+    match found {
+        VtlValue::Null => None,
+        VtlValue::Str(text) => Some(text.to_string()),
+        other => other.to_json().ok(),
+    }
+}
+
 /// A `$context` document, addressable by dotted path (`identity.sourceIp`).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ContextVariables(Value);
@@ -425,6 +444,16 @@ impl RequestContext {
             .iter()
             .find(|(key, _)| key == name)
             .map(|(_, value)| value.as_str())
+    }
+
+    /// The request body as text; bytes that are not UTF-8 are replaced.
+    pub(crate) fn body_text(&self) -> Cow<'_, str> {
+        String::from_utf8_lossy(&self.body)
+    }
+
+    /// The value at `expression` in a JSON body, as [`json_path_text`] reads it.
+    pub(crate) fn body_json_path(&self, expression: &str) -> Option<String> {
+        json_path_text(&self.body_text(), expression)
     }
 
     pub(crate) fn header_str(&self, name: &str) -> Option<&str> {

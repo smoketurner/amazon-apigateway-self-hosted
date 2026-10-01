@@ -204,17 +204,17 @@ async fn changes_in_api_gateway_take_effect_when_the_data_is_replaced() {
 async fn data_that_is_too_old_is_not_trusted() {
     let usage = Arc::new(
         UsageStore::new(UsageChecker::new("abc", "prod", NonZeroU32::MIN))
-            .with_max_staleness(Duration::from_millis(100)),
+            .with_max_staleness(Duration::from_millis(300)),
     );
-    usage.replace(data(PlanLimits::default()));
     let h = Harness::start_with_usage(
         &doc("HEADER"),
         AuthorizationMode::Enforce,
         Arc::clone(&usage),
     )
     .await;
+    usage.replace(data(PlanLimits::default()));
     assert_eq!(get(&h, "/keyed", Some(KEY)).await.0, StatusCode::OK);
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
     assert!(
         forbidden(&get(&h, "/keyed", Some(KEY)).await),
         "the last read is too old"

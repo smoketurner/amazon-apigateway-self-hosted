@@ -161,6 +161,8 @@ pub(crate) struct Failure {
     origin: Origin,
     status: StatusCode,
     message: Cow<'static, str>,
+    /// What a request body violated, for `$context.error.validationErrorString`.
+    validation: Option<String>,
 }
 
 impl Failure {
@@ -169,12 +171,23 @@ impl Failure {
         self.status
     }
 
+    #[cfg(test)]
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
+    #[cfg(test)]
+    pub(crate) fn validation(&self) -> Option<&str> {
+        self.validation.as_deref()
+    }
+
     /// A failure of `response_type` with API Gateway's default status and message.
     pub(crate) fn new(response_type: ResponseType) -> Self {
         Self {
             origin: Origin::Aws(response_type),
             status: response_type.default_status(),
             message: Cow::Borrowed(response_type.default_message()),
+            validation: None,
         }
     }
 
@@ -184,6 +197,7 @@ impl Failure {
             origin: Origin::Gateway,
             status,
             message: Cow::Borrowed(message),
+            validation: None,
         }
     }
 
@@ -199,7 +213,14 @@ impl Failure {
         self
     }
 
-    fn response_type(&self) -> Option<ResponseType> {
+    /// Records what the request violated, for templates to show.
+    #[must_use]
+    pub(crate) fn with_validation_error(mut self, violations: impl Into<String>) -> Self {
+        self.validation = Some(violations.into());
+        self
+    }
+
+    pub(crate) fn response_type(&self) -> Option<ResponseType> {
         match self.origin {
             Origin::Aws(response_type) => Some(response_type),
             Origin::Gateway => None,
@@ -424,6 +445,7 @@ impl GatewayResponses {
                 "message": failure.message,
                 "messageString": json!(failure.message).to_string(),
                 "responseType": failure.response_type().map(ResponseType::as_str),
+                "validationErrorString": failure.validation,
             }),
         );
         let scope = TemplateScope { context, request };
@@ -737,6 +759,26 @@ mod tests {
         assert_eq!(
             body(response).await,
             r#"{"message": "Missing Authentication Token", "type": "MISSING_AUTHENTICATION_TOKEN", "stage": "prod", "var": "stage-a", "origin": "https://app.example"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn validation_error_string_is_the_violation_text_or_empty() {
+        let responses = responses(&json!({
+            "BAD_REQUEST_BODY": {
+                "responseTemplates": {"application/json": "{\"v\": \"$context.error.validationErrorString\"}"}
+            }
+        }));
+        let violated = Failure::new(ResponseType::BadRequestBody)
+            .with_validation_error(r#"["name" is a required property]"#);
+        assert_eq!(
+            body(responses.render(&violated, &rest_request())).await,
+            r#"{"v": "["name" is a required property]"}"#
+        );
+        let plain = Failure::new(ResponseType::BadRequestBody);
+        assert_eq!(
+            body(responses.render(&plain, &rest_request())).await,
+            r#"{"v": ""}"#
         );
     }
 

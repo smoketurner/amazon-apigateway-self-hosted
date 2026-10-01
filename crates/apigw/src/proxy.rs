@@ -1,19 +1,39 @@
 //! `HTTP_PROXY` integrations: forward the request to the integration URI and
 //! stream the response back unchanged.
 
+use std::collections::HashSet;
 use std::time::Instant;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, header};
 use axum::response::Response;
 
-use crate::gateway::{GatewayError, HeaderNameExt as _};
+use crate::gateway::{GatewayError, HeaderNameExt as _, MAX_BODY_BYTES};
 use crate::header_policy::{Flavor, Forwarded, IamAuthorization};
 use crate::integration::{HttpProxy, ParamSource, PrivateRouting};
 use crate::integration_tls::TlsClientError;
+use crate::mapped::{BackendReply, BackendRequest, RequestOverrides};
 use crate::model::{ApiKind, Protection, RoutePath};
 use crate::pipeline::RequestContext;
 use crate::route::Route;
+
+/// Whether an integration request carries the client's query string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueryHandling {
+    /// Proxy integrations forward it.
+    Forward,
+    /// Non-proxy integrations send only what `requestParameters` map.
+    MappedOnly,
+}
+
+/// An integration request ready to send: the headers, the body, and how the
+/// URL is built around them.
+pub(crate) struct Outgoing<'a> {
+    pub(crate) headers: HeaderMap,
+    pub(crate) body: Bytes,
+    pub(crate) query: QueryHandling,
+    pub(crate) overrides: &'a RequestOverrides,
+}
 
 impl HttpProxy {
     pub(crate) async fn forward(
@@ -22,7 +42,106 @@ impl HttpProxy {
         route: &Route,
         ctx: &mut RequestContext,
     ) -> Result<Response, GatewayError> {
-        let mut url = match self.target_url(&route.path, ctx) {
+        let overrides = RequestOverrides::default();
+        let mut headers = Self::request_headers(route, ctx);
+        self.add_gateway_headers(&mut headers, ctx);
+        self.add_mapped_headers(&mut headers, ctx, &overrides);
+        let body = std::mem::take(&mut ctx.body);
+        let outgoing = Outgoing {
+            headers,
+            body,
+            query: QueryHandling::Forward,
+            overrides: &overrides,
+        };
+        let upstream = self.send(client, route, ctx, outgoing).await?;
+        let mut response = Response::new(Body::empty());
+        *response.status_mut() = upstream.status();
+        *response.headers_mut() = Self::response_headers(ctx.api.kind, upstream.headers());
+        let Some(mapping) = self.response_mapping.for_status(upstream.status()) else {
+            *response.body_mut() = Body::from_stream(upstream.bytes_stream());
+            return Ok(response);
+        };
+        if mapping.reads_body() {
+            let body = upstream.bytes().await.map_err(|err| {
+                tracing::warn!(route = %route.key, err = %err, "integration response could not be read");
+                GatewayError::IntegrationFailure
+            })?;
+            mapping.apply(ctx, Some(&body), &mut response);
+            *response.body_mut() = Body::from(body);
+        } else {
+            mapping.apply(ctx, None, &mut response);
+            *response.body_mut() = Body::from_stream(upstream.bytes_stream());
+        }
+        Ok(response)
+    }
+
+    /// Calls a non-proxy HTTP integration: only mapped and overridden headers
+    /// reach the backend (through API Gateway's header table), plus the headers
+    /// API Gateway adds, and the whole response is buffered for the
+    /// integration response to select and map.
+    pub(crate) async fn exchange(
+        &self,
+        client: &reqwest::Client,
+        route: &Route,
+        ctx: &mut RequestContext,
+        request: BackendRequest,
+    ) -> Result<BackendReply, GatewayError> {
+        let mut mapped = HeaderMap::new();
+        self.add_mapped_headers(&mut mapped, ctx, &request.overrides);
+        let iam = if route.protections.iter().any(|p| p == Protection::Iam) {
+            IamAuthorization::Used
+        } else {
+            IamAuthorization::NotUsed
+        };
+        let mut headers = Flavor::Http.request_headers(&mapped, iam);
+        Self::add_rest_headers(&mut headers, ctx);
+        if let Some(content_type) = request.content_type
+            && !headers.contains_key(header::CONTENT_TYPE)
+        {
+            headers.insert(header::CONTENT_TYPE, content_type);
+        }
+        self.add_gateway_headers(&mut headers, ctx);
+        let outgoing = Outgoing {
+            headers,
+            body: request.body,
+            query: QueryHandling::MappedOnly,
+            overrides: &request.overrides,
+        };
+        let upstream = self.send(client, route, ctx, outgoing).await?;
+        let status = upstream.status().as_u16();
+        let mut headers = upstream.headers().clone();
+        Flavor::Http.remap_response(&mut headers);
+        let body = upstream.bytes().await.map_err(|err| {
+            tracing::warn!(route = %route.key, err = %err, "integration response could not be read");
+            GatewayError::IntegrationFailure
+        })?;
+        if body.len() > MAX_BODY_BYTES {
+            tracing::warn!(route = %route.key, bytes = body.len(), "integration response is too large");
+            return Err(GatewayError::IntegrationFailure);
+        }
+        Ok(BackendReply {
+            status,
+            headers,
+            body,
+        })
+    }
+
+    /// Sends the integration request and returns the backend's response with
+    /// its headers read and its body still unread.
+    async fn send(
+        &self,
+        client: &reqwest::Client,
+        route: &Route,
+        ctx: &mut RequestContext,
+        outgoing: Outgoing<'_>,
+    ) -> Result<reqwest::Response, GatewayError> {
+        let Outgoing {
+            mut headers,
+            body,
+            query,
+            overrides,
+        } = outgoing;
+        let mut url = match self.url_for(&route.path, ctx, query, overrides) {
             Ok(url) => url,
             Err(err) => {
                 tracing::error!(route = %route.key, uri = self.uri, %err, "invalid integration URI");
@@ -30,31 +149,6 @@ impl HttpProxy {
             }
         };
         let method = self.method.clone().unwrap_or_else(|| ctx.method.clone());
-        let mut headers = Self::request_headers(route, ctx);
-        if let Some(PrivateRouting::HostHeader(ref host)) = self.private {
-            headers.insert(header::HOST, host.clone());
-        }
-        if let Some(trace) = ctx.trace
-            && let Ok(value) = HeaderValue::try_from(trace.traceparent())
-        {
-            headers.insert(HeaderName::from_static("traceparent"), value);
-        }
-        for (name, source) in &self.headers {
-            let Some(value) = source.resolve(ctx) else {
-                continue;
-            };
-            match (
-                HeaderName::try_from(name.as_str()),
-                HeaderValue::try_from(value),
-            ) {
-                (Ok(name), Ok(value)) => {
-                    headers.insert(name, value);
-                }
-                (Err(_), _) | (_, Err(_)) => {
-                    tracing::warn!(header = name, "mapped header is not a valid HTTP header");
-                }
-            }
-        }
         self.request_mapping.apply(ctx, &mut headers, &mut url);
         ctx.integration.transfer_mode = Some(self.transfer);
         let (client, url) = self.client_for(client, route, url, &mut headers).await?;
@@ -62,7 +156,7 @@ impl HttpProxy {
         let result = client
             .request(method, url)
             .headers(headers)
-            .body(std::mem::take(&mut ctx.body))
+            .body(body)
             .timeout(self.timeout)
             .send()
             .await;
@@ -86,25 +180,59 @@ impl HttpProxy {
             latency_ms = headers_after,
             "integration responded"
         );
-        let mut response = Response::new(Body::empty());
-        *response.status_mut() = upstream.status();
-        *response.headers_mut() = Self::response_headers(ctx.api.kind, upstream.headers());
-        let Some(mapping) = self.response_mapping.for_status(upstream.status()) else {
-            *response.body_mut() = Body::from_stream(upstream.bytes_stream());
-            return Ok(response);
-        };
-        if mapping.reads_body() {
-            let body = upstream.bytes().await.map_err(|err| {
-                tracing::warn!(route = %route.key, err = %err, "integration response could not be read");
-                GatewayError::IntegrationFailure
-            })?;
-            mapping.apply(ctx, Some(&body), &mut response);
-            *response.body_mut() = Body::from(body);
-        } else {
-            mapping.apply(ctx, None, &mut response);
-            *response.body_mut() = Body::from_stream(upstream.bytes_stream());
+        Ok(upstream)
+    }
+
+    /// The headers the gateway itself sets on the integration request: the
+    /// `Host` of a private integration and the trace context.
+    fn add_gateway_headers(&self, headers: &mut HeaderMap, ctx: &RequestContext) {
+        if let Some(PrivateRouting::HostHeader(ref host)) = self.private {
+            headers.insert(header::HOST, host.clone());
         }
-        Ok(response)
+        if let Some(trace) = ctx.trace
+            && let Ok(value) = HeaderValue::try_from(trace.traceparent())
+        {
+            headers.insert(HeaderName::from_static("traceparent"), value);
+        }
+    }
+
+    /// Adds the headers `requestParameters` map, then the ones the request
+    /// template set through `$context.requestOverride.header`, which win.
+    fn add_mapped_headers(
+        &self,
+        headers: &mut HeaderMap,
+        ctx: &RequestContext,
+        overrides: &RequestOverrides,
+    ) {
+        let mapped = self
+            .headers
+            .iter()
+            .filter(|(name, _)| !overrides.header.contains_key(name.as_str()))
+            .flat_map(|(name, source)| {
+                source
+                    .values(ctx)
+                    .into_iter()
+                    .map(move |value| (name.as_str(), value))
+            });
+        let overridden = overrides
+            .header
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.clone()));
+        let mut first_of_name = HashSet::new();
+        for (name, value) in mapped.chain(overridden) {
+            match (HeaderName::try_from(name), HeaderValue::try_from(value)) {
+                (Ok(name), Ok(value)) => {
+                    if first_of_name.insert(name.clone()) {
+                        headers.insert(name, value);
+                    } else {
+                        headers.append(name, value);
+                    }
+                }
+                (Err(_), _) | (_, Err(_)) => {
+                    tracing::warn!(header = name, "mapped header is not a valid HTTP header");
+                }
+            }
+        }
     }
 
     /// The client and URL for this integration: the shared client, or the one
@@ -244,32 +372,49 @@ impl HttpProxy {
         headers
     }
 
-    /// Fills `{name}` placeholders in the integration URI and carries the
-    /// client's query string over, as API Gateway does for proxy integrations.
-    fn target_url(
+    /// The integration URL: placeholders filled, the query string assembled
+    /// from the client's (proxy integrations), the mapped parameters, and the
+    /// request template's overrides, which replace a mapped value of the same name.
+    fn url_for(
         &self,
         route_path: &RoutePath,
         ctx: &RequestContext,
+        handling: QueryHandling,
+        overrides: &RequestOverrides,
     ) -> Result<reqwest::Url, String> {
         let url = match self.private {
             Some(PrivateRouting::RequestPath) => self.request_path_url(ctx),
             Some(PrivateRouting::HostHeader(_)) | None => {
-                self.fill_placeholders(route_path, ctx)?
+                self.fill_placeholders(route_path, ctx, overrides)?
             }
         };
         let mut url = reqwest::Url::parse(&url).map_err(|e| e.to_string())?;
         let mut query = QueryBuilder(url.query().map(str::to_owned).unwrap_or_default());
-        if let Some(raw) = ctx.query.raw() {
+        if handling == QueryHandling::Forward
+            && let Some(raw) = ctx.query.raw()
+        {
             query.append(raw);
         }
-        for (name, source) in &self.query_params {
-            if let Some(value) = source.resolve(ctx) {
-                let mut pair = String::new();
-                UrlEncoder(&mut pair).component(name);
-                pair.push('=');
-                UrlEncoder(&mut pair).component(&value);
-                query.append(&pair);
-            }
+        let mapped = self
+            .query_params
+            .iter()
+            .filter(|(name, _)| !overrides.query.contains_key(name.as_str()))
+            .flat_map(|(name, source)| {
+                source
+                    .values(ctx)
+                    .into_iter()
+                    .map(move |value| (name.as_str(), value))
+            });
+        let overridden = overrides
+            .query
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.clone()));
+        for (name, value) in mapped.chain(overridden) {
+            let mut pair = String::new();
+            UrlEncoder(&mut pair).component(name);
+            pair.push('=');
+            UrlEncoder(&mut pair).component(&value);
+            query.append(&pair);
         }
         url.set_query((!query.0.is_empty()).then_some(query.0.as_str()));
         Ok(url)
@@ -296,6 +441,7 @@ impl HttpProxy {
         &self,
         route_path: &RoutePath,
         ctx: &RequestContext,
+        overrides: &RequestOverrides,
     ) -> Result<String, String> {
         let greedy = route_path.greedy_param();
         let mut url = String::with_capacity(self.uri.len());
@@ -306,9 +452,10 @@ impl HttpProxy {
             let Some((name, tail)) = after.trim_start_matches('{').split_once('}') else {
                 return Err("unterminated placeholder".to_owned());
             };
-            let value = match self.path_params.get(name) {
-                Some(source) => source.resolve(ctx),
-                None => ctx.path_param(name).map(str::to_owned),
+            let value = match (overrides.path.get(name), self.path_params.get(name)) {
+                (Some(value), _) => Some(value.clone()),
+                (None, Some(source)) => source.resolve(ctx),
+                (None, None) => ctx.path_param(name).map(str::to_owned),
             };
             let Some(value) = value else {
                 return Err(format!("no value for placeholder {{{name}}}"));
@@ -322,6 +469,8 @@ impl HttpProxy {
 }
 
 impl ParamSource {
+    /// The mapped value, for a target that takes one: multi-value sources join
+    /// their values with commas.
     pub(crate) fn resolve(&self, ctx: &RequestContext) -> Option<String> {
         match *self {
             Self::Path(ref name) => ctx.path_param(name).map(str::to_owned),
@@ -332,10 +481,45 @@ impl ParamSource {
                 .rev()
                 .find(|(key, _)| key == name)
                 .map(|(_, value)| value),
+            Self::MultiQuery(_) | Self::MultiHeader(_) => {
+                let values = self.values(ctx);
+                (!values.is_empty()).then(|| values.join(","))
+            }
             Self::Header(ref name) => ctx.header_str(name).map(str::to_owned),
+            Self::Body => Some(ctx.body_text().into_owned()).filter(|body| !body.is_empty()),
+            Self::BodyPath(ref expression) => ctx.body_json_path(expression),
             Self::Context(ref path) => ctx.context_value(path),
             Self::StageVariable(ref name) => ctx.stage_variables.get(name).map(str::to_owned),
             Self::Literal(ref value) => Some(value.clone()),
+        }
+    }
+
+    /// Every value the source has: all of a multi-value parameter's values,
+    /// one for anything else.
+    pub(crate) fn values(&self, ctx: &RequestContext) -> Vec<String> {
+        match *self {
+            Self::MultiQuery(ref name) => ctx
+                .query
+                .pairs()
+                .into_iter()
+                .filter(|(key, _)| key == name)
+                .map(|(_, value)| value)
+                .collect(),
+            Self::MultiHeader(ref name) => ctx
+                .headers
+                .get_all(name.as_str())
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .map(str::to_owned)
+                .collect(),
+            Self::Path(_)
+            | Self::Query(_)
+            | Self::Header(_)
+            | Self::Body
+            | Self::BodyPath(_)
+            | Self::Context(_)
+            | Self::StageVariable(_)
+            | Self::Literal(_) => self.resolve(ctx).into_iter().collect(),
         }
     }
 }
@@ -434,6 +618,23 @@ mod tests {
     use crate::pipeline::context::QueryString;
     use crate::pipeline::context::tests::request;
     use crate::usage::RouteApiKey;
+    use crate::validation::RouteValidation;
+
+    impl HttpProxy {
+        /// The URL of a proxied request: the client's query string is carried over.
+        fn proxy_url(
+            &self,
+            route_path: &RoutePath,
+            ctx: &RequestContext,
+        ) -> Result<reqwest::Url, String> {
+            self.url_for(
+                route_path,
+                ctx,
+                QueryHandling::Forward,
+                &RequestOverrides::default(),
+            )
+        }
+    }
 
     fn incoming(params: &[(&str, &str)], query: Option<&str>) -> RequestContext {
         let mut ctx = request(ApiKind::Rest);
@@ -475,6 +676,7 @@ mod tests {
             authorizer: RouteAuthorizer::None,
             policy: RoutePolicy::None,
             api_key: RouteApiKey::NotRequired,
+            validation: RouteValidation::None,
             unenforced: Vec::new(),
             throttle: None,
             cache: None,
@@ -485,7 +687,7 @@ mod tests {
     fn greedy_values_keep_slashes_and_others_are_encoded() {
         let target = proxy("http://up/{proxy}?fixed=1");
         let url = target
-            .target_url(
+            .proxy_url(
                 &route("/{proxy+}", &target).path,
                 &incoming(&[("proxy", "a b/c")], Some("x=1")),
             )
@@ -494,7 +696,7 @@ mod tests {
 
         let target = proxy("http://up/items/{id}");
         let url = target
-            .target_url(
+            .proxy_url(
                 &route("/items/{id}", &target).path,
                 &incoming(&[("id", "a/b")], None),
             )
@@ -520,7 +722,7 @@ mod tests {
             ParamSource::Query("absent".to_owned()),
         );
         let url = target
-            .target_url(
+            .proxy_url(
                 &route("/items/{id}", &target).path,
                 &incoming(&[("id", "7")], Some("search=a&search=b%20c")),
             )
@@ -536,21 +738,97 @@ mod tests {
         let target = proxy("http://up/{nope}");
         assert!(
             target
-                .target_url(&route("/x", &target).path, &incoming(&[], None))
+                .proxy_url(&route("/x", &target).path, &incoming(&[], None))
                 .is_err()
         );
         let target = proxy("http://up/{open");
         assert!(
             target
-                .target_url(&route("/x", &target).path, &incoming(&[], None))
+                .proxy_url(&route("/x", &target).path, &incoming(&[], None))
                 .is_err()
         );
         let target = proxy("not a url");
         assert!(
             target
-                .target_url(&route("/x", &target).path, &incoming(&[], None))
+                .proxy_url(&route("/x", &target).path, &incoming(&[], None))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn param_sources_resolve_multi_values_and_body_fields() {
+        let mut ctx = incoming(&[], Some("tag=a&tag=b&one=1"));
+        ctx.headers
+            .append("x-all", HeaderValue::from_static("first"));
+        ctx.headers
+            .append("x-all", HeaderValue::from_static("second"));
+        ctx.body = Bytes::from_static(
+            br#"{"owner":{"name":"ada"},"count":3,"list":[1,2],"nothing":null}"#,
+        );
+        let values = |ctx: &RequestContext, source: ParamSource| source.values(ctx);
+        assert_eq!(
+            values(&ctx, ParamSource::MultiQuery("tag".to_owned())),
+            ["a", "b"]
+        );
+        assert_eq!(
+            ParamSource::MultiQuery("tag".to_owned()).resolve(&ctx),
+            Some("a,b".to_owned())
+        );
+        assert_eq!(
+            values(&ctx, ParamSource::MultiHeader("x-all".to_owned())),
+            ["first", "second"]
+        );
+        assert!(values(&ctx, ParamSource::MultiQuery("absent".to_owned())).is_empty());
+        assert_eq!(values(&ctx, ParamSource::Query("one".to_owned())), ["1"]);
+        assert_eq!(
+            values(&ctx, ParamSource::BodyPath("owner.name".to_owned())),
+            ["ada"]
+        );
+        assert_eq!(
+            values(&ctx, ParamSource::BodyPath("$.count".to_owned())),
+            ["3"]
+        );
+        assert_eq!(
+            values(&ctx, ParamSource::BodyPath("list".to_owned())),
+            ["[1,2]"]
+        );
+        assert!(values(&ctx, ParamSource::BodyPath("nothing".to_owned())).is_empty());
+        assert!(values(&ctx, ParamSource::BodyPath("missing.field".to_owned())).is_empty());
+        assert!(values(&ctx, ParamSource::Body)[0].starts_with("{\"owner\""));
+        ctx.body = Bytes::new();
+        assert!(values(&ctx, ParamSource::Body).is_empty());
+        ctx.body = Bytes::from_static(b"not json");
+        assert!(values(&ctx, ParamSource::BodyPath("a".to_owned())).is_empty());
+    }
+
+    #[test]
+    fn request_overrides_replace_mapped_values_and_fill_placeholders() {
+        let mut target = proxy("http://up/{id}/x");
+        target
+            .path_params
+            .insert("id".to_owned(), ParamSource::Literal("mapped".to_owned()));
+        target
+            .query_params
+            .insert("q".to_owned(), ParamSource::Literal("mapped".to_owned()));
+        let mut overrides = RequestOverrides::default();
+        overrides.path.insert("id".to_owned(), "over".to_owned());
+        overrides.query.insert("q".to_owned(), "a b".to_owned());
+        overrides.query.insert("n".to_owned(), "1".to_owned());
+        let ctx = incoming(&[], Some("client=1"));
+        let path = route("/x", &target).path;
+        let url = target
+            .url_for(&path, &ctx, QueryHandling::MappedOnly, &overrides)
+            .unwrap();
+        assert_eq!(url.as_str(), "http://up/over/x?n=1&q=a%20b");
+        let url = target
+            .url_for(
+                &path,
+                &ctx,
+                QueryHandling::Forward,
+                &RequestOverrides::default(),
+            )
+            .unwrap();
+        assert_eq!(url.as_str(), "http://up/mapped/x?client=1&q=mapped");
     }
 
     #[test]

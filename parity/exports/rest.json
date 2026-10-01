@@ -223,14 +223,140 @@
       },
       "/validated/{id}": {
         "post": {
+          "x-amazon-apigateway-request-validator": "all",
+          "parameters": [
+            {
+              "name": "id",
+              "in": "path",
+              "required": true,
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "page",
+              "in": "query",
+              "required": true,
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "x-required",
+              "in": "header",
+              "required": true,
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "required": true,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Item"
+                }
+              }
+            }
+          },
           "x-amazon-apigateway-integration": {
             "type": "aws_proxy",
             "httpMethod": "POST",
             "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations",
             "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
             "passthroughBehavior": "when_no_match"
+          }
+        }
+      },
+      "/validated-params": {
+        "get": {
+          "x-amazon-apigateway-request-validator": "params-only",
+          "parameters": [
+            {
+              "name": "page",
+              "in": "query",
+              "required": true,
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "x-amazon-apigateway-integration": {
+            "type": "aws_proxy",
+            "httpMethod": "POST",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations",
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "passthroughBehavior": "when_no_match"
+          }
+        }
+      },
+      "/http-nonproxy/{id}": {
+        "get": {
+          "parameters": [
+            {
+              "name": "id",
+              "in": "path",
+              "required": true,
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "q",
+              "in": "query",
+              "required": false,
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "echo_status",
+              "in": "query",
+              "required": false,
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "templated response"
+            },
+            "400": {
+              "description": "backend returned a 4xx"
+            }
           },
-          "x-amazon-apigateway-request-validator": "all"
+          "x-amazon-apigateway-integration": {
+            "type": "http",
+            "httpMethod": "POST",
+            "uri": "https://${stageVariables.echo_host}/http-nonproxy/{backendId}",
+            "passthroughBehavior": "when_no_templates",
+            "timeoutInMillis": 5000,
+            "requestParameters": {
+              "integration.request.path.backendId": "method.request.path.id",
+              "integration.request.header.x-echo-secret": "stageVariables.echo_secret",
+              "integration.request.header.Content-Type": "'application/json'",
+              "integration.request.querystring.echo_status": "method.request.querystring.echo_status"
+            },
+            "requestTemplates": {
+              "application/json": "{\"id\":\"$input.params('id')\",\"q\":\"$input.params('q')\",\"stage\":\"$context.stage\"}"
+            },
+            "responses": {
+              "default": {
+                "statusCode": "200",
+                "responseTemplates": {
+                  "application/json": "{\"upstreamStatus\":\"ok\",\"path\":$input.json('$.rawPath'),\"query\":$input.json('$.rawQueryString'),\"received\":$input.json('$.body')}"
+                }
+              },
+              "4\\d{2}": {
+                "statusCode": "400",
+                "responseTemplates": {
+                  "application/json": "{\"upstreamStatus\":\"client-error\"}"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -279,12 +405,54 @@
             ]
           }
         }
+      },
+      "schemas": {
+        "Item": {
+          "type": "object",
+          "required": [
+            "name"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "count": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
       }
     },
     "x-amazon-apigateway-request-validators": {
       "all": {
         "validateRequestBody": true,
         "validateRequestParameters": true
+      },
+      "params-only": {
+        "validateRequestBody": false,
+        "validateRequestParameters": true
+      }
+    },
+    "x-amazon-apigateway-gateway-responses": {
+      "BAD_REQUEST_BODY": {
+        "statusCode": "422",
+        "responseParameters": {
+          "gatewayresponse.header.x-reference-gateway-response": "'bad-request-body'"
+        },
+        "responseTemplates": {
+          "application/json": "{\"message\":$context.error.validationErrorString,\"type\":\"$context.error.responseType\"}"
+        }
+      },
+      "BAD_REQUEST_PARAMETERS": {
+        "responseParameters": {
+          "gatewayresponse.header.x-reference-gateway-response": "'bad-request-parameters'"
+        },
+        "responseTemplates": {
+          "application/json": "{\"message\":$context.error.messageString,\"type\":\"$context.error.responseType\"}"
+        }
       }
     }
   }

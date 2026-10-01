@@ -1,0 +1,12 @@
+{
+  "name": "rest-http-nonproxy-template",
+  "source": "hand_written",
+  "api": "rest",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": "{\"upstreamStatus\":\"ok\",\"path\":\"/http-nonproxy/42\",\"query\":\"\",\"received\":\"{\\\"id\\\":\\\"42\\\",\\\"q\\\":\\\"hello\\\",\\\"stage\\\":\\\"ref\\\"}\"}"
+  }
+}

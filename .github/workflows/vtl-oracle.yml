@@ -45,7 +45,8 @@ jobs:
           cache-on-failure: true
       - name: Regenerate the committed corpus
         run: |
-          python3 tools/vtl-oracle/generate.py operators > tools/vtl-oracle/cases/operators.json
+          python3 tools/vtl-oracle/generate.py operators-arithmetic > tools/vtl-oracle/cases/operators-arithmetic.json
+          python3 tools/vtl-oracle/generate.py operators-comparison > tools/vtl-oracle/cases/operators-comparison.json
           python3 tools/vtl-oracle/generate.py whitespace > tools/vtl-oracle/cases/whitespace.json
           python3 tools/vtl-oracle/generate.py random 1 1500 > tools/vtl-oracle/cases/random.json
           tools/vtl-oracle/run.sh

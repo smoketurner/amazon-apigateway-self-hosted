@@ -25,6 +25,7 @@ mod lambda;
 mod lambda_response;
 mod limits;
 mod listener;
+mod mapped;
 mod mapping;
 mod model;
 mod observability;
@@ -37,6 +38,7 @@ mod source;
 mod state;
 mod throttle;
 mod usage;
+mod validation;
 mod vpc_link;
 
 use clap::Parser as _;

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Generates oracle cases that are too repetitive to write by hand.
 
-usage: generate.py operators
+usage: generate.py operators-arithmetic
+       generate.py operators-comparison
        generate.py whitespace
        generate.py random SEED COUNT
 
@@ -24,20 +25,24 @@ OPERANDS = {
 }
 
 
-def operators():
+def operator_cases(group):
+    """The operator matrix, split in two so each recorded file stays under 1 MB."""
     arithmetic = ["+", "-", "*", "/", "%"]
     comparison = ["==", "!=", "<", ">", "<=", ">=", "&&", "||"]
     cases = []
     for (an, a), (bn, b) in itertools.product(OPERANDS.items(), OPERANDS.items()):
-        for op in arithmetic:
-            cases.append({"name": f"arith.{an}.{bn}.{op}", "template": f"#set($r = {a} {op} {b})[$r]"})
-        for op in comparison:
-            template = f"#set($r = {a} {op} {b})[$r]#if({a} {op} {b})T#{{else}}F#{{end}}"
-            cases.append({"name": f"cmp.{an}.{bn}.{op}", "template": template})
-    for an, a in OPERANDS.items():
-        cases.append({"name": f"unary.{an}.not", "template": f"#set($r = !{a})[$r]#if(!{a})T#{{else}}F#{{end}}"})
-        cases.append({"name": f"unary.{an}.if", "template": f"#if({a})T#{{else}}F#{{end}}"})
-        cases.append({"name": f"unary.{an}.out", "template": f"#set($r = {a})[$r]"})
+        if group == "arithmetic":
+            for op in arithmetic:
+                cases.append({"name": f"arith.{an}.{bn}.{op}", "template": f"#set($r = {a} {op} {b})[$r]"})
+        else:
+            for op in comparison:
+                template = f"#set($r = {a} {op} {b})[$r]#if({a} {op} {b})T#{{else}}F#{{end}}"
+                cases.append({"name": f"cmp.{an}.{bn}.{op}", "template": template})
+    if group == "arithmetic":
+        for an, a in OPERANDS.items():
+            cases.append({"name": f"unary.{an}.not", "template": f"#set($r = !{a})[$r]#if(!{a})T#{{else}}F#{{end}}"})
+            cases.append({"name": f"unary.{an}.if", "template": f"#if({a})T#{{else}}F#{{end}}"})
+            cases.append({"name": f"unary.{an}.out", "template": f"#set($r = {a})[$r]"})
     return cases
 
 
@@ -188,8 +193,8 @@ def random_templates(seed, count):
 
 def main(argv):
     mode = argv[1] if len(argv) > 1 else ""
-    if mode == "operators":
-        cases = operators()
+    if mode in ("operators-arithmetic", "operators-comparison"):
+        cases = operator_cases(mode.removeprefix("operators-"))
     elif mode == "whitespace":
         cases = whitespace()
     elif mode == "random" and len(argv) == 4:
