@@ -8,6 +8,7 @@ mod canary;
 mod config;
 mod cors;
 mod digest;
+mod domain;
 mod entropy;
 mod gateway;
 mod gateway_response;
@@ -28,6 +29,7 @@ mod router;
 mod source;
 mod state;
 mod throttle;
+mod vpc_link;
 
 use clap::Parser as _;
 use tracing_subscriber::EnvFilter;

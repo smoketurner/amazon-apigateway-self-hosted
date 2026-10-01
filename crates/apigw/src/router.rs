@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use axum::Router;
 use axum::extract::Request;
-use axum::http::{HeaderValue, Method};
+use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use serde::Serialize;
@@ -18,6 +18,7 @@ use uuid::Uuid;
 use crate::authz::{Authorizers, ResourcePolicies};
 use crate::aws::{AwsClients, RoleArn, RoleStatus};
 use crate::canary::{CanaryRelease, CanarySummary};
+use crate::domain::{DomainName, DomainRegistry, DomainSummary, Resolution};
 use crate::gateway::{ApiContext, Enforcement, RequestId};
 use crate::http_routes::{HttpRoutes, PathPattern};
 use crate::integration::Integration;
@@ -256,6 +257,7 @@ pub(crate) fn build(
                 &authorizers,
                 &policies,
                 &throttling,
+                &ctx.vpc_links,
             )
         })
         .collect();
@@ -348,34 +350,114 @@ pub(crate) fn build(
 /// refreshed definition takes effect without restarting the listener. Requests
 /// already in flight finish on the router they started with.
 pub(crate) fn dispatcher(current: watch::Receiver<Arc<Loaded>>) -> Router {
-    Router::new().fallback(move |mut request: Request| {
+    Router::new().fallback(move |request: Request| {
         let loaded = Arc::clone(&current.borrow());
-        async move {
-            let started = Instant::now();
-            let request_id = Uuid::now_v7();
-            request.extensions_mut().insert(RequestId(request_id));
-            let method = request.method().clone();
-            let path = request.uri().path().to_owned();
-            let mut response = loaded
-                .router_for_request()
-                .clone()
-                .oneshot(request)
-                .await
-                .into_response();
-            if let Ok(value) = HeaderValue::try_from(request_id.to_string()) {
-                response
-                    .headers_mut()
-                    .insert(loaded.kind.request_id_header(), value);
-            }
-            tracing::info!(
-                request_id = %request_id,
-                %method,
-                path,
-                status = response.status().as_u16(),
-                latency_ms = started.elapsed().as_millis(),
-                "request"
-            );
+        async move { loaded.serve(request).await }
+    })
+}
+
+impl Loaded {
+    /// Runs `request` through this definition: assigns the request ID, picks the
+    /// release, and logs the outcome.
+    async fn serve(&self, mut request: Request) -> Response {
+        let started = Instant::now();
+        let request_id = Uuid::now_v7();
+        request.extensions_mut().insert(RequestId(request_id));
+        let method = request.method().clone();
+        let path = request.uri().path().to_owned();
+        let mut response = self
+            .router_for_request()
+            .clone()
+            .oneshot(request)
+            .await
+            .into_response();
+        if let Ok(value) = HeaderValue::try_from(request_id.to_string()) {
             response
+                .headers_mut()
+                .insert(self.kind.request_id_header(), value);
+        }
+        tracing::info!(
+            request_id = %request_id,
+            %method,
+            path,
+            status = response.status().as_u16(),
+            latency_ms = started.elapsed().as_millis(),
+            "request"
+        );
+        response
+    }
+}
+
+/// What the domain dispatcher does to requests and how it refuses them.
+struct CustomDomain;
+
+impl CustomDomain {
+    /// API Gateway's `{"message": ...}` error body.
+    fn error(status: StatusCode, message: &'static str) -> Response {
+        (
+            status,
+            axum::Json(serde_json::json!({ "message": message })),
+        )
+            .into_response()
+    }
+
+    /// Replaces the path of `request`, keeping its query string.
+    fn rewrite_path(request: &mut Request, path: &str) -> Result<(), axum::http::uri::InvalidUri> {
+        let target = match request.uri().query() {
+            Some(query) => format!("{path}?{query}"),
+            None => path.to_owned(),
+        };
+        let mut parts = request.uri().clone().into_parts();
+        parts.path_and_query = Some(target.parse()?);
+        if let Ok(uri) = axum::http::Uri::from_parts(parts) {
+            *request.uri_mut() = uri;
+        }
+        Ok(())
+    }
+}
+
+/// Paths API Gateway reserves on every custom domain for its own health checks.
+const RESERVED_HEALTH_PATHS: [&str; 2] = ["/ping", "/sping"];
+
+/// Serves requests to custom domains: the `Host` header picks the domain, the
+/// domain's API mappings or routing rules pick the API stage, and the matched
+/// prefix is removed from the path before the stage's router sees the request.
+pub(crate) fn domain_dispatcher(domains: DomainRegistry) -> Router {
+    Router::new().fallback(move |mut request: Request| {
+        let domains = domains.clone();
+        async move {
+            let path = request.uri().path().to_owned();
+            if RESERVED_HEALTH_PATHS.contains(&path.as_str()) {
+                return (StatusCode::OK, "healthy").into_response();
+            }
+            let host = request
+                .headers()
+                .get(axum::http::header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .or_else(|| {
+                    request
+                        .uri()
+                        .authority()
+                        .map(axum::http::uri::Authority::as_str)
+                })
+                .map(DomainName::host_of)
+                .unwrap_or_default();
+            let Some(state) = domains.find(&host) else {
+                return CustomDomain::error(StatusCode::FORBIDDEN, "Forbidden");
+            };
+            match state.resolve(&path, request.headers()) {
+                Resolution::Matched(loaded, routed_path) => {
+                    if CustomDomain::rewrite_path(&mut request, &routed_path).is_err() {
+                        return CustomDomain::error(StatusCode::BAD_REQUEST, "Bad Request");
+                    }
+                    loaded.serve(request).await
+                }
+                Resolution::Unavailable(stage) => {
+                    tracing::warn!(%stage, host, "request for an API stage that has not loaded");
+                    CustomDomain::error(StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable")
+                }
+                Resolution::NoMatch => CustomDomain::error(StatusCode::FORBIDDEN, "Forbidden"),
+            }
         }
     })
 }
@@ -388,6 +470,30 @@ struct RoutesReport {
     #[serde(flatten)]
     summary: LoadSummary,
     credentials: BTreeMap<RoleArn, RoleStatus>,
+}
+
+/// The `/routes` document of a process serving custom domains.
+#[derive(Serialize)]
+struct DomainsReport {
+    domains: Vec<DomainSummary>,
+    credentials: BTreeMap<RoleArn, RoleStatus>,
+}
+
+/// Health and introspection routes for the admin listener of a process serving
+/// custom domains.
+pub(crate) fn admin_domains(domains: DomainRegistry, aws: Arc<AwsClients>) -> Router {
+    Router::new()
+        .route("/healthz", axum::routing::get(|| async { "ok" }))
+        .route(
+            "/routes",
+            axum::routing::get(move || {
+                let report = DomainsReport {
+                    domains: domains.summaries(),
+                    credentials: aws.role_status(),
+                };
+                async move { axum::Json(report) }
+            }),
+        )
 }
 
 /// Health and introspection routes for the admin listener.
@@ -424,6 +530,7 @@ mod tests {
     use crate::model::{MethodSettings, SettingsScope};
     use crate::observability::StageObserver;
     use crate::state::{InMemory, InMemoryLimits, StateBackend};
+    use crate::vpc_link::VpcLinks;
     use std::num::NonZeroU32;
 
     const STRICT: Enforcement = Enforcement {
@@ -464,6 +571,7 @@ mod tests {
             cors,
             state: test_state(),
             replicas: NonZeroU32::MIN,
+            vpc_links: VpcLinks::default(),
             enforcement,
             http: reqwest::Client::new(),
             aws: aws(),
@@ -1093,6 +1201,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unmapped_vpc_links_answer_501_with_the_reason_on_routes() {
+        let doc = json!({"paths": {"/private": {"get": {"x-amazon-apigateway-integration": {
+            "type": "http_proxy", "httpMethod": "GET", "connectionType": "VPC_LINK",
+            "connectionId": "vl1", "uri": "http://nlb.internal/x"}}}}});
+        let (router, summaries) = router(&doc, ApiKind::Rest, AuthorizationMode::Enforce, "");
+        assert_eq!(
+            call(&router, Method::GET, "/private").await.0,
+            StatusCode::NOT_IMPLEMENTED
+        );
+        let problems = &summaries.first().unwrap().problems;
+        assert!(
+            problems.iter().any(|p| p.contains("--vpc-link vl1=<url>")),
+            "{problems:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn unsupported_integrations_answer_501_and_are_reported() {
         let (router, summaries) = router(&sample(), ApiKind::Rest, AuthorizationMode::Enforce, "");
         assert_eq!(
@@ -1270,6 +1395,7 @@ mod tests {
             cors: None,
             state: test_state(),
             replicas: NonZeroU32::MIN,
+            vpc_links: VpcLinks::default(),
             enforcement: STRICT,
             http: reqwest::Client::new(),
             aws,

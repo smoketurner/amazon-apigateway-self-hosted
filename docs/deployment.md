@@ -99,6 +99,33 @@ is the function's payload; an `X-Amz-Function-Error` header marks a function err
 The SDK also honors `AWS_ENDPOINT_URL_LAMBDA` (and `AWS_ENDPOINT_URL`) for LocalStack-style
 emulators that implement the full Lambda API.
 
+## VPC links
+
+A VPC link's load balancer or Cloud Map service is private to the VPC and cannot be reached
+from outside AWS, so routes with `connectionType: VPC_LINK` answer `501` (the reason is on
+`/routes`) until their connection ID is mapped to an in-cluster URL that serves the same
+backend:
+
+```bash
+--vpc-link abc123=http://pets.default.svc:8080
+```
+
+`--vpc-link CONNECTION_ID=URL` is repeatable, or comma-separated in `APIGW_VPC_LINKS`. The ID
+is the integration's `connectionId`; a `${stageVariables.name}` connection ID is resolved first.
+How the URL is used follows API Gateway:
+
+- **REST APIs** (NLB): the integration URI's host is only the `Host` header on API Gateway, and
+  traffic goes to the load balancer. Here the request goes to the mapped URL, keeping the
+  URI's path and query, and the URI's host (and port) is sent as the `Host` header.
+- **HTTP APIs** (ALB, NLB, or Cloud Map): the integration URI is a listener or service ARN.
+  The request path is sent to the mapped URL, preceded by the stage name unless the stage is
+  `$default`, as API Gateway does; `overwrite:path` parameter mapping can change that.
+
+An `https` URL is verified against its own host name. Only `HTTP_PROXY` integrations can use a
+VPC link. NLB/ALB DNS names and Cloud Map instances are not resolved automatically: those names
+and the addresses `DiscoverInstances` returns are private to the VPC, so resolving them from
+another network fails or reaches the wrong place; the explicit mapping cannot.
+
 ## Kubernetes
 
 ```yaml
