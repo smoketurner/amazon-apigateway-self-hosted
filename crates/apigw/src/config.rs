@@ -16,6 +16,7 @@ use crate::observability::{
 };
 use crate::router::BasePath;
 use crate::source::Source;
+use crate::vpc_link::{VpcLinkTarget, VpcLinks};
 
 const STAGE_VARIABLE_ENV_PREFIX: &str = "APIGW_STAGE_VARIABLE_";
 
@@ -135,6 +136,19 @@ pub(crate) struct Config {
     #[arg(long, env = "APIGW_PROXY_PROTOCOL", requires = "trusted_proxies")]
     pub(crate) proxy_protocol: bool,
 
+    /// Serve a VPC link's integrations from an in-cluster URL (repeatable;
+    /// `CONNECTION_ID` is the VPC link's ID as in the integration's
+    /// `connectionId`). REST routes keep the integration URI's host as the `Host`
+    /// header; HTTP API routes send the request path to the URL. Routes whose VPC
+    /// link has no mapping answer 501.
+    #[arg(
+        long = "vpc-link",
+        value_name = "CONNECTION_ID=URL",
+        env = "APIGW_VPC_LINKS",
+        value_delimiter = ','
+    )]
+    pub(crate) vpc_links: Vec<VpcLinkTarget>,
+
     /// How many gateway replicas serve this API. Throttle limits are divided by
     /// this count because each replica keeps its own buckets, so the API-wide rate
     /// is approximately the configured one. A replica's bucket always holds at
@@ -231,6 +245,10 @@ impl Config {
                 stage: self.stage.clone(),
             },
         }
+    }
+
+    pub(crate) fn vpc_links(&self) -> VpcLinks {
+        VpcLinks::new(self.vpc_links.clone())
     }
 
     pub(crate) fn lambda_endpoints(&self) -> LambdaEndpoints {
@@ -422,6 +440,41 @@ mod tests {
         let config = parse(&["--http-api-id", "a", "--stage", "s", "--replicas", "3"]).unwrap();
         assert_eq!(config.replicas.get(), 3);
         assert!(parse(&["--http-api-id", "a", "--stage", "s", "--replicas", "0"]).is_err());
+    }
+
+    #[test]
+    fn vpc_links_are_repeatable_and_validated() {
+        let config = parse(&[
+            "--http-api-id",
+            "a",
+            "--stage",
+            "s",
+            "--vpc-link",
+            "vl1=http://pets.svc:8080",
+            "--vpc-link",
+            "vl2=https://api.internal/base",
+        ])
+        .unwrap();
+        let links = config.vpc_links();
+        assert_eq!(links.base("vl1").as_deref(), Some("http://pets.svc:8080"));
+        assert_eq!(
+            links.base("vl2").as_deref(),
+            Some("https://api.internal/base")
+        );
+        for bad in [
+            "vl1",
+            "=http://x",
+            "vl1=ftp://x",
+            "vl1=not a url",
+            "vl1=http://x?q=1",
+        ] {
+            assert!(
+                parse(&["--http-api-id", "a", "--stage", "s", "--vpc-link", bad]).is_err(),
+                "{bad}"
+            );
+        }
+        let none = parse(&["--http-api-id", "a", "--stage", "s"]).unwrap();
+        assert_eq!(none.vpc_links().base("vl1"), None);
     }
 
     #[test]

@@ -254,6 +254,7 @@ pub(crate) fn build(
                 &ctx.stage_variables,
                 &authorizers,
                 &throttling,
+                &ctx.vpc_links,
             )
         })
         .collect();
@@ -421,6 +422,7 @@ mod tests {
     use crate::model::{MethodSettings, SettingsScope};
     use crate::observability::StageObserver;
     use crate::state::{InMemory, InMemoryLimits, StateBackend};
+    use crate::vpc_link::VpcLinks;
     use std::num::NonZeroU32;
 
     const STRICT: Enforcement = Enforcement {
@@ -462,6 +464,7 @@ mod tests {
             cors,
             state: test_state(),
             replicas: NonZeroU32::MIN,
+            vpc_links: VpcLinks::default(),
             enforcement,
             http: reqwest::Client::new(),
             aws: aws(),
@@ -1096,6 +1099,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unmapped_vpc_links_answer_501_with_the_reason_on_routes() {
+        let doc = json!({"paths": {"/private": {"get": {"x-amazon-apigateway-integration": {
+            "type": "http_proxy", "httpMethod": "GET", "connectionType": "VPC_LINK",
+            "connectionId": "vl1", "uri": "http://nlb.internal/x"}}}}});
+        let (router, summaries) = router(&doc, ApiKind::Rest, AuthorizationMode::Enforce, "");
+        assert_eq!(
+            call(&router, Method::GET, "/private").await.0,
+            StatusCode::NOT_IMPLEMENTED
+        );
+        let problems = &summaries.first().unwrap().problems;
+        assert!(
+            problems.iter().any(|p| p.contains("--vpc-link vl1=<url>")),
+            "{problems:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn unsupported_integrations_answer_501_and_are_reported() {
         let (router, summaries) = router(&sample(), ApiKind::Rest, AuthorizationMode::Enforce, "");
         assert_eq!(
@@ -1273,6 +1293,7 @@ mod tests {
             cors: None,
             state: test_state(),
             replicas: NonZeroU32::MIN,
+            vpc_links: VpcLinks::default(),
             enforcement: STRICT,
             http: reqwest::Client::new(),
             aws,

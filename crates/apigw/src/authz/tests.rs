@@ -24,6 +24,7 @@ use crate::model::{ApiKind, ApiModel, IntegrationOverrides, StageSettings};
 use crate::observability::StageObserver;
 use crate::router::{BasePath, RouteSummary, build};
 use crate::state::{InMemory, InMemoryLimits, StateBackend};
+use crate::vpc_link::VpcLinks;
 
 const AUTH_FUNCTION: &str = "arn:aws:lambda:us-east-1:123456789012:function:auth";
 const ECHO_FUNCTION: &str = "arn:aws:lambda:us-east-1:123456789012:function:echo";
@@ -220,6 +221,7 @@ impl Harness {
                 InMemoryLimits::default(),
             ))),
             replicas: std::num::NonZeroU32::MIN,
+            vpc_links: VpcLinks::default(),
             observer: StageObserver::disabled(),
             release: None,
             http: reqwest::Client::new(),

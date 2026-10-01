@@ -20,6 +20,7 @@ use crate::observability::StageObserver;
 use crate::pipeline::RequestContext;
 use crate::route::Route;
 use crate::state::StateBackend;
+use crate::vpc_link::VpcLinks;
 
 /// API Gateway's maximum payload size.
 pub(crate) const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
@@ -151,6 +152,7 @@ pub(crate) struct ApiContext {
     pub(crate) cors: Option<Cors>,
     pub(crate) state: Arc<StateBackend>,
     pub(crate) replicas: NonZeroU32,
+    pub(crate) vpc_links: VpcLinks,
     pub(crate) http: reqwest::Client,
     pub(crate) aws: Arc<AwsClients>,
     pub(crate) observer: StageObserver,

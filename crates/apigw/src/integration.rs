@@ -12,6 +12,7 @@ use crate::mapping::{RequestMapping, ResponseMapping};
 use crate::model::{
     ApiKind, ConnectionType, IntegrationSpec, IntegrationType, PayloadVersion, ResponseTransferMode,
 };
+use crate::vpc_link::VpcLinks;
 
 /// The longest a streamed response may take, and the default timeout of
 /// streaming integrations.
@@ -102,11 +103,12 @@ impl Integration {
         spec: Option<&IntegrationSpec>,
         kind: ApiKind,
         variables: &StageVariables,
+        vpc_links: &VpcLinks,
     ) -> Self {
         let Some(spec) = spec else {
             return Self::unsupported("operation has no x-amazon-apigateway-integration");
         };
-        Self::compile_spec(spec, kind, variables)
+        Self::compile_spec(spec, kind, variables, vpc_links)
             .unwrap_or_else(|reason| Self::Unsupported { reason })
     }
 
@@ -114,9 +116,11 @@ impl Integration {
         spec: &IntegrationSpec,
         kind: ApiKind,
         variables: &StageVariables,
+        vpc_links: &VpcLinks,
     ) -> Result<Self, String> {
-        if spec.connection_type == Some(ConnectionType::VpcLink) {
-            return Err("VPC link integrations are only reachable from inside AWS".to_owned());
+        let private = spec.connection_type == Some(ConnectionType::VpcLink);
+        if private && spec.integration_type != IntegrationType::HttpProxy {
+            return Err("only HTTP_PROXY integrations can use a VPC link".to_owned());
         }
         let transfer = spec
             .response_transfer_mode
@@ -144,7 +148,14 @@ impl Integration {
         match spec.integration_type {
             IntegrationType::HttpProxy => {
                 let uri = uri.ok_or("HTTP_PROXY integration has no uri")?;
-                HttpProxy::compile(spec, uri, timeout, transfer, kind).map(Self::HttpProxy)
+                let (uri, private) = if private {
+                    let (uri, routing) =
+                        PrivateRouting::resolve(spec, &uri, kind, variables, vpc_links)?;
+                    (uri, Some(routing))
+                } else {
+                    (uri, None)
+                };
+                HttpProxy::compile(spec, uri, timeout, transfer, kind, private).map(Self::HttpProxy)
             }
             IntegrationType::Mock => MockResponse::compile(spec).map(Self::Mock),
             IntegrationType::AwsProxy if spec.subtype.is_some() => Err(format!(
@@ -211,6 +222,61 @@ pub(crate) struct HttpProxy {
     pub(crate) response_mapping: ResponseMapping,
     pub(crate) timeout: Duration,
     pub(crate) transfer: ResponseTransferMode,
+    /// How a VPC link integration reaches its in-cluster backend.
+    pub(crate) private: Option<PrivateRouting>,
+}
+
+/// What a VPC link integration needs besides the mapped base URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PrivateRouting {
+    /// REST: the integration URI's authority is sent as the `Host` header, as
+    /// API Gateway does, and its path and query follow the mapped base URL.
+    HostHeader(HeaderValue),
+    /// HTTP API: the URI is a load balancer listener or Cloud Map service ARN,
+    /// so the request path follows the mapped base URL, preceded by the stage
+    /// name as API Gateway sends it.
+    RequestPath,
+}
+
+impl PrivateRouting {
+    /// Maps `uri` through the `--vpc-link` for the integration's connection ID.
+    /// Returns the URL template to forward to.
+    fn resolve(
+        spec: &IntegrationSpec,
+        uri: &str,
+        kind: ApiKind,
+        variables: &StageVariables,
+        vpc_links: &VpcLinks,
+    ) -> Result<(String, Self), String> {
+        let id = spec
+            .connection_id
+            .as_deref()
+            .map(|id| variables.substitute(id))
+            .ok_or("VPC link integration has no connectionId")?;
+        let base = vpc_links.base(&id).ok_or_else(|| {
+            format!(
+                "VPC link {id} is only reachable from inside AWS; map it to an in-cluster URL with --vpc-link {id}=<url> to serve this route"
+            )
+        })?;
+        match kind {
+            ApiKind::Http => {
+                if !uri.starts_with("arn:") {
+                    return Err("an HTTP API private integration uri must be a load balancer listener or Cloud Map service ARN".to_owned());
+                }
+                Ok((base, Self::RequestPath))
+            }
+            ApiKind::Rest => {
+                let (_, after_scheme) = uri
+                    .split_once("://")
+                    .ok_or("a REST API private integration uri must be an http or https URL")?;
+                let (authority, tail) = after_scheme
+                    .split_at(after_scheme.find(['/', '?']).unwrap_or(after_scheme.len()));
+                let host = HeaderValue::try_from(authority)
+                    .map_err(|_| format!("{authority:?} is not a valid Host header"))?;
+                Ok((format!("{base}{tail}"), Self::HostHeader(host)))
+            }
+        }
+    }
 }
 
 impl HttpProxy {
@@ -220,6 +286,7 @@ impl HttpProxy {
         timeout: Duration,
         transfer: ResponseTransferMode,
         kind: ApiKind,
+        private: Option<PrivateRouting>,
     ) -> Result<Self, String> {
         let method = match spec.http_method.as_deref() {
             None => None,
@@ -264,6 +331,7 @@ impl HttpProxy {
             response_mapping: ResponseMapping::compile(&spec.response_parameters),
             timeout,
             transfer,
+            private,
         })
     }
 }
@@ -459,7 +527,12 @@ mod tests {
 
     fn compile(integration: Value, kind: ApiKind) -> Integration {
         let spec = IntegrationSpec::deserialize(integration).unwrap();
-        Integration::compile(Some(&spec), kind, &StageVariables::default())
+        Integration::compile(
+            Some(&spec),
+            kind,
+            &StageVariables::default(),
+            &VpcLinks::default(),
+        )
     }
 
     #[test]
@@ -629,6 +702,161 @@ mod tests {
         assert_eq!(m.status, StatusCode::OK);
     }
 
+    fn compile_private(
+        integration: Value,
+        kind: ApiKind,
+        links: &[&str],
+        variables: &[(&str, &str)],
+    ) -> Integration {
+        let spec = IntegrationSpec::deserialize(integration).unwrap();
+        let links = VpcLinks::new(links.iter().map(|l| l.parse().unwrap()));
+        let variables = StageVariables::new(
+            variables
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+        );
+        Integration::compile(Some(&spec), kind, &variables, &links)
+    }
+
+    fn unsupported_reason(integration: Integration) -> String {
+        let Integration::Unsupported { reason } = integration else {
+            panic!("expected an unsupported integration, got {integration:?}");
+        };
+        reason
+    }
+
+    #[test]
+    fn rest_vpc_link_routes_to_the_mapped_url_with_the_uri_host_header() {
+        let integration = compile_private(
+            json!({"type": "http_proxy", "httpMethod": "GET", "connectionType": "VPC_LINK",
+                "connectionId": "vl1",
+                "uri": "http://my-nlb-1234.elb.us-east-1.amazonaws.com:8080/pets/{id}?fixed=1"}),
+            ApiKind::Rest,
+            &["vl1=http://pets.default.svc:9000/base"],
+            &[],
+        );
+        let Integration::HttpProxy(proxy) = integration else {
+            panic!("expected HTTP proxy, got {integration:?}");
+        };
+        assert_eq!(
+            proxy.uri,
+            "http://pets.default.svc:9000/base/pets/{id}?fixed=1"
+        );
+        assert_eq!(
+            proxy.private,
+            Some(PrivateRouting::HostHeader(HeaderValue::from_static(
+                "my-nlb-1234.elb.us-east-1.amazonaws.com:8080"
+            )))
+        );
+    }
+
+    #[test]
+    fn rest_vpc_link_uri_without_a_path_maps_to_the_base_url() {
+        let integration = compile_private(
+            json!({"type": "http_proxy", "connectionType": "VPC_LINK", "connectionId": "vl1",
+                "uri": "https://nlb.internal"}),
+            ApiKind::Rest,
+            &["vl1=https://svc.ns"],
+            &[],
+        );
+        let Integration::HttpProxy(proxy) = integration else {
+            panic!("expected HTTP proxy, got {integration:?}");
+        };
+        assert_eq!(proxy.uri, "https://svc.ns");
+        assert_eq!(
+            proxy.private,
+            Some(PrivateRouting::HostHeader(HeaderValue::from_static(
+                "nlb.internal"
+            )))
+        );
+    }
+
+    #[test]
+    fn http_api_vpc_link_forwards_the_request_path_to_the_mapped_url() {
+        let integration = compile_private(
+            json!({"type": "http_proxy", "connectionType": "VPC_LINK", "connectionId": "vl2",
+                "uri": "arn:aws:elasticloadbalancing:us-east-2:123456789012:listener/app/lb/50dc/0467"}),
+            ApiKind::Http,
+            &["vl2=http://pets.default.svc"],
+            &[],
+        );
+        let Integration::HttpProxy(proxy) = integration else {
+            panic!("expected HTTP proxy, got {integration:?}");
+        };
+        assert_eq!(proxy.uri, "http://pets.default.svc");
+        assert_eq!(proxy.private, Some(PrivateRouting::RequestPath));
+        let cloud_map = compile_private(
+            json!({"type": "http_proxy", "connectionType": "VPC_LINK", "connectionId": "vl2",
+                "uri": "arn:aws:servicediscovery:us-east-2:123456789012:service/srv-1?stage=prod"}),
+            ApiKind::Http,
+            &["vl2=http://pets.default.svc"],
+            &[],
+        );
+        assert!(matches!(cloud_map, Integration::HttpProxy(_)));
+    }
+
+    #[test]
+    fn connection_ids_may_be_stage_variables() {
+        let integration = compile_private(
+            json!({"type": "http_proxy", "connectionType": "VPC_LINK",
+                "connectionId": "${stageVariables.link}", "uri": "http://nlb/x"}),
+            ApiKind::Rest,
+            &["vl9=http://svc"],
+            &[("link", "vl9")],
+        );
+        assert!(matches!(integration, Integration::HttpProxy(_)));
+    }
+
+    #[test]
+    fn unmapped_or_unusable_vpc_links_stay_unsupported_with_a_reason() {
+        let unmapped = unsupported_reason(compile_private(
+            json!({"type": "http_proxy", "connectionType": "VPC_LINK", "connectionId": "nope", "uri": "http://x"}),
+            ApiKind::Rest,
+            &["vl1=http://svc"],
+            &[],
+        ));
+        assert!(unmapped.contains("--vpc-link nope=<url>"), "{unmapped}");
+        let no_id = unsupported_reason(compile_private(
+            json!({"type": "http_proxy", "connectionType": "VPC_LINK", "uri": "http://x"}),
+            ApiKind::Rest,
+            &["vl1=http://svc"],
+            &[],
+        ));
+        assert!(no_id.contains("connectionId"), "{no_id}");
+        let missing_variable = unsupported_reason(compile_private(
+            json!({"type": "http_proxy", "connectionType": "VPC_LINK", "connectionId": "${stageVariables.x}", "uri": "http://x"}),
+            ApiKind::Rest,
+            &["vl1=http://svc"],
+            &[],
+        ));
+        assert!(
+            missing_variable.contains("--vpc-link"),
+            "{missing_variable}"
+        );
+        let http_non_arn = unsupported_reason(compile_private(
+            json!({"type": "http_proxy", "connectionType": "VPC_LINK", "connectionId": "vl1", "uri": "http://x"}),
+            ApiKind::Http,
+            &["vl1=http://svc"],
+            &[],
+        ));
+        assert!(http_non_arn.contains("ARN"), "{http_non_arn}");
+        let rest_non_url = unsupported_reason(compile_private(
+            json!({"type": "http_proxy", "connectionType": "VPC_LINK", "connectionId": "vl1", "uri": "arn:aws:elasticloadbalancing:x"}),
+            ApiKind::Rest,
+            &["vl1=http://svc"],
+            &[],
+        ));
+        assert!(rest_non_url.contains("http or https"), "{rest_non_url}");
+        let other_type = unsupported_reason(compile_private(
+            json!({"type": "aws", "connectionType": "VPC_LINK", "connectionId": "vl1", "uri": "arn:aws:apigateway:us-east-1:sqs:path/q"}),
+            ApiKind::Rest,
+            &["vl1=http://svc"],
+            &[],
+        ));
+        assert!(other_type.contains("HTTP_PROXY"), "{other_type}");
+    }
+
     #[test]
     fn unservable_integrations_are_unsupported_with_reasons() {
         let cases = [
@@ -650,7 +878,12 @@ mod tests {
             assert!(!reason.is_empty());
         }
         assert!(matches!(
-            Integration::compile(None, ApiKind::Rest, &StageVariables::default()),
+            Integration::compile(
+                None,
+                ApiKind::Rest,
+                &StageVariables::default(),
+                &VpcLinks::default(),
+            ),
             Integration::Unsupported { .. }
         ));
     }
@@ -729,6 +962,7 @@ mod tests {
             ),
             ApiKind::Rest,
             &vars,
+            &VpcLinks::default(),
         ) else {
             panic!("expected HTTP proxy");
         };

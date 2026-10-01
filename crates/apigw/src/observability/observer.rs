@@ -448,6 +448,7 @@ mod tests {
     };
     use crate::router::{BasePath, build};
     use crate::state::{InMemory, InMemoryLimits, StateBackend};
+    use crate::vpc_link::VpcLinks;
     use std::num::NonZeroU32;
 
     const ACCESS_GROUP: &str = "/aws/apigw/access";
@@ -543,6 +544,7 @@ mod tests {
                 InMemoryLimits::default(),
             ))),
             replicas: NonZeroU32::MIN,
+            vpc_links: VpcLinks::default(),
             enforcement: Enforcement {
                 authorization: AuthorizationMode::Enforce,
                 resource_policy: Unsupported::Reject,

@@ -26,6 +26,7 @@ use crate::observability::{Observability, StageObserver};
 use crate::router::{self, BasePath, LoadSummary, Loaded, RouteSummary};
 use crate::source::{Fetch, Fetcher, Snapshot, SourceError};
 use crate::state::{InMemory, InMemoryLimits, StateBackend};
+use crate::vpc_link::VpcLinks;
 
 const CERT_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -39,6 +40,7 @@ struct Builder {
     aws: Arc<AwsClients>,
     state: Arc<StateBackend>,
     replicas: NonZeroU32,
+    vpc_links: VpcLinks,
     observability: Arc<Observability>,
 }
 
@@ -95,6 +97,7 @@ impl Builder {
             cors: model.settings.cors.as_ref().map(Cors::compile),
             state: Arc::clone(&self.state),
             replicas: self.replicas,
+            vpc_links: self.vpc_links.clone(),
             enforcement: self.enforcement,
             http: self.http.clone(),
             aws: Arc::clone(&self.aws),
@@ -449,6 +452,7 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
             InMemoryLimits::default(),
         ))),
         replicas: config.replicas,
+        vpc_links: config.vpc_links(),
     };
     builder.enforcement.warn_if_relaxed();
     let loader = Loader {
@@ -556,6 +560,7 @@ mod tests {
                 InMemoryLimits::default(),
             ))),
             replicas: NonZeroU32::MIN,
+            vpc_links: VpcLinks::default(),
             http: reqwest::Client::new(),
             aws: Arc::new(AwsClients::new(
                 sdk_config(),
