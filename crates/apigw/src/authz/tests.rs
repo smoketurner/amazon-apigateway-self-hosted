@@ -26,7 +26,7 @@ use crate::integration::StageVariables;
 use crate::model::{ApiKind, ApiModel, IntegrationOverrides, StageSettings};
 use crate::observability::StageObserver;
 use crate::router::{BasePath, RouteSummary, build};
-use crate::state::{InMemory, InMemoryLimits, StateBackend};
+use crate::state::{InMemoryLimits, StateBackend};
 use crate::usage::UsageStore;
 use crate::vpc_link::VpcLinks;
 
@@ -254,9 +254,7 @@ impl Harness {
             },
             responses: GatewayResponses::default(),
             cors: None,
-            state: Arc::new(StateBackend::InMemory(InMemory::new(
-                InMemoryLimits::default(),
-            ))),
+            state: Arc::new(StateBackend::with_limits(InMemoryLimits::default())),
             replicas: std::num::NonZeroU32::MIN,
             vpc_links: VpcLinks::default(),
             observer: StageObserver::disabled(),

@@ -21,6 +21,7 @@ Java regex syntax to `fancy-regex` and provides Java's matching, replacement, an
 | `digest` | SHA-256 digests, so credentials never appear in cache keys |
 | `cors`, `http_routes`, `mapping` | HTTP API CORS (preflight answers and response headers), route selection by path and method together for HTTP APIs, and `requestParameters`/`responseParameters` mapping for `HTTP_PROXY` |
 | `vpc_link` | `--vpc-link` mappings from a VPC link connection ID to an in-cluster base URL, used when compiling `HTTP_PROXY` integrations |
+| `state` | Throttle buckets, quota counters, and the response cache behind one `StateBackend`: per-replica in memory, or shared through Valkey (`--valkey-url`; atomic Lua scripts on the server's clock, bounded by a per-call timeout) |
 | `usage` | API keys and usage plans of a REST API stage: paced, paginated reads from the control plane (`UsageReader`), kept as SHA-256 hashes (`UsageData`, `UsageStore`), and the plan throttle and quota counted per key in the state backend (`UsageChecker`) |
 | `backoff` | Exponential backoff with jitter shared by the definition refresh and the usage reads |
 | `aws` | `AwsClients`: per-region Lambda clients, assumed integration-role credentials, Lambda endpoint overrides, trace header propagation |

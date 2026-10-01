@@ -17,6 +17,7 @@ pub(crate) mod cache;
 mod lru;
 mod memory;
 pub(crate) mod quota;
+mod valkey;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,6 +27,7 @@ use jiff::Timestamp;
 
 pub(crate) use bucket::{Admission, BucketLimits};
 pub(crate) use memory::{InMemory, InMemoryLimits};
+pub(crate) use valkey::{Valkey, ValkeyUrl};
 
 use cache::CacheStore;
 use quota::{QuotaDecision, QuotaLimit};
@@ -65,13 +67,20 @@ pub(crate) enum StateError {
 #[derive(Debug)]
 pub(crate) enum StateBackend {
     /// Per replica, in this process.
-    InMemory(InMemory),
+    InMemory(Box<InMemory>),
+    /// In a Valkey server every replica talks to.
+    Valkey(Valkey),
 }
 
 impl StateBackend {
     /// An in-memory backend with the default bounds, shared between requests.
     pub(crate) fn in_memory() -> Arc<Self> {
-        Arc::new(Self::InMemory(InMemory::new(InMemoryLimits::default())))
+        Arc::new(Self::with_limits(InMemoryLimits::default()))
+    }
+
+    /// An in-memory backend with the given bounds.
+    pub(crate) fn with_limits(limits: InMemoryLimits) -> Self {
+        Self::InMemory(Box::new(InMemory::new(limits)))
     }
 }
 
@@ -81,15 +90,11 @@ impl StateBackend {
     pub(crate) fn is_shared(&self) -> bool {
         match self {
             Self::InMemory(_) => false,
+            Self::Valkey(_) => true,
         }
     }
 }
 
-#[expect(
-    clippy::unused_async,
-    clippy::unused_async_trait_impl,
-    reason = "every method is async for networked backends; the in-memory one never awaits"
-)]
 impl StateBackend {
     /// Takes one token from the bucket at `key`, creating it full.
     ///
@@ -102,6 +107,7 @@ impl StateBackend {
     ) -> Result<Admission, StateError> {
         match self {
             Self::InMemory(memory) => Ok(memory.take_token(key, limits, Timestamp::now())),
+            Self::Valkey(valkey) => valkey.take_token(key, limits).await,
         }
     }
 
@@ -116,6 +122,7 @@ impl StateBackend {
     ) -> Result<QuotaDecision, StateError> {
         match self {
             Self::InMemory(memory) => memory.consume_quota(key, quota, Timestamp::now()),
+            Self::Valkey(valkey) => valkey.consume_quota(key, quota, Timestamp::now()).await,
         }
     }
 
@@ -126,6 +133,7 @@ impl StateBackend {
     pub(crate) async fn cache_get(&self, key: &StateKey) -> Result<Option<Bytes>, StateError> {
         match self {
             Self::InMemory(memory) => Ok(memory.cache_get(key, Timestamp::now())),
+            Self::Valkey(valkey) => valkey.cache_get(key).await,
         }
     }
 
@@ -141,6 +149,7 @@ impl StateBackend {
     ) -> Result<CacheStore, StateError> {
         match self {
             Self::InMemory(memory) => Ok(memory.cache_put(key, value, ttl, Timestamp::now())),
+            Self::Valkey(valkey) => valkey.cache_put(&key, &value, ttl).await,
         }
     }
 
@@ -154,6 +163,7 @@ impl StateBackend {
                 memory.cache_invalidate(key);
                 Ok(())
             }
+            Self::Valkey(valkey) => valkey.cache_invalidate(key).await,
         }
     }
 }
@@ -172,7 +182,7 @@ mod tests {
 
     #[tokio::test]
     async fn backend_dispatches_each_operation() {
-        let backend = StateBackend::InMemory(InMemory::new(InMemoryLimits::default()));
+        let backend = StateBackend::with_limits(InMemoryLimits::default());
         let key = StateKey::new("t", &["k"]);
         let limits = BucketLimits::new(0.0, 2.0).unwrap();
         assert_eq!(

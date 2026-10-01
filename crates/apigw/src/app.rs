@@ -33,7 +33,7 @@ use crate::model::{ApiModel, Feature, IntegrationOverrides, StageSettings};
 use crate::observability::{Observability, StageObserver};
 use crate::router::{self, BasePath, LoadSummary, Loaded, RouteSummary};
 use crate::source::{Fetch, Fetcher, Snapshot, Source, SourceError};
-use crate::state::StateBackend;
+use crate::state::{StateBackend, Valkey};
 use crate::usage::{AwsUsageSource, Pacing, UsageChecker, UsageReader, UsageStore};
 use crate::vpc_link::VpcLinks;
 
@@ -110,6 +110,16 @@ impl Builder {
     /// How long the first read of a stage's API keys may take.
     const INITIAL_USAGE_READ: Duration = Duration::from_mins(2);
 
+    /// How many gateways divide each limit between them: all replicas when
+    /// each keeps its own state, one when the state is shared.
+    fn limit_sharers(&self) -> NonZeroU32 {
+        if self.state.is_shared() {
+            NonZeroU32::MIN
+        } else {
+            self.replicas
+        }
+    }
+
     /// Reads the API keys and usage plans of `source`, when it is a REST API
     /// stage in API Gateway, and keeps them fresh until `stop`. A failed first
     /// read is logged and retried: until one succeeds no key is valid.
@@ -127,14 +137,11 @@ impl Builder {
         else {
             return (self, None);
         };
-        // A shared backend counts for every replica; otherwise each takes its
-        // share of every limit.
-        let sharing = if self.state.is_shared() {
-            NonZeroU32::MIN
-        } else {
-            self.replicas
-        };
-        let store = Arc::new(UsageStore::new(UsageChecker::new(api_id, stage, sharing)));
+        let store = Arc::new(UsageStore::new(UsageChecker::new(
+            api_id,
+            stage,
+            self.limit_sharers(),
+        )));
         let reader = UsageReader::new(
             AwsUsageSource::new(aws_sdk_apigateway::Client::new(sdk_config)),
             api_id,
@@ -198,7 +205,7 @@ impl Builder {
             responses: GatewayResponses::compile(model.kind, &model.gateway_responses),
             cors: model.settings.cors.as_ref().map(Cors::compile),
             state: Arc::clone(&self.state),
-            replicas: self.replicas,
+            replicas: self.limit_sharers(),
             vpc_links: self.vpc_links.clone(),
             enforcement: self.enforcement,
             http: self.http.clone(),
@@ -610,6 +617,28 @@ async fn serve_apis(
     ))
 }
 
+async fn connect_state(config: &Config) -> anyhow::Result<Arc<StateBackend>> {
+    let Some(url) = &config.valkey_url else {
+        return Ok(StateBackend::in_memory());
+    };
+    if url.is_plaintext() {
+        tracing::warn!(%url, "the Valkey connection is not encrypted; use a rediss:// URL");
+    }
+    let ca = match &config.valkey_ca_cert {
+        Some(path) => Some(
+            tokio::fs::read(path)
+                .await
+                .with_context(|| format!("failed to read {}", path.display()))?,
+        ),
+        None => None,
+    };
+    let valkey = Valkey::connect(url, ca.as_deref())
+        .await
+        .context("failed to connect to Valkey")?;
+    tracing::info!(%url, "throttle, quota, and cache state is shared through Valkey");
+    Ok(Arc::new(StateBackend::Valkey(valkey)))
+}
+
 pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
     let tls = Tls::with_domains(&config.tls_cert, &config.tls_key, &config.domain_certs())
         .context("failed to load the TLS certificates")?;
@@ -635,6 +664,7 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         sdk_config.clone(),
         config.observability(std::env::var("HOSTNAME").ok().as_deref()),
     );
+    let state = connect_state(&config).await?;
     let builder = Builder {
         observability: Arc::clone(&observability),
         base_path: config.base_path.clone(),
@@ -644,7 +674,7 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         aws: Arc::clone(&aws),
         keys,
         http,
-        state: StateBackend::in_memory(),
+        state,
         replicas: config.replicas,
         vpc_links: config.vpc_links(),
         usage: None,

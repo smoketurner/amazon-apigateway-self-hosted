@@ -130,11 +130,11 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::state::InMemoryLimits;
     use crate::state::quota::QuotaPeriod;
-    use crate::state::{InMemory, InMemoryLimits};
 
     fn backend() -> StateBackend {
-        StateBackend::InMemory(InMemory::new(InMemoryLimits::default()))
+        StateBackend::with_limits(InMemoryLimits::default())
     }
 
     fn checker(replicas: u32) -> UsageChecker {

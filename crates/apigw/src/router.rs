@@ -540,7 +540,7 @@ mod tests {
     use crate::model::{IntegrationOverrides, Protection, StageSettings};
     use crate::model::{MethodSettings, SettingsScope};
     use crate::observability::StageObserver;
-    use crate::state::{InMemory, InMemoryLimits, StateBackend};
+    use crate::state::{InMemoryLimits, StateBackend};
     use crate::vpc_link::VpcLinks;
     use std::num::NonZeroU32;
 
@@ -550,9 +550,7 @@ mod tests {
     };
 
     fn test_state() -> Arc<StateBackend> {
-        Arc::new(StateBackend::InMemory(InMemory::new(
-            InMemoryLimits::default(),
-        )))
+        Arc::new(StateBackend::with_limits(InMemoryLimits::default()))
     }
 
     fn aws() -> Arc<AwsClients> {

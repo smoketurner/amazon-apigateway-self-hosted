@@ -69,6 +69,8 @@ Every flag has an environment variable (`apigw --help` lists them). The main one
 | `--config-cache` | `APIGW_CONFIG_CACHE` | none | Last-known-good definition, used when AWS is unreachable at startup |
 | `--stage-variable NAME=VALUE` | `APIGW_STAGE_VARIABLE_<NAME>` | | Override a stage variable |
 | `--integration-overrides` | `APIGW_INTEGRATION_OVERRIDES` | none | Re-point individual routes (below) |
+| `--valkey-url` | `APIGW_VALKEY_URL` | unset | Valkey (or Redis-compatible) server holding throttle, usage-plan quota, and authorizer-cache state, so every replica counts against the same limits and `--replicas` no longer divides them. Use `rediss://`; `redis://` is accepted with a warning. Credentials in the URL are never logged. Unset keeps per-replica in-memory state |
+| `--valkey-ca-cert` | `APIGW_VALKEY_CA_CERT` | unset | PEM root certificate to trust for a `rediss://` server the system roots do not cover |
 | `--usage-refresh-seconds` | `APIGW_USAGE_REFRESH_SECONDS` | `60` | Seconds between reads of API keys, usage plans, and their associations (0 reads once); reads are paced for the account's control-plane limit |
 | `--insecure-skip-authorization` | `APIGW_INSECURE_SKIP_AUTHORIZATION` | off | Serve authorizer, API key, and IAM routes without checking credentials |
 | `--integration-credentials` | `APIGW_INTEGRATION_CREDENTIALS` | `assume` | `assume` runs integrations as their `credentials` role; `gateway` uses the gateway's own credentials |
