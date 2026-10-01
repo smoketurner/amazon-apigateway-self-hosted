@@ -4,8 +4,8 @@ name: Parity
 # behavior no longer matches the committed fixtures. Drift never fails the run; a run
 # fails only when recording itself fails.
 #
-# This only works once reference/terraform is deployed and the repository variables and
-# secrets listed in reference/README.md are set. Until PARITY_AWS_ROLE_ARN is set the job
+# This only works once terraform/environments/dev is deployed and the repository variables and
+# secrets listed in terraform/README.md are set. Until PARITY_AWS_ROLE_ARN is set the job
 # is skipped.
 
 on:

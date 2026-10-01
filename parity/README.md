@@ -1,7 +1,7 @@
 # Parity fixtures
 
 `crates/apigw-parity` compares `apigw` with real API Gateway. `record` sends request cases to
-the deployed [reference APIs](../reference/README.md) and stores what came back; `replay`
+the deployed [reference APIs](../terraform/README.md) and stores what came back; `replay`
 serves the recorded OpenAPI export with `apigw`, sends the same requests, and diffs the
 answers.
 
@@ -62,7 +62,7 @@ need real credentials. Every substituted value is redacted from what `record` wr
 ## Record (needs the deployed stack)
 
 ```bash
-terraform -chdir=reference/terraform output -json parity_runner > parity/outputs.json
+terraform -chdir=terraform/environments/dev output -json parity_runner > parity/outputs.json
 # download the exports (see .github/workflows/parity.yml for the exact commands)
 apigw-parity record --outputs parity/outputs.json --export-dir <downloads> \
   --secret-env PARITY_API_KEY

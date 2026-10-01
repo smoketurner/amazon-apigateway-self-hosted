@@ -9,10 +9,10 @@
   `apigw-parity replay`: it serves the recorded exports with `apigw` and diffs its answers
   against `parity/fixtures/`. Needs no AWS access. See [parity/README.md](../parity/README.md).
 - **`.github/workflows/parity.yml`** — nightly (and manual): assumes the GitHub OIDC role from
-  `reference/terraform`, downloads the reference APIs' exports, runs `apigw-parity record`,
+  `terraform/environments/dev`, downloads the reference APIs' exports, runs `apigw-parity record`,
   and opens or updates a `parity-drift` issue when API Gateway no longer matches the committed
   fixtures. Drift never fails the run. It only works once the reference stack is deployed and
-  the repository variables and secrets in [reference/README.md](../reference/README.md) are
+  the repository variables and secrets in [terraform/README.md](../terraform/README.md) are
   set; until `PARITY_AWS_ROLE_ARN` is set the job is skipped. The role it assumes can only
   read the reference APIs' stages and exports (`apigateway:GET`).
 - **`.github/workflows/secure_workflows.yml`** — fails CI if any third-party action is not
