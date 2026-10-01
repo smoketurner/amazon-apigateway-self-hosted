@@ -340,9 +340,6 @@ impl IntegrationSpec {
         if self.content_handling.is_some() {
             features.push(Feature::ContentHandling);
         }
-        if self.tls_config.is_some() {
-            features.push(Feature::IntegrationTlsConfig);
-        }
         if !self.response_parameters.is_empty()
             || (kind == ApiKind::Http && self.request_parameters.keys().any(|k| k.contains(':')))
         {
@@ -560,7 +557,6 @@ pub(crate) enum Feature {
     Compression,
     Cors,
     ContentHandling,
-    IntegrationTlsConfig,
     ParameterMapping,
     ResponseCaching,
 }
@@ -572,7 +568,6 @@ impl fmt::Display for Feature {
             Self::Compression => "compression",
             Self::Cors => "CORS",
             Self::ContentHandling => "content handling",
-            Self::IntegrationTlsConfig => "integration TLS config",
             Self::ParameterMapping => "parameter mapping",
             Self::ResponseCaching => "response caching",
         };

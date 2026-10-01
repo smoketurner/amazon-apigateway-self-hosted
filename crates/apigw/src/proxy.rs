@@ -4,12 +4,14 @@
 use std::time::Instant;
 
 use axum::body::Body;
-use axum::http::{HeaderName, HeaderValue};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, header};
 use axum::response::Response;
 
 use crate::gateway::{GatewayError, HeaderNameExt as _};
+use crate::header_policy::{Flavor, Forwarded, IamAuthorization};
 use crate::integration::{HttpProxy, ParamSource};
-use crate::model::RoutePath;
+use crate::integration_tls::TlsClientError;
+use crate::model::{ApiKind, Protection, RoutePath};
 use crate::pipeline::RequestContext;
 use crate::route::Route;
 
@@ -28,15 +30,7 @@ impl HttpProxy {
             }
         };
         let method = self.method.clone().unwrap_or_else(|| ctx.method.clone());
-        let mut headers = reqwest::header::HeaderMap::new();
-        for (name, value) in &ctx.headers {
-            if name != axum::http::header::HOST
-                && name != axum::http::header::CONTENT_LENGTH
-                && !name.is_hop_by_hop()
-            {
-                headers.append(name.clone(), value.clone());
-            }
-        }
+        let mut headers = Self::request_headers(route, ctx);
         if let Some(trace) = ctx.trace
             && let Ok(value) = HeaderValue::try_from(trace.traceparent())
         {
@@ -59,6 +53,25 @@ impl HttpProxy {
             }
         }
         ctx.integration.transfer_mode = Some(self.transfer);
+        let (client, url) = match self.tls {
+            Some(ref tls) => match tls.prepare(url).await {
+                Ok(prepared) => {
+                    if let Some(host) = prepared.host {
+                        headers.insert(header::HOST, host);
+                    }
+                    (prepared.client, prepared.url)
+                }
+                Err(err @ TlsClientError::Resolve { .. }) => {
+                    tracing::warn!(route = %route.key, %err, "integration host could not be resolved");
+                    return Err(GatewayError::IntegrationUnreachable);
+                }
+                Err(err) => {
+                    tracing::error!(route = %route.key, %err, "invalid integration tlsConfig");
+                    return Err(GatewayError::ApiConfiguration);
+                }
+            },
+            None => (client.clone(), url),
+        };
         let started = Instant::now();
         let result = client
             .request(method, url)
@@ -89,13 +102,115 @@ impl HttpProxy {
         );
         let mut response = Response::new(Body::empty());
         *response.status_mut() = upstream.status();
-        for (name, value) in upstream.headers() {
-            if !name.is_hop_by_hop() {
-                response.headers_mut().append(name.clone(), value.clone());
-            }
-        }
+        *response.headers_mut() = Self::response_headers(ctx.api.kind, upstream.headers());
         *response.body_mut() = Body::from_stream(upstream.bytes_stream());
         Ok(response)
+    }
+
+    /// The headers sent to the backend. REST APIs follow API Gateway's header
+    /// table and add the headers API Gateway adds; HTTP APIs send what the
+    /// client sent minus hop-by-hop headers, translate `X-Forwarded-*` into
+    /// `Forwarded`, and give body-less requests a `Content-Type`.
+    fn request_headers(route: &Route, ctx: &RequestContext) -> HeaderMap {
+        let mut headers = match ctx.api.kind {
+            ApiKind::Rest => {
+                let iam = if route.protections.iter().any(|p| p == Protection::Iam) {
+                    IamAuthorization::Used
+                } else {
+                    IamAuthorization::NotUsed
+                };
+                Flavor::HttpProxy.request_headers(&ctx.headers, iam)
+            }
+            ApiKind::Http => {
+                let mut headers = HeaderMap::new();
+                for (name, value) in &ctx.headers {
+                    if !name.is_hop_by_hop() {
+                        headers.append(name.clone(), value.clone());
+                    }
+                }
+                headers
+            }
+        };
+        headers.remove(header::HOST);
+        headers.remove(header::CONTENT_LENGTH);
+        // API Gateway passes `Connection` to HTTP proxy backends; a gateway
+        // must not forward hop-by-hop headers, so this one is dropped.
+        headers.remove(header::CONNECTION);
+        match ctx.api.kind {
+            ApiKind::Rest => Self::add_rest_headers(&mut headers, ctx),
+            ApiKind::Http => Self::add_http_api_headers(&mut headers, ctx),
+        }
+        headers
+    }
+
+    /// Headers API Gateway sets on REST integration requests: the API's ID, a
+    /// default `User-Agent` of `AmazonAPIGateway_{api-id}`, and the original
+    /// protocol and port.
+    ///
+    /// <https://docs.aws.amazon.com/apigateway/latest/developerguide/request-response-data-mappings.html>
+    /// shows the first two in an integration request log. `X-Forwarded-Proto`
+    /// and `X-Forwarded-Port` are what Regional endpoints send to HTTP backends;
+    /// the port is the one in the `Host` header, `443` when it names none.
+    fn add_rest_headers(headers: &mut HeaderMap, ctx: &RequestContext) {
+        if let Ok(id) = HeaderValue::try_from(ctx.api.api_id.as_str()) {
+            headers.insert(HeaderName::from_static("x-amzn-apigateway-api-id"), id);
+        }
+        if !headers.contains_key(header::USER_AGENT)
+            && let Ok(agent) = HeaderValue::try_from(format!("AmazonAPIGateway_{}", ctx.api.api_id))
+        {
+            headers.insert(header::USER_AGENT, agent);
+        }
+        headers.insert(
+            HeaderName::from_static("x-forwarded-proto"),
+            HeaderValue::from_static("https"),
+        );
+        let port = ctx
+            .domain_name()
+            .rsplit_once(':')
+            .and_then(|(_, port)| port.parse::<u16>().ok())
+            .unwrap_or(443);
+        if let Ok(port) = HeaderValue::try_from(port.to_string()) {
+            headers.insert(HeaderName::from_static("x-forwarded-port"), port);
+        }
+    }
+
+    /// HTTP APIs translate `X-Forwarded-*` into `Forwarded`, and add a
+    /// `Content-Type` to requests with no body. The documentation does not say
+    /// which type; `application/octet-stream` is the neutral choice.
+    ///
+    /// <https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-known-issues.html>
+    fn add_http_api_headers(headers: &mut HeaderMap, ctx: &RequestContext) {
+        let forwarded = Forwarded::take_from(headers);
+        if let Some(value) = forwarded.render(ctx.domain_name()) {
+            headers.insert(header::FORWARDED, value);
+        }
+        if ctx.body.is_empty() && !headers.contains_key(header::CONTENT_TYPE) {
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            );
+        }
+    }
+
+    /// The backend's response headers as the client receives them: REST
+    /// remaps and drops per API Gateway's table, HTTP APIs drop hop-by-hop
+    /// headers.
+    fn response_headers(kind: ApiKind, upstream: &HeaderMap) -> HeaderMap {
+        let mut headers = HeaderMap::with_capacity(upstream.len());
+        match kind {
+            ApiKind::Rest => {
+                headers.extend(upstream.clone());
+                Flavor::HttpProxy.remap_response(&mut headers);
+            }
+            ApiKind::Http => {
+                for (name, value) in upstream {
+                    if !name.is_hop_by_hop() {
+                        headers.append(name.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        headers
     }
 
     /// Fills `{name}` placeholders in the integration URI and carries the
@@ -235,10 +350,14 @@ mod tests {
     use axum::body::Bytes;
     use axum::http::{Method, StatusCode};
     use proptest::prelude::*;
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
     use crate::authz::RouteAuthorizer;
     use crate::integration::Integration;
+    use crate::integration_tls::TlsClient;
+    use crate::listener::test_tls::generate;
+    use crate::listener::{ConnLimits, Edge, serve};
     use crate::model::{ApiKind, MethodMatch, Protections, ResponseTransferMode, RouteKey};
     use crate::pipeline::context::QueryString;
     use crate::pipeline::context::tests::request;
@@ -265,6 +384,7 @@ mod tests {
             headers: BTreeMap::new(),
             timeout: Duration::from_secs(1),
             transfer: ResponseTransferMode::Buffered,
+            tls: None,
         }
     }
 
@@ -393,6 +513,20 @@ mod tests {
                 }),
             )
             .route(
+                "/remap",
+                axum::routing::get(|| async {
+                    (
+                        [
+                            ("server", "nginx"),
+                            ("www-authenticate", "Basic"),
+                            ("user-agent", "backend"),
+                            ("x-plain", "1"),
+                        ],
+                        "ok",
+                    )
+                }),
+            )
+            .route(
                 "/slow",
                 axum::routing::get(|| async {
                     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -454,6 +588,190 @@ mod tests {
             echoed["headers"]
                 .get("connection")
                 .is_none_or(|v| v != "keep-alive")
+        );
+    }
+
+    async fn echoed(response: Response) -> serde_json::Value {
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn rest_requests_follow_the_header_table_and_gain_api_gateways_headers() {
+        let addr = upstream().await;
+        let target = proxy(&format!("http://{addr}/echo/x"));
+        let mut request = incoming(&[], None);
+        for (name, value) in [
+            ("expect", "100-continue"),
+            ("content-md5", "abc"),
+            ("max-forwards", "2"),
+            ("te", "trailers"),
+            ("authorization", "AWS4-HMAC-SHA256 Credential=x"),
+            ("x-forwarded-proto", "http"),
+        ] {
+            request
+                .headers
+                .insert(name, HeaderValue::from_static(value));
+        }
+        request
+            .headers
+            .insert("host", HeaderValue::from_static("api.example.com:8443"));
+        let echo = echoed(send(target.clone(), "/x", request).await.unwrap()).await;
+        let headers = &echo["headers"];
+        for dropped in [
+            "expect",
+            "content-md5",
+            "max-forwards",
+            "te",
+            "authorization",
+        ] {
+            assert!(
+                headers.get(dropped).is_none(),
+                "{dropped} reaches the backend"
+            );
+        }
+        assert_eq!(headers["x-amzn-apigateway-api-id"], "abc123");
+        assert_eq!(headers["user-agent"], "curl/8");
+        assert_eq!(headers["x-forwarded-proto"], "https");
+        assert_eq!(headers["x-forwarded-port"], "8443");
+
+        let mut request = incoming(&[], None);
+        request.headers.remove("user-agent");
+        let echo = echoed(send(target, "/x", request).await.unwrap()).await;
+        assert_eq!(echo["headers"]["user-agent"], "AmazonAPIGateway_abc123");
+        assert_eq!(echo["headers"]["x-forwarded-port"], "443");
+    }
+
+    #[tokio::test]
+    async fn rest_responses_are_remapped_and_http_api_responses_are_not() {
+        let addr = upstream().await;
+        let target = proxy(&format!("http://{addr}/remap"));
+        let response = send(target.clone(), "/x", incoming(&[], None))
+            .await
+            .unwrap();
+        let headers = response.headers();
+        assert_eq!(headers["x-amzn-remapped-server"], "nginx");
+        assert_eq!(headers["x-amzn-remapped-www-authenticate"], "Basic");
+        assert_eq!(headers["x-amzn-remapped-user-agent"], "backend");
+        assert_eq!(headers["x-plain"], "1");
+        assert!(headers.get("server").is_none());
+        assert!(headers.get("www-authenticate").is_none());
+
+        let mut request = incoming(&[], None);
+        request.api.kind = ApiKind::Http;
+        let response = send(target, "/x", request).await.unwrap();
+        assert_eq!(response.headers()["server"], "nginx");
+        assert_eq!(response.headers()["www-authenticate"], "Basic");
+    }
+
+    #[tokio::test]
+    async fn http_api_requests_get_forwarded_and_a_default_content_type() {
+        let addr = upstream().await;
+        let target = proxy(&format!("http://{addr}/echo/x"));
+        let mut request = incoming(&[], None);
+        request.api.kind = ApiKind::Http;
+        request
+            .headers
+            .insert("x-forwarded-for", HeaderValue::from_static("203.0.113.7"));
+        request
+            .headers
+            .insert("x-forwarded-proto", HeaderValue::from_static("http"));
+        request
+            .headers
+            .insert("expect", HeaderValue::from_static("100-continue"));
+        let echo = echoed(send(target.clone(), "/x", request).await.unwrap()).await;
+        let headers = &echo["headers"];
+        assert_eq!(
+            headers["forwarded"],
+            "for=203.0.113.7;host=api.example.com;proto=https"
+        );
+        assert!(headers.get("x-forwarded-for").is_none());
+        assert!(headers.get("x-forwarded-proto").is_none());
+        assert_eq!(headers["content-type"], "application/octet-stream");
+        assert_eq!(
+            headers["expect"], "100-continue",
+            "HTTP APIs have no header table"
+        );
+        assert!(headers.get("x-amzn-apigateway-api-id").is_none());
+
+        let mut request = incoming(&[], None);
+        request.api.kind = ApiKind::Http;
+        request.body = Bytes::from_static(b"{}");
+        let echo = echoed(send(target, "/x", request).await.unwrap()).await;
+        assert!(
+            echo["headers"].get("content-type").is_none(),
+            "only body-less requests get one"
+        );
+    }
+
+    async fn tls_upstream() -> std::net::SocketAddr {
+        let cert = generate();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/ok",
+            axum::routing::get(|request: axum::extract::Request| async move {
+                request
+                    .headers()
+                    .get("host")
+                    .and_then(|host| host.to_str().ok())
+                    .map(str::to_owned)
+                    .or_else(|| request.uri().authority().map(ToString::to_string))
+                    .unwrap_or_default()
+            }),
+        );
+        tokio::spawn(serve(
+            listener,
+            cert.server(),
+            app,
+            ConnLimits::DEFAULT,
+            8,
+            Edge::direct(),
+            CancellationToken::new(),
+        ));
+        addr
+    }
+
+    #[tokio::test]
+    async fn tls_config_controls_certificate_checks() {
+        use crate::model::TlsConfig;
+
+        let addr = tls_upstream().await;
+        let url = format!("https://{addr}/ok");
+
+        let error = send(proxy(&url), "/x", incoming(&[], None))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            GatewayError::IntegrationUnreachable,
+            "a self-signed certificate is refused by default"
+        );
+
+        let mut insecure = proxy(&url);
+        insecure.tls = TlsClient::new(&TlsConfig {
+            insecure_skip_verification: true,
+            server_name_to_verify: None,
+        });
+        let response = send(insecure, "/x", incoming(&[], None)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(&*body, addr.to_string().as_bytes());
+
+        let mut named = proxy(&url);
+        named.tls = TlsClient::new(&TlsConfig {
+            insecure_skip_verification: false,
+            server_name_to_verify: Some("localhost".to_owned()),
+        });
+        let error = send(named, "/x", incoming(&[], None)).await.unwrap_err();
+        assert_eq!(
+            error,
+            GatewayError::IntegrationUnreachable,
+            "the certificate is still checked against the server name"
         );
     }
 

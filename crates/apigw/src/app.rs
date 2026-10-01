@@ -19,6 +19,7 @@ use crate::config::Config;
 use crate::gateway::{ApiContext, Enforcement};
 use crate::gateway_response::GatewayResponses;
 use crate::integration::StageVariables;
+use crate::integration_tls;
 use crate::listener::{self, ConnLimits, Edge, Tls};
 use crate::model::{ApiModel, Feature, IntegrationOverrides, StageSettings};
 use crate::observability::{Observability, StageObserver};
@@ -421,8 +422,7 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
     let tls = Tls::from_pem_files(&config.tls_cert, &config.tls_key)
         .context("failed to load the TLS certificate")?;
     let sdk_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-    let http = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
+    let http = integration_tls::client_builder()
         .build()
         .context("failed to build the HTTP client")?;
     let aws = Arc::new(AwsClients::new(

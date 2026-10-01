@@ -638,7 +638,7 @@ mod tests {
         let items = ops["/items/{id}"];
         assert_eq!(
             items.unenforced(ApiKind::Http),
-            vec![Feature::IntegrationTlsConfig, Feature::ParameterMapping]
+            vec![Feature::ParameterMapping]
         );
         assert!(
             items.protections.contains(Protection::Authorizer),

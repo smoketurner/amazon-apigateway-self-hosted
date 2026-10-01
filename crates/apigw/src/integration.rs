@@ -8,6 +8,7 @@ use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use serde_json::Value;
 
 use crate::aws::{FunctionArn, IntegrationCredentials, RoleArn};
+use crate::integration_tls::TlsClient;
 use crate::model::{
     ApiKind, ConnectionType, IntegrationSpec, IntegrationType, PayloadVersion, ResponseTransferMode,
 };
@@ -15,8 +16,27 @@ use crate::model::{
 /// The longest a streamed response may take, and the default timeout of
 /// streaming integrations.
 pub(crate) const STREAM_LIMIT: Duration = Duration::from_mins(15);
+/// The shortest integration timeout API Gateway accepts.
+const MIN_INTEGRATION_TIMEOUT: Duration = Duration::from_millis(50);
+/// The longest HTTP API integration timeout.
+const HTTP_API_MAX_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl ApiKind {
+    /// Brings an integration's `timeoutInMillis` into the range API Gateway
+    /// allows: at least 50 ms, at most 30 s for HTTP APIs and 15 minutes for
+    /// streaming responses. REST APIs may raise a buffered integration's timeout
+    /// past the default 29 s (a service quota increase), so it is not capped.
+    ///
+    /// <https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-execution-service-limits-table.html>
+    fn bound_timeout(self, requested: Duration, transfer: ResponseTransferMode) -> Duration {
+        let bounded = requested.max(MIN_INTEGRATION_TIMEOUT);
+        match (self, transfer) {
+            (_, ResponseTransferMode::Stream) => bounded.min(STREAM_LIMIT),
+            (Self::Http, ResponseTransferMode::Buffered) => bounded.min(HTTP_API_MAX_TIMEOUT),
+            (Self::Rest, ResponseTransferMode::Buffered) => bounded,
+        }
+    }
+
     /// API Gateway's integration timeout when the integration sets none.
     fn default_integration_timeout(self, transfer: ResponseTransferMode) -> Duration {
         match (self, transfer) {
@@ -131,14 +151,13 @@ impl Integration {
                 spec.integration_type
             ));
         }
-        let timeout = spec.timeout_in_millis.map_or_else(
-            || kind.default_integration_timeout(transfer),
-            Duration::from_millis,
+        let timeout = kind.bound_timeout(
+            spec.timeout_in_millis.map_or_else(
+                || kind.default_integration_timeout(transfer),
+                Duration::from_millis,
+            ),
+            transfer,
         );
-        let timeout = match transfer {
-            ResponseTransferMode::Stream => timeout.min(STREAM_LIMIT),
-            ResponseTransferMode::Buffered => timeout,
-        };
         let uri = spec.uri.as_deref().map(|uri| variables.substitute(uri));
         match spec.integration_type {
             IntegrationType::HttpProxy => {
@@ -206,6 +225,8 @@ pub(crate) struct HttpProxy {
     pub(crate) headers: BTreeMap<String, ParamSource>,
     pub(crate) timeout: Duration,
     pub(crate) transfer: ResponseTransferMode,
+    /// Present when the integration's `tlsConfig` changes certificate checks.
+    pub(crate) tls: Option<TlsClient>,
 }
 
 impl HttpProxy {
@@ -253,6 +274,7 @@ impl HttpProxy {
             headers,
             timeout,
             transfer,
+            tls: spec.tls_config.as_ref().and_then(TlsClient::new),
         })
     }
 }
@@ -668,6 +690,33 @@ mod tests {
         };
         assert_eq!(http.transfer, ResponseTransferMode::Stream);
         assert_eq!(http.timeout, STREAM_LIMIT, "streams stop at 15 minutes");
+    }
+
+    #[test]
+    fn integration_timeouts_are_bounded_per_api_type() {
+        let timeout = |kind: ApiKind, millis: Option<u64>| {
+            let mut spec = json!({"type": "http_proxy", "uri": "http://x/"});
+            if let (Some(millis), Some(fields)) = (millis, spec.as_object_mut()) {
+                fields.insert("timeoutInMillis".to_owned(), json!(millis));
+            }
+            let Integration::HttpProxy(proxy) = compile(spec, kind) else {
+                panic!("expected HTTP proxy");
+            };
+            proxy.timeout
+        };
+        let ms = Duration::from_millis;
+        assert_eq!(timeout(ApiKind::Rest, None), ms(29_000));
+        assert_eq!(
+            timeout(ApiKind::Rest, Some(120_000)),
+            ms(120_000),
+            "REST timeouts may exceed 29 s"
+        );
+        assert_eq!(timeout(ApiKind::Rest, Some(50)), ms(50));
+        assert_eq!(timeout(ApiKind::Rest, Some(10)), ms(50));
+        assert_eq!(timeout(ApiKind::Http, None), ms(30_000));
+        assert_eq!(timeout(ApiKind::Http, Some(30_000)), ms(30_000));
+        assert_eq!(timeout(ApiKind::Http, Some(30_001)), ms(30_000));
+        assert_eq!(timeout(ApiKind::Http, Some(1)), ms(50));
     }
 
     #[test]
