@@ -16,8 +16,10 @@ use super::exec::Outcome;
 use super::format::AccessLogFormat;
 use super::metrics::{MetricKey, MetricsAggregator, RequestMetrics, RouteDimensions};
 use super::queue::{LogEvent, LogQueue};
+use crate::gateway::ApiContext;
 use crate::model::{ApiKind, ApiModel, ExecutionLogging, RouteKey};
-use crate::pipeline::{ApiInfo, IntegrationOutcome, RequestContext};
+use crate::pipeline::RequestContext;
+use crate::pipeline::context::{ApiInfo, IntegrationOutcome};
 use crate::route::Route;
 
 /// How long the integration of a request took, attached to the response by the
@@ -170,7 +172,12 @@ impl StageObserver {
 
     /// Starts observing `request`, which `route` will handle (`None` when no
     /// route matches). Returns `None` when there is nothing to record.
-    pub(crate) fn begin(&self, request: &Request, route: Option<&Route>) -> Option<Pending> {
+    pub(crate) fn begin(
+        &self,
+        api: &ApiContext,
+        request: &Request,
+        route: Option<&Route>,
+    ) -> Option<Pending> {
         let inner = self.0.as_ref()?;
         let route_key = route.map(|r| r.key.clone());
         let settings = route_key.as_ref().and_then(|key| inner.routes.get(key));
@@ -180,8 +187,7 @@ impl StageObserver {
             started: Instant::now(),
             method: request.method().clone(),
             route: route_key,
-            context: wants_context
-                .then(|| RequestContext::observed(inner.api.clone(), route, request)),
+            context: wants_context.then(|| RequestContext::observed(api, route, request)),
         })
     }
 
@@ -319,7 +325,7 @@ mod tests {
     use super::*;
     use crate::aws::{AwsClients, CredentialsMode, LambdaEndpoints};
     use crate::gateway::{ApiContext, AuthorizationMode, Enforcement, RequestId, Unsupported};
-    use crate::integration::StageVariables;
+    use crate::gateway_response::GatewayResponses;
     use crate::model::{IntegrationOverrides, MethodSettings, SettingsScope, StageSettings};
     use crate::observability::testing::MockAws;
     use crate::observability::{Delivery, LogGroup, MetricsNamespace, MetricsSettings, Settings};
@@ -400,7 +406,8 @@ mod tests {
             kind,
             api_id: "abc".to_owned(),
             stage: Some("prod".to_owned()),
-            stage_variables: StageVariables::default(),
+            stage_variables: Arc::default(),
+            responses: GatewayResponses::default(),
             enforcement: Enforcement {
                 authorization: AuthorizationMode::Enforce,
                 resource_policy: Unsupported::Reject,

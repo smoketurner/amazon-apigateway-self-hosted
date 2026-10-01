@@ -187,7 +187,7 @@ impl FromIterator<Protection> for Protections {
 macro_rules! wire_enum {
     ($(#[$meta:meta])* $name:ident { $($variant:ident => $wire:literal),+ $(,)? }) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
         #[serde(try_from = "String", into = "&'static str")]
         pub(crate) enum $name {
             $($variant),+
@@ -264,6 +264,34 @@ wire_enum!(ApiKeySource {
     Header => "HEADER",
     Authorizer => "AUTHORIZER",
 });
+
+wire_enum!(
+    /// A REST API gateway response type: the kinds of error API Gateway
+    /// generates itself, each customizable per API.
+    ResponseType {
+        AccessDenied => "ACCESS_DENIED",
+        ApiConfigurationError => "API_CONFIGURATION_ERROR",
+        AuthorizerConfigurationError => "AUTHORIZER_CONFIGURATION_ERROR",
+        AuthorizerFailure => "AUTHORIZER_FAILURE",
+        BadRequestBody => "BAD_REQUEST_BODY",
+        BadRequestParameters => "BAD_REQUEST_PARAMETERS",
+        Default4xx => "DEFAULT_4XX",
+        Default5xx => "DEFAULT_5XX",
+        ExpiredToken => "EXPIRED_TOKEN",
+        IntegrationFailure => "INTEGRATION_FAILURE",
+        IntegrationTimeout => "INTEGRATION_TIMEOUT",
+        InvalidApiKey => "INVALID_API_KEY",
+        InvalidSignature => "INVALID_SIGNATURE",
+        MissingAuthenticationToken => "MISSING_AUTHENTICATION_TOKEN",
+        QuotaExceeded => "QUOTA_EXCEEDED",
+        RequestTooLarge => "REQUEST_TOO_LARGE",
+        ResourceNotFound => "RESOURCE_NOT_FOUND",
+        Throttled => "THROTTLED",
+        Unauthorized => "UNAUTHORIZED",
+        UnsupportedMediaType => "UNSUPPORTED_MEDIA_TYPE",
+        WafFiltered => "WAF_FILTERED",
+    }
+);
 
 wire_enum!(ParameterLocation {
     Path => "path",
@@ -351,7 +379,18 @@ pub(crate) struct IntegrationResponseSpec {
 
 impl IntegrationResponseSpec {
     pub(crate) fn status(&self) -> Option<u16> {
-        match self.status_code.as_ref()? {
+        StatusCodeValue(self.status_code.as_ref()).parse()
+    }
+}
+
+/// A status code as exports write it: a string in exports, sometimes a number
+/// in hand-written files.
+#[derive(Debug, Clone, Copy)]
+struct StatusCodeValue<'a>(Option<&'a Value>);
+
+impl StatusCodeValue<'_> {
+    fn parse(self) -> Option<u16> {
+        match self.0? {
             Value::Number(n) => n.as_u64().and_then(|n| u16::try_from(n).ok()),
             Value::String(s) => s.parse().ok(),
             Value::Null | Value::Bool(_) | Value::Array(_) | Value::Object(_) => None,
@@ -418,6 +457,12 @@ pub(crate) struct GatewayResponseSpec {
     pub(crate) response_parameters: BTreeMap<String, String>,
     #[serde(default)]
     pub(crate) response_templates: BTreeMap<String, Option<String>>,
+}
+
+impl GatewayResponseSpec {
+    pub(crate) fn status(&self) -> Option<u16> {
+        StatusCodeValue(self.status_code.as_ref()).parse()
+    }
 }
 
 /// HTTP API CORS configuration (`x-amazon-apigateway-cors`).
@@ -492,9 +537,6 @@ impl ApiModel {
     /// API- and stage-level settings imported but not enforced yet.
     pub(crate) fn unenforced(&self) -> Vec<Feature> {
         let mut features = Vec::new();
-        if !self.gateway_responses.is_empty() {
-            features.push(Feature::GatewayResponses);
-        }
         if !self.settings.binary_media_types.is_empty() {
             features.push(Feature::BinaryMediaTypes);
         }
@@ -514,7 +556,6 @@ impl ApiModel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Feature {
-    GatewayResponses,
     BinaryMediaTypes,
     Compression,
     Cors,
@@ -530,7 +571,6 @@ pub(crate) enum Feature {
 impl fmt::Display for Feature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
-            Self::GatewayResponses => "gateway responses",
             Self::BinaryMediaTypes => "binary media types",
             Self::Compression => "compression",
             Self::Cors => "CORS",

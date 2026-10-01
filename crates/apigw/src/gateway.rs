@@ -3,14 +3,17 @@
 
 use std::sync::Arc;
 
-use axum::http::{HeaderName, HeaderValue, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::extract::Request;
+use axum::http::{HeaderName, StatusCode};
+use axum::response::Response;
 use uuid::Uuid;
 
 use crate::aws::AwsClients;
+use crate::gateway_response::{Failure, GatewayResponses};
 use crate::integration::StageVariables;
-use crate::model::{ApiKind, Protection};
+use crate::model::{ApiKind, Protection, ResponseType};
 use crate::observability::StageObserver;
+use crate::pipeline::RequestContext;
 use crate::route::Route;
 
 /// API Gateway's maximum payload size.
@@ -81,25 +84,20 @@ impl Enforcement {
 }
 
 impl Protection {
-    /// The response API Gateway gives a client that fails this check, or a 501
+    /// The failure API Gateway gives a client that fails this check, or a 501
     /// where API Gateway would do work this gateway cannot do yet.
-    pub(crate) fn refusal_response(self, kind: ApiKind) -> Response {
+    pub(crate) fn refusal(self, kind: ApiKind) -> Failure {
         match (self, kind) {
-            (Self::ResourcePolicy | Self::ApiKey, _) | (Self::Iam, ApiKind::Http) => {
-                ErrorBody::new(StatusCode::FORBIDDEN, "Forbidden").into_response()
+            (Self::ResourcePolicy, _) | (Self::Iam, ApiKind::Http) => {
+                Failure::new(ResponseType::AccessDenied).with_message("Forbidden")
             }
-            (Self::Iam, ApiKind::Rest) => {
-                ErrorBody::new(StatusCode::FORBIDDEN, "Missing Authentication Token")
-                    .into_response()
-            }
-            (Self::Authorizer, _) => {
-                ErrorBody::new(StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
-            }
-            (Self::RequestValidation, _) => ErrorBody::new(
+            (Self::ApiKey, _) => Failure::new(ResponseType::InvalidApiKey),
+            (Self::Iam, ApiKind::Rest) => Failure::new(ResponseType::MissingAuthenticationToken),
+            (Self::Authorizer, _) => Failure::new(ResponseType::Unauthorized),
+            (Self::RequestValidation, _) => Failure::gateway(
                 StatusCode::NOT_IMPLEMENTED,
                 "Request validation is not supported by this gateway",
-            )
-            .into_response(),
+            ),
         }
     }
 
@@ -131,37 +129,26 @@ pub(crate) struct ApiContext {
     pub(crate) kind: ApiKind,
     pub(crate) api_id: String,
     pub(crate) stage: Option<String>,
-    pub(crate) stage_variables: StageVariables,
+    pub(crate) stage_variables: Arc<StageVariables>,
     pub(crate) enforcement: Enforcement,
+    pub(crate) responses: GatewayResponses,
     pub(crate) http: reqwest::Client,
     pub(crate) aws: Arc<AwsClients>,
     pub(crate) observer: StageObserver,
 }
 
-/// A JSON `{"message": ...}` body, the shape of API Gateway's own errors.
-pub(crate) struct ErrorBody {
-    status: StatusCode,
-    message: &'static str,
-}
-
-impl ErrorBody {
-    pub(crate) const fn new(status: StatusCode, message: &'static str) -> Self {
-        Self { status, message }
+impl ApiContext {
+    /// Answers `request` with `failure`, applying the API's gateway response
+    /// customizations.
+    pub(crate) fn respond(&self, request: &RequestContext, failure: &Failure) -> Response {
+        self.responses.render(failure, request)
     }
-}
 
-impl IntoResponse for ErrorBody {
-    fn into_response(self) -> Response {
-        let body = serde_json::json!({ "message": self.message }).to_string();
-        (
-            self.status,
-            [(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/json"),
-            )],
-            body,
-        )
-            .into_response()
+    /// Answers a request that matched no route.
+    pub(crate) fn reject_unrouted(&self, request: Request) -> Response {
+        let (parts, _) = request.into_parts();
+        let context = RequestContext::new(self, None, parts, Vec::new());
+        self.respond(&context, &GatewayError::NoRoute.failure(self.kind))
     }
 }
 
@@ -173,40 +160,52 @@ pub(crate) enum GatewayError {
     /// The request can't be read (for example a path parameter that isn't
     /// valid UTF-8 after decoding).
     InvalidRequest,
-    /// The integration could not be reached or answered unusably.
+    /// The integration answered unusably, for example a malformed Lambda proxy
+    /// response or a function error.
     IntegrationFailure,
+    /// The integration could not be reached.
+    IntegrationUnreachable,
     IntegrationTimeout,
+    /// The integration is configured in a way that cannot be executed, such as
+    /// an invalid endpoint address.
+    ApiConfiguration,
     RequestTooLarge,
     /// An integration this gateway can't execute yet.
     UnsupportedIntegration,
 }
 
 impl GatewayError {
-    pub(crate) fn response(self, kind: ApiKind) -> Response {
-        let body = match (self, kind) {
+    pub(crate) fn failure(self, kind: ApiKind) -> Failure {
+        match (self, kind) {
             (Self::NoRoute, ApiKind::Rest) => {
-                ErrorBody::new(StatusCode::FORBIDDEN, "Missing Authentication Token")
+                Failure::new(ResponseType::MissingAuthenticationToken)
             }
-            (Self::NoRoute, ApiKind::Http) => ErrorBody::new(StatusCode::NOT_FOUND, "Not Found"),
-            (Self::InvalidRequest, _) => ErrorBody::new(StatusCode::BAD_REQUEST, "Bad Request"),
-            (Self::IntegrationFailure, _) => {
-                ErrorBody::new(StatusCode::BAD_GATEWAY, "Internal server error")
+            (Self::NoRoute, ApiKind::Http) => Failure::gateway(StatusCode::NOT_FOUND, "Not Found"),
+            (Self::InvalidRequest, _) => Failure::new(ResponseType::Default4xx),
+            (Self::IntegrationFailure, _) | (Self::IntegrationUnreachable, ApiKind::Http) => {
+                Failure::new(ResponseType::IntegrationFailure)
+                    .with_status(StatusCode::BAD_GATEWAY)
+                    .with_message("Internal server error")
+            }
+            (Self::IntegrationUnreachable, ApiKind::Rest) => {
+                Failure::new(ResponseType::IntegrationFailure)
             }
             (Self::IntegrationTimeout, ApiKind::Rest) => {
-                ErrorBody::new(StatusCode::GATEWAY_TIMEOUT, "Endpoint request timed out")
+                Failure::new(ResponseType::IntegrationTimeout)
             }
             (Self::IntegrationTimeout, ApiKind::Http) => {
-                ErrorBody::new(StatusCode::GATEWAY_TIMEOUT, "Service Unavailable")
+                Failure::new(ResponseType::IntegrationTimeout).with_message("Service Unavailable")
             }
-            (Self::RequestTooLarge, _) => {
-                ErrorBody::new(StatusCode::PAYLOAD_TOO_LARGE, "Request Entity Too Large")
+            (Self::ApiConfiguration, _) => Failure::new(ResponseType::ApiConfigurationError),
+            (Self::RequestTooLarge, ApiKind::Rest) => Failure::new(ResponseType::RequestTooLarge),
+            (Self::RequestTooLarge, ApiKind::Http) => {
+                Failure::new(ResponseType::RequestTooLarge).with_message("Request Entity Too Large")
             }
-            (Self::UnsupportedIntegration, _) => ErrorBody::new(
+            (Self::UnsupportedIntegration, _) => Failure::gateway(
                 StatusCode::NOT_IMPLEMENTED,
                 "Integration not supported by this gateway",
             ),
-        };
-        body.into_response()
+        }
     }
 }
 
@@ -243,74 +242,8 @@ impl HeaderNameExt for HeaderName {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "tests assert on known-good fixtures")]
 mod tests {
     use super::*;
-
-    async fn body(response: Response) -> String {
-        let bytes = axum::body::to_bytes(response.into_body(), 1024)
-            .await
-            .unwrap();
-        String::from_utf8(bytes.to_vec()).unwrap()
-    }
-
-    #[tokio::test]
-    async fn error_bodies_match_api_gateway() {
-        let cases = [
-            (
-                GatewayError::NoRoute,
-                ApiKind::Rest,
-                403,
-                "Missing Authentication Token",
-            ),
-            (GatewayError::NoRoute, ApiKind::Http, 404, "Not Found"),
-            (
-                GatewayError::InvalidRequest,
-                ApiKind::Rest,
-                400,
-                "Bad Request",
-            ),
-            (
-                GatewayError::IntegrationFailure,
-                ApiKind::Rest,
-                502,
-                "Internal server error",
-            ),
-            (
-                GatewayError::IntegrationTimeout,
-                ApiKind::Rest,
-                504,
-                "Endpoint request timed out",
-            ),
-            (
-                GatewayError::IntegrationTimeout,
-                ApiKind::Http,
-                504,
-                "Service Unavailable",
-            ),
-            (
-                GatewayError::RequestTooLarge,
-                ApiKind::Http,
-                413,
-                "Request Entity Too Large",
-            ),
-            (
-                GatewayError::UnsupportedIntegration,
-                ApiKind::Rest,
-                501,
-                "Integration not supported by this gateway",
-            ),
-        ];
-        for (error, kind, status, message) in cases {
-            let response = error.response(kind);
-            assert_eq!(response.status().as_u16(), status, "{error:?} {kind:?}");
-            assert_eq!(response.headers()["content-type"], "application/json");
-            assert_eq!(
-                body(response).await,
-                format!("{{\"message\":\"{message}\"}}")
-            );
-        }
-    }
 
     #[test]
     fn hop_by_hop_headers_are_recognised() {

@@ -95,6 +95,31 @@ jobs:
       - name: Run tests
         run: cargo test --locked --workspace
 
+  parity-replay:
+    name: Parity Replay
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake clang
+      - name: Setup Rust toolchain
+        run: rustup show
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: "v1"
+          shared-key: "debug-${{ runner.os }}"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - name: Build apigw and the parity runner
+        run: cargo build --locked -p apigw -p apigw-parity
+      - name: Replay the recorded fixtures against apigw
+        run: ./target/debug/apigw-parity replay
+
   license-check:
     name: License, Advisory & Ban Check
     runs-on: ubuntu-latest

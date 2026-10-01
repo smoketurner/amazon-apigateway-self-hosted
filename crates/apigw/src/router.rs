@@ -16,7 +16,7 @@ use tower::ServiceExt as _;
 use uuid::Uuid;
 
 use crate::aws::{AwsClients, RoleArn, RoleStatus};
-use crate::gateway::{ApiContext, Enforcement, GatewayError, RequestId};
+use crate::gateway::{ApiContext, Enforcement, RequestId};
 use crate::integration::Integration;
 use crate::model::{ApiKind, ApiModel, Feature, MethodMatch, Protections, RouteKey, RoutePath};
 use crate::pipeline::Pipeline;
@@ -130,11 +130,11 @@ impl PathRoutes {
 
     async fn handle(&self, request: Request) -> Response {
         let route = self.select(request.method());
-        let pending = self.ctx.observer.begin(&request, route);
+        let pending = self.ctx.observer.begin(&self.ctx, &request, route);
         let response = match route {
             // The pipeline future holds whole SDK calls; box it once here.
             Some(route) => Box::pin(Pipeline::new(&self.ctx, route).run(request)).await,
-            None => GatewayError::NoRoute.response(self.ctx.kind),
+            None => self.ctx.reject_unrouted(request),
         };
         self.ctx.observer.finish(pending, response)
     }
@@ -235,15 +235,15 @@ pub(crate) fn build(
     });
     let router = match base.0 {
         Some(ref prefix) => {
-            let outside = Arc::clone(ctx);
+            let ctx = Arc::clone(ctx);
             Router::new()
                 .without_v07_checks()
                 .nest(prefix, router)
                 .fallback(move |request: Request| {
-                    let ctx = Arc::clone(&outside);
+                    let ctx = Arc::clone(&ctx);
                     async move {
-                        let pending = ctx.observer.begin(&request, None);
-                        let response = GatewayError::NoRoute.response(ctx.kind);
+                        let pending = ctx.observer.begin(&ctx, &request, None);
+                        let response = ctx.reject_unrouted(request);
                         ctx.observer.finish(pending, response)
                     }
                 })
@@ -320,7 +320,7 @@ mod tests {
 
     use super::*;
     use crate::gateway::{AuthorizationMode, Unsupported};
-    use crate::integration::StageVariables;
+    use crate::gateway_response::GatewayResponses;
     use crate::model::{IntegrationOverrides, Protection, StageSettings};
 
     const STRICT: Enforcement = Enforcement {
@@ -341,12 +341,17 @@ mod tests {
         ))
     }
 
-    fn ctx(kind: ApiKind, enforcement: Enforcement) -> Arc<ApiContext> {
+    fn ctx(
+        kind: ApiKind,
+        enforcement: Enforcement,
+        responses: GatewayResponses,
+    ) -> Arc<ApiContext> {
         Arc::new(ApiContext {
             kind,
             api_id: "abc".to_owned(),
             stage: None,
-            stage_variables: StageVariables::default(),
+            stage_variables: Arc::default(),
+            responses,
             enforcement,
             http: reqwest::Client::new(),
             aws: aws(),
@@ -391,7 +396,12 @@ mod tests {
             &IntegrationOverrides::default(),
         )
         .unwrap();
-        build(&model, &ctx(kind, enforcement), &base.parse().unwrap())
+        let responses = GatewayResponses::compile(kind, &model.gateway_responses);
+        build(
+            &model,
+            &ctx(kind, enforcement, responses),
+            &base.parse().unwrap(),
+        )
     }
 
     fn protected_doc() -> Value {
@@ -416,6 +426,53 @@ mod tests {
                 "/key-and-validated": {"get": op(json!({"security": [{"api_key": []}], "x-amazon-apigateway-request-validator": "all"}))}
             }
         })
+    }
+
+    #[tokio::test]
+    async fn customized_gateway_responses_apply_to_router_errors() {
+        let mut doc = protected_doc();
+        doc.as_object_mut().unwrap().insert("x-amazon-apigateway-gateway-responses".to_owned(), json!({
+            "MISSING_AUTHENTICATION_TOKEN": {
+                "statusCode": "404",
+                "responseTemplates": {"application/json": "{\"hint\": \"$context.error.message\", \"path\": \"$context.resourcePath\"}"}
+            },
+            "INVALID_API_KEY": {"statusCode": "401"}
+        }));
+        let (rest, _) = router_with(&doc, ApiKind::Rest, STRICT, "/prod");
+        assert_eq!(
+            call(&rest, Method::GET, "/prod/nope").await,
+            (
+                StatusCode::NOT_FOUND,
+                r#"{"hint": "Missing Authentication Token", "path": "/nope"}"#.to_owned()
+            )
+        );
+        assert_eq!(
+            call(&rest, Method::GET, "/outside").await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            call(&rest, Method::GET, "/prod/iam").await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            call(&rest, Method::GET, "/prod/key").await,
+            (
+                StatusCode::UNAUTHORIZED,
+                r#"{"message":"Forbidden"}"#.to_owned()
+            )
+        );
+        let (http, _) = router_with(&doc, ApiKind::Http, STRICT, "");
+        assert_eq!(
+            call(&http, Method::GET, "/nope").await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            call(&http, Method::GET, "/key").await,
+            (
+                StatusCode::FORBIDDEN,
+                r#"{"message":"Forbidden"}"#.to_owned()
+            )
+        );
     }
 
     #[tokio::test]
@@ -774,7 +831,8 @@ mod tests {
             kind: ApiKind::Rest,
             api_id: "abc".to_owned(),
             stage: Some("prod".to_owned()),
-            stage_variables: StageVariables::default(),
+            stage_variables: Arc::default(),
+            responses: GatewayResponses::default(),
             enforcement: STRICT,
             http: reqwest::Client::new(),
             aws,

@@ -5,7 +5,7 @@ export
 
 CARGO ?= cargo
 
-.PHONY: all build check clean fmt fmt-check lint test test-coverage test-mutants deny hooks image run help
+.PHONY: all build check clean fmt fmt-check lint test test-coverage test-mutants parity deny hooks image run help
 
 all: build
 
@@ -40,6 +40,10 @@ test-coverage: ## Generate an HTML coverage report (requires cargo-llvm-cov)
 
 test-mutants: ## Run mutation testing (requires cargo-mutants)
 	$(CARGO) mutants
+
+parity: ## Replay the recorded API Gateway fixtures against a local apigw build
+	$(CARGO) build -p apigw -p apigw-parity
+	./target/debug/apigw-parity replay
 
 deny: ## Check advisories, licenses, bans, and sources
 	$(CARGO) deny check

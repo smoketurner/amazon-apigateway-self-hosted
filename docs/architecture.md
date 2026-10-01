@@ -12,6 +12,7 @@ One crate, `crates/apigw`, building one binary.
 | `observability` | Access logs, per-minute EMF metrics, and execution logs: `StageObserver` records each request of a loaded stage; `Observability` owns the bounded per-destination queues and workers |
 | `pipeline` | Per-request execution in API Gateway's stage order (`Pipeline`), and `RequestContext`, the single owner of `$context` variables |
 | `gateway` | What every route of an API shares (`ApiContext`), enforcement of unevaluated protections, and API Gateway-shaped errors (`GatewayError`) |
+| `gateway_response` | Every error the gateway answers with (`Failure`), rendered through the API's customized REST gateway responses (status, `gatewayresponse.header.*`, `$context` templates, `DEFAULT_4XX`/`DEFAULT_5XX` fallback) or HTTP APIs' fixed messages |
 | `aws` | `AwsClients`: per-region Lambda clients, assumed integration-role credentials, Lambda endpoint overrides, trace header propagation |
 | `proxy` | `HTTP_PROXY` forwarding |
 | `lambda` | `AWS_PROXY` event construction (payload 1.0 and 2.0) and response mapping |
@@ -71,3 +72,13 @@ For every request the listener calls `TrustedProxies::identify` with the connect
 which attaches a `ClientIdentity` to the request's extensions and rewrites `X-Forwarded-For`
 and `X-Forwarded-Client-Cert` to match. `gateway::handle` reads the source IP from it, and
 integrations only ever see the rewritten headers.
+
+## Parity harness
+
+`crates/apigw-parity` is a dev tool, not part of the gateway. `replay` starts the `apigw`
+binary with `--openapi-file` pointing at a recorded export, `--base-path /<stage>`, the
+recorded stage variables, and an `--integration-overrides` file that moves every integration
+built from the `echo_host` stage variable to an in-process echo server over plain HTTP. It
+then sends the case requests over TLS and diffs the responses against fixtures recorded from
+real API Gateway. Everything it needs from `apigw` is public: the flags above and the admin
+`/healthz` endpoint. See [parity/README.md](../parity/README.md).

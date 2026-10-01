@@ -34,6 +34,8 @@ Management's
 | `AWS`/`HTTP` (non-proxy, VTL mapping templates), VPC links | Answer `501`; listed with the reason on `/routes` |
 | Unknown route | REST: `403 {"message":"Missing Authentication Token"}`; HTTP: `404 {"message":"Not Found"}` |
 
+The full feature matrix, with an issue link for every gap, is in [docs/parity.md](docs/parity.md).
+
 `/routes` on the admin listener lists, per route, its protections, any problems, and any
 imported settings not enforced yet, plus the API-wide settings not enforced yet.
 
@@ -178,10 +180,12 @@ are flushed every 5 seconds, when a batch is full, and at shutdown.
 | Doc | Covers |
 |---|---|
 | [docs/deployment.md](docs/deployment.md) | Container image, Kubernetes, Istio, certificates, credentials outside AWS |
+| [docs/parity.md](docs/parity.md) | Feature matrix: what is supported, partial, planned, or not possible, for REST and HTTP APIs |
 | [docs/architecture.md](docs/architecture.md) | Modules, request flow, the accept loop, router swapping |
 | [docs/crypto.md](docs/crypto.md) | aws-lc-rs as the only crypto provider |
 | [docs/ci-cd.md](docs/ci-cd.md) | CI jobs |
-| [reference/README.md](reference/README.md) | Terraform stack that deploys the reference APIs parity is measured against |
+| [terraform/README.md](terraform/README.md) | Terraform modules and the `dev` environment that deploys the reference APIs parity is measured against |
+| [parity/README.md](parity/README.md) | The parity runner: request cases, fixtures, `record` and `replay` |
 
 ## Development
 
@@ -189,6 +193,7 @@ are flushed every 5 seconds, when a batch is full, and at shutdown.
 make lint   # cargo clippy --workspace --all-targets --all-features -- -D warnings
 make test   # cargo test --workspace --all-features
 make deny   # cargo deny check
+make parity # replay the recorded API Gateway fixtures against a local build
 make image  # docker build -t apigw:local .
 ```
 
