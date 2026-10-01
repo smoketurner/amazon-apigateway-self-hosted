@@ -7,6 +7,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `reference/terraform/`: a Terraform stack that deploys REGIONAL REST and HTTP reference APIs
+  (plus an echo Lambda, authorizers, Cognito, service targets, and a GitHub OIDC role) to measure
+  parity against real API Gateway. See `reference/README.md`.
 - `ApiModel`: the export and `GetStage` are imported into one typed model covering
   integrations (all fields, `$ref` resolution), request parameters and bodies, validators,
   authorizers, models, gateway responses, binary media types, compression, API key source,
