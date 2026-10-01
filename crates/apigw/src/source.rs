@@ -1,13 +1,12 @@
 //! Downloads an API definition from API Gateway (or reads it from disk) and keeps
 //! a last-known-good copy so the gateway can start while AWS is unreachable.
 
-use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::spec::ApiKind;
+use crate::model::{ApiKind, DeploymentStamp, StageSettings};
 
 /// `apigateway` includes every API Gateway extension (integrations, request
 /// validators, resource policy, gateway responses, ...); `authorizers` adds the
@@ -21,16 +20,27 @@ pub(crate) enum Source {
     File { path: PathBuf, kind: ApiKind },
 }
 
-/// Everything needed to rebuild the routes, in a form that round-trips through
-/// the on-disk cache.
+/// Everything needed to rebuild the routes. The cache stores the raw export
+/// rather than the imported model, so importer improvements apply to cached
+/// configurations too.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Snapshot {
     pub(crate) kind: ApiKind,
     pub(crate) api_id: String,
     pub(crate) stage: Option<String>,
     #[serde(default)]
-    pub(crate) stage_variables: BTreeMap<String, String>,
+    pub(crate) stamp: DeploymentStamp,
+    #[serde(default)]
+    pub(crate) stage_settings: StageSettings,
     pub(crate) openapi: Value,
+}
+
+/// The result of checking the source for a newer configuration.
+#[derive(Debug)]
+pub(crate) enum Fetch {
+    /// The deployment is the one already loaded; nothing was downloaded.
+    Unchanged,
+    Changed(Box<Snapshot>),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -53,8 +63,34 @@ pub(crate) enum SourceError {
     Json(String, serde_json::Error),
 }
 
-fn aws_error(err: impl std::error::Error) -> SourceError {
-    SourceError::Aws(aws_sdk_apigateway::error::DisplayErrorContext(err).to_string())
+impl SourceError {
+    fn aws(err: impl std::error::Error) -> Self {
+        Self::Aws(aws_sdk_apigateway::error::DisplayErrorContext(err).to_string())
+    }
+}
+
+/// An `OpenAPI` export as returned by API Gateway or read from disk.
+struct Export(Value);
+
+impl Export {
+    fn parse(body: &[u8]) -> Result<Self, SourceError> {
+        if body.is_empty() {
+            return Err(SourceError::EmptyExport);
+        }
+        serde_json::from_slice(body)
+            .map(Self)
+            .map_err(|e| SourceError::Json("API Gateway export".to_owned(), e))
+    }
+
+    async fn read(path: &Path) -> Result<Value, SourceError> {
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|source| SourceError::Read {
+                path: path.to_owned(),
+                source,
+            })?;
+        serde_json::from_slice(&bytes).map_err(|e| SourceError::Json(path.display().to_string(), e))
+    }
 }
 
 pub(crate) struct Fetcher {
@@ -76,30 +112,52 @@ impl Fetcher {
         &self.source
     }
 
-    pub(crate) async fn fetch(&self) -> Result<Snapshot, SourceError> {
+    /// Checks the stage with the cheap `GetStage` call and downloads the export
+    /// only when the deployment differs from `current`. Control-plane calls
+    /// share a 10 req/s account limit, so replicas must not re-export on every
+    /// refresh.
+    pub(crate) async fn fetch(
+        &self,
+        current: Option<&DeploymentStamp>,
+    ) -> Result<Fetch, SourceError> {
         match self.source {
             Source::RestApi {
                 ref api_id,
                 ref stage,
-            } => self.fetch_rest(api_id, stage).await,
+            } => self.fetch_rest(api_id, stage, current).await,
             Source::HttpApi {
                 ref api_id,
                 ref stage,
-            } => self.fetch_http(api_id, stage).await,
-            Source::File { ref path, kind } => {
-                let openapi = read_json(path).await?;
-                Ok(Snapshot {
-                    kind,
-                    api_id: path.display().to_string(),
-                    stage: None,
-                    stage_variables: BTreeMap::new(),
-                    openapi,
-                })
-            }
+            } => self.fetch_http(api_id, stage, current).await,
+            Source::File { ref path, kind } => Ok(Fetch::Changed(Box::new(Snapshot {
+                kind,
+                api_id: path.display().to_string(),
+                stage: None,
+                stamp: DeploymentStamp::default(),
+                stage_settings: StageSettings::default(),
+                openapi: Export::read(path).await?,
+            }))),
         }
     }
 
-    async fn fetch_rest(&self, api_id: &str, stage: &str) -> Result<Snapshot, SourceError> {
+    async fn fetch_rest(
+        &self,
+        api_id: &str,
+        stage: &str,
+        current: Option<&DeploymentStamp>,
+    ) -> Result<Fetch, SourceError> {
+        let stage_info = self
+            .rest
+            .get_stage()
+            .rest_api_id(api_id)
+            .stage_name(stage)
+            .send()
+            .await
+            .map_err(SourceError::aws)?;
+        let stamp = DeploymentStamp::from(&stage_info);
+        if current.is_some_and(|current| current.is_same_deployment(&stamp)) {
+            return Ok(Fetch::Unchanged);
+        }
         let export = self
             .rest
             .get_export()
@@ -110,29 +168,38 @@ impl Fetcher {
             .parameters("extensions", REST_EXPORT_EXTENSIONS)
             .send()
             .await
-            .map_err(aws_error)?;
+            .map_err(SourceError::aws)?;
         let body = export.body.ok_or(SourceError::EmptyExport)?;
-        let openapi = parse_export(body.as_ref())?;
-        let stage_info = self
-            .rest
-            .get_stage()
-            .rest_api_id(api_id)
-            .stage_name(stage)
-            .send()
-            .await
-            .map_err(aws_error)?;
-        Ok(Snapshot {
+        Ok(Fetch::Changed(Box::new(Snapshot {
             kind: ApiKind::Rest,
             api_id: api_id.to_owned(),
             stage: Some(stage.to_owned()),
-            stage_variables: into_sorted(stage_info.variables),
-            openapi,
-        })
+            stamp,
+            stage_settings: StageSettings::from(&stage_info),
+            openapi: Export::parse(body.as_ref())?.0,
+        })))
     }
 
     /// Exports the stage's deployed configuration; without a stage, `ExportApi`
     /// would return the latest, possibly undeployed, configuration.
-    async fn fetch_http(&self, api_id: &str, stage: &str) -> Result<Snapshot, SourceError> {
+    async fn fetch_http(
+        &self,
+        api_id: &str,
+        stage: &str,
+        current: Option<&DeploymentStamp>,
+    ) -> Result<Fetch, SourceError> {
+        let stage_info = self
+            .http
+            .get_stage()
+            .api_id(api_id)
+            .stage_name(stage)
+            .send()
+            .await
+            .map_err(SourceError::aws)?;
+        let stamp = DeploymentStamp::from(&stage_info);
+        if current.is_some_and(|current| current.is_same_deployment(&stamp)) {
+            return Ok(Fetch::Unchanged);
+        }
         let export = self
             .http
             .export_api()
@@ -143,71 +210,55 @@ impl Fetcher {
             .stage_name(stage)
             .send()
             .await
-            .map_err(aws_error)?;
+            .map_err(SourceError::aws)?;
         let body = export.body.ok_or(SourceError::EmptyExport)?;
-        let openapi = parse_export(body.as_ref())?;
-        let stage_info = self
-            .http
-            .get_stage()
-            .api_id(api_id)
-            .stage_name(stage)
-            .send()
-            .await
-            .map_err(aws_error)?;
-        Ok(Snapshot {
+        Ok(Fetch::Changed(Box::new(Snapshot {
             kind: ApiKind::Http,
             api_id: api_id.to_owned(),
             stage: Some(stage.to_owned()),
-            stage_variables: into_sorted(stage_info.stage_variables),
-            openapi,
-        })
+            stamp,
+            stage_settings: StageSettings::from(&stage_info),
+            openapi: Export::parse(body.as_ref())?.0,
+        })))
     }
 }
 
-fn into_sorted(map: Option<HashMap<String, String>>) -> BTreeMap<String, String> {
-    map.map(|m| m.into_iter().collect()).unwrap_or_default()
-}
-
-fn parse_export(body: &[u8]) -> Result<Value, SourceError> {
-    if body.is_empty() {
-        return Err(SourceError::EmptyExport);
+impl Snapshot {
+    /// # Errors
+    ///
+    /// When the cache file can't be read or isn't a snapshot.
+    pub(crate) async fn load(path: &Path) -> Result<Self, SourceError> {
+        let value = Export::read(path).await?;
+        serde_json::from_value(value).map_err(|e| SourceError::Json(path.display().to_string(), e))
     }
-    serde_json::from_slice(body).map_err(|e| SourceError::Json("API Gateway export".to_owned(), e))
-}
 
-async fn read_json(path: &Path) -> Result<Value, SourceError> {
-    let bytes = tokio::fs::read(path)
-        .await
-        .map_err(|source| SourceError::Read {
+    /// Writes via a temporary file and rename so a crash never leaves a
+    /// truncated cache.
+    ///
+    /// # Errors
+    ///
+    /// When the file can't be written.
+    pub(crate) async fn store(&self, path: &Path) -> Result<(), SourceError> {
+        let write_err = |source| SourceError::Write {
             path: path.to_owned(),
             source,
-        })?;
-    serde_json::from_slice(&bytes).map_err(|e| SourceError::Json(path.display().to_string(), e))
-}
-
-pub(crate) async fn load_cache(path: &Path) -> Result<Snapshot, SourceError> {
-    let value = read_json(path).await?;
-    serde_json::from_value(value).map_err(|e| SourceError::Json(path.display().to_string(), e))
-}
-
-/// Writes via a temporary file and rename so a crash never leaves a truncated cache.
-pub(crate) async fn store_cache(path: &Path, snapshot: &Snapshot) -> Result<(), SourceError> {
-    let write_err = |source| SourceError::Write {
-        path: path.to_owned(),
-        source,
-    };
-    let bytes = serde_json::to_vec_pretty(snapshot)
-        .map_err(|e| SourceError::Json(path.display().to_string(), e))?;
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-    tokio::fs::write(&tmp, bytes).await.map_err(write_err)?;
-    tokio::fs::rename(&tmp, path).await.map_err(write_err)
+        };
+        let bytes = serde_json::to_vec_pretty(self)
+            .map_err(|e| SourceError::Json(path.display().to_string(), e))?;
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+        tokio::fs::write(&tmp, bytes).await.map_err(write_err)?;
+        tokio::fs::rename(&tmp, path).await.map_err(write_err)
+    }
 }
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests assert on known-good fixtures")]
+#[expect(clippy::panic, reason = "tests fail loudly on unexpected variants")]
 mod tests {
+    use std::collections::BTreeMap;
+
     use serde_json::json;
 
     use super::*;
@@ -216,18 +267,43 @@ mod tests {
         std::env::temp_dir().join(format!("apigw-{}-{name}", uuid::Uuid::now_v7()))
     }
 
-    #[tokio::test]
-    async fn cache_round_trips() {
-        let path = scratch("cache.json");
-        let snapshot = Snapshot {
+    fn snapshot() -> Snapshot {
+        Snapshot {
             kind: ApiKind::Rest,
             api_id: "abc123".to_owned(),
             stage: Some("prod".to_owned()),
-            stage_variables: BTreeMap::from([("k".to_owned(), "v".to_owned())]),
+            stamp: DeploymentStamp {
+                deployment_id: Some("d1".to_owned()),
+                last_updated_epoch_ms: Some(1),
+            },
+            stage_settings: StageSettings {
+                variables: BTreeMap::from([("k".to_owned(), "v".to_owned())]),
+                ..StageSettings::default()
+            },
             openapi: json!({"paths": {}}),
-        };
-        store_cache(&path, &snapshot).await.unwrap();
-        assert_eq!(load_cache(&path).await.unwrap(), snapshot);
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_round_trips() {
+        let path = scratch("cache.json");
+        snapshot().store(&path).await.unwrap();
+        assert_eq!(Snapshot::load(&path).await.unwrap(), snapshot());
+        tokio::fs::remove_file(&path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn caches_without_stage_fields_still_load() {
+        let path = scratch("old.json");
+        tokio::fs::write(
+            &path,
+            br#"{"kind":"http","api_id":"a","stage":null,"openapi":{}}"#,
+        )
+        .await
+        .unwrap();
+        let loaded = Snapshot::load(&path).await.unwrap();
+        assert_eq!(loaded.stamp, DeploymentStamp::default());
+        assert_eq!(loaded.stage_settings, StageSettings::default());
         tokio::fs::remove_file(&path).await.unwrap();
     }
 
@@ -235,52 +311,45 @@ mod tests {
     async fn missing_and_corrupt_caches_are_errors() {
         let path = scratch("missing.json");
         assert!(matches!(
-            load_cache(&path).await,
+            Snapshot::load(&path).await,
             Err(SourceError::Read { .. })
         ));
         tokio::fs::write(&path, b"{not json").await.unwrap();
         assert!(matches!(
-            load_cache(&path).await,
+            Snapshot::load(&path).await,
             Err(SourceError::Json(..))
         ));
         tokio::fs::write(&path, b"{\"kind\": \"rest\"}")
             .await
             .unwrap();
         assert!(matches!(
-            load_cache(&path).await,
+            Snapshot::load(&path).await,
             Err(SourceError::Json(..))
         ));
         tokio::fs::remove_file(&path).await.unwrap();
     }
 
     #[tokio::test]
-    async fn store_cache_reports_unwritable_paths() {
+    async fn store_reports_unwritable_paths() {
         let path = scratch("no-such-dir").join("cache.json");
-        let snapshot = Snapshot {
-            kind: ApiKind::Http,
-            api_id: "x".to_owned(),
-            stage: None,
-            stage_variables: BTreeMap::new(),
-            openapi: json!({}),
-        };
         assert!(matches!(
-            store_cache(&path, &snapshot).await,
+            snapshot().store(&path).await,
             Err(SourceError::Write { .. })
         ));
     }
 
     #[test]
-    fn parse_export_rejects_empty_and_invalid_bodies() {
-        assert!(matches!(parse_export(b""), Err(SourceError::EmptyExport)));
+    fn exports_reject_empty_and_invalid_bodies() {
+        assert!(matches!(Export::parse(b""), Err(SourceError::EmptyExport)));
         assert!(matches!(
-            parse_export(b"openapi: 3.0.1"),
+            Export::parse(b"openapi: 3.0.1"),
             Err(SourceError::Json(..))
         ));
-        assert_eq!(parse_export(b"{\"a\":1}").unwrap(), json!({"a": 1}));
+        assert_eq!(Export::parse(b"{\"a\":1}").unwrap().0, json!({"a": 1}));
     }
 
     #[tokio::test]
-    async fn file_source_reads_document() {
+    async fn file_source_reads_document_every_time() {
         let path = scratch("api.json");
         tokio::fs::write(&path, b"{\"paths\":{}}").await.unwrap();
         let config = aws_config::SdkConfig::builder()
@@ -293,7 +362,13 @@ mod tests {
             },
             &config,
         );
-        let snapshot = fetcher.fetch().await.unwrap();
+        let Fetch::Changed(snapshot) = fetcher
+            .fetch(Some(&DeploymentStamp::default()))
+            .await
+            .unwrap()
+        else {
+            panic!("a file source always re-reads");
+        };
         assert_eq!(snapshot.kind, ApiKind::Http);
         assert_eq!(snapshot.openapi, json!({"paths": {}}));
         tokio::fs::remove_file(&path).await.unwrap();

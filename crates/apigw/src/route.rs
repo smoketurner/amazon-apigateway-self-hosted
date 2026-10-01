@@ -1,0 +1,32 @@
+//! A route compiled from the model: what the router matches and the gateway
+//! executes.
+
+use crate::integration::{Integration, StageVariables};
+use crate::model::{ApiKind, Feature, MethodMatch, Operation, Protections, RouteKey, RoutePath};
+
+#[derive(Debug, Clone)]
+pub(crate) struct Route {
+    pub(crate) method: MethodMatch,
+    pub(crate) path: RoutePath,
+    pub(crate) key: RouteKey,
+    pub(crate) integration: Integration,
+    pub(crate) protections: Protections,
+    pub(crate) unenforced: Vec<Feature>,
+}
+
+impl Route {
+    pub(crate) fn compile(
+        operation: &Operation,
+        kind: ApiKind,
+        variables: &StageVariables,
+    ) -> Self {
+        Self {
+            method: operation.method.clone(),
+            path: operation.path.clone(),
+            key: operation.route_key.clone(),
+            integration: Integration::compile(operation.integration.as_ref(), kind, variables),
+            protections: operation.protections.clone(),
+            unenforced: operation.unenforced(kind),
+        }
+    }
+}
