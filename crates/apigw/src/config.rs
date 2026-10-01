@@ -11,6 +11,7 @@ use crate::gateway::{AuthorizationMode, Enforcement, Unsupported};
 use crate::identity::{TrustedProxies, TrustedProxy};
 use crate::listener::{Edge, ProxyProtocol};
 use crate::model::ApiKind;
+use crate::observability::{Delivery, LogGroup, MetricsNamespace, StreamName};
 use crate::router::BasePath;
 use crate::source::Source;
 
@@ -143,6 +144,32 @@ pub(crate) struct Config {
 
     #[arg(long, env = "APIGW_LOG_FORMAT", value_enum, default_value_t = LogFormat::Json)]
     pub(crate) log_format: LogFormat,
+
+    /// Where access logs go: `aws` writes to the destination in the stage's
+    /// access log settings (CloudWatch Logs or Firehose, standard output when
+    /// the stage names none), `stdout` writes lines to standard output without
+    /// calling AWS, `off` writes none.
+    #[arg(long, env = "APIGW_ACCESS_LOGS", value_enum, default_value_t = Delivery::Aws)]
+    pub(crate) access_logs: Delivery,
+
+    /// Where execution logs (`loggingLevel`, `dataTraceEnabled`) go: `aws` writes
+    /// to the stage's `API-Gateway-Execution-Logs_{apiId}/{stage}` log group.
+    #[arg(long, env = "APIGW_EXECUTION_LOGS", value_enum, default_value_t = Delivery::Aws)]
+    pub(crate) execution_logs: Delivery,
+
+    /// CloudWatch Logs log group that receives metrics as embedded metric
+    /// format events. Metrics are not published when unset. The group must exist.
+    #[arg(long, env = "APIGW_METRICS_LOG_GROUP")]
+    pub(crate) metrics_log_group: Option<String>,
+
+    /// CloudWatch namespace for published metrics; `AWS/` namespaces are reserved.
+    #[arg(long, env = "APIGW_METRICS_NAMESPACE", default_value_t = MetricsNamespace::default(), value_parser = clap::value_parser!(MetricsNamespace))]
+    pub(crate) metrics_namespace: MetricsNamespace,
+
+    /// Log stream this process writes to in each CloudWatch Logs log group.
+    /// Defaults to `{HOSTNAME}/{start time}/{random suffix}`, unique per process.
+    #[arg(long, env = "APIGW_LOG_STREAM")]
+    pub(crate) log_stream: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -192,6 +219,27 @@ impl Config {
             },
             resource_policy: self.unsupported_resource_policy,
             request_validation: self.unsupported_validation,
+        }
+    }
+
+    /// What to deliver to CloudWatch and how. `hostname` names the pod in the
+    /// default log stream name.
+    pub(crate) fn observability(&self, hostname: Option<&str>) -> crate::observability::Settings {
+        crate::observability::Settings {
+            access_logs: self.access_logs,
+            execution_logs: self.execution_logs,
+            metrics: self.metrics_log_group.as_deref().map(|group| {
+                crate::observability::MetricsSettings {
+                    group: LogGroup::new(group),
+                    namespace: self.metrics_namespace.clone(),
+                }
+            }),
+            stream: StreamName::for_pod(
+                self.log_stream.as_deref(),
+                hostname,
+                jiff::Timestamp::now(),
+                uuid::Uuid::now_v7(),
+            ),
         }
     }
 
