@@ -7,6 +7,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `docs/parity.md`, a feature matrix of what `apigw` supports, partially supports, plans (with issue
+  links), or cannot do, for REST and HTTP APIs.
 - Requests run through an explicit `Pipeline` in API Gateway's stage order, carrying a
   `RequestContext` that owns the `$context` variables used by events and, later, templates,
   gateway responses, and access logs.

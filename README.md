@@ -34,6 +34,8 @@ Management's
 | `AWS`/`HTTP` (non-proxy, VTL mapping templates), VPC links | Answer `501`; listed with the reason on `/routes` |
 | Unknown route | REST: `403 {"message":"Missing Authentication Token"}`; HTTP: `404 {"message":"Not Found"}` |
 
+The full feature matrix, with an issue link for every gap, is in [docs/parity.md](docs/parity.md).
+
 `/routes` on the admin listener lists, per route, its protections, any problems, and any
 imported settings not enforced yet, plus the API-wide settings not enforced yet.
 
@@ -128,6 +130,7 @@ previous routes keep serving), so a typo never goes unnoticed.
 | Doc | Covers |
 |---|---|
 | [docs/deployment.md](docs/deployment.md) | Container image, Kubernetes, Istio, certificates, credentials outside AWS |
+| [docs/parity.md](docs/parity.md) | Feature matrix: what is supported, partial, planned, or not possible, for REST and HTTP APIs |
 | [docs/architecture.md](docs/architecture.md) | Modules, request flow, the accept loop, router swapping |
 | [docs/crypto.md](docs/crypto.md) | aws-lc-rs as the only crypto provider |
 | [docs/ci-cd.md](docs/ci-cd.md) | CI jobs |
