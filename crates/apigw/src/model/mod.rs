@@ -18,8 +18,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[cfg(test)]
-pub(crate) use stage::{AccessLogSettings, CanarySettings, MethodSettings, SettingsScope};
-pub(crate) use stage::{DeploymentStamp, ExecutionLogging, LoggingLevel, StageSettings};
+pub(crate) use stage::{AccessLogSettings, SettingsScope};
+pub(crate) use stage::{
+    CanarySettings, DeploymentStamp, ExecutionLogging, LoggingLevel, MethodSettings, StageSettings,
+};
 
 /// Which API Gateway product the definition came from. The two differ in Lambda
 /// payload defaults, error bodies, and response headers.
@@ -345,9 +347,6 @@ impl IntegrationSpec {
         if self.content_handling.is_some() && converts {
             features.push(Feature::ContentHandling);
         }
-        if !self.cache_key_parameters.is_empty() {
-            features.push(Feature::ResponseCaching);
-        }
         features
     }
 }
@@ -533,7 +532,12 @@ pub(crate) struct ApiModel {
 impl ApiModel {
     /// API- and stage-level settings imported but not enforced yet.
     pub(crate) fn unenforced(&self) -> Vec<Feature> {
-        self.stage.unenforced()
+        let features: BTreeSet<Feature> = self
+            .operations
+            .iter()
+            .flat_map(Operation::unenforced)
+            .collect();
+        features.into_iter().collect()
     }
 }
 
@@ -543,14 +547,12 @@ impl ApiModel {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Feature {
     ContentHandling,
-    ResponseCaching,
 }
 
 impl fmt::Display for Feature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
             Self::ContentHandling => "content handling",
-            Self::ResponseCaching => "response caching",
         };
         f.write_str(name)
     }

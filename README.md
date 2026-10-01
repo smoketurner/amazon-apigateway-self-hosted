@@ -186,7 +186,33 @@ a second stage of the same API (for example with `create-deployment --stage-name
 and pass `--canary-export-stage canary-shadow`: that stage's export builds the canary release
 whenever either stage's deployment changes, and its own stage variables and settings are ignored.
 `/routes` reports the canary release, its routes, and where its structure came from. `useStageCache`
-is recorded and applied when response caching lands ([#38](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/38)).
+applies to [response caching](#response-caching): a canary uses the stage cache only with it,
+and shares entries with production only when it runs the same deployment.
+
+## Response caching
+
+A REST stage with `cacheClusterEnabled` caches responses in the state backend (per replica, in
+memory, until a shared backend is configured), so no cache cluster is provisioned or billed.
+
+- **Which methods:** those whose method settings enable caching. As on API Gateway, the stage-wide
+  `*/*` setting enables `GET` methods only; other methods need their own setting.
+- **TTL:** the method setting's `cacheTtlInSeconds` (default 300, at most 3600; 0 turns caching off).
+- **Key:** the method plus the values of the integration's `cacheKeyParameters` (method request
+  headers, query string parameters, and path parameters, or integration request parameters mapped
+  from them); an absent value is its own entry, and parameters that are not in the key do not
+  separate entries. A method with no key parameters has one entry.
+- **What is cached:** successful (2xx) responses of at most 1,048,576 bytes (status, headers, and
+  body); the response is read before it is sent, so a cached route does not stream its first
+  megabyte.
+- **`Cache-Control: max-age=0`:** with `requireAuthorizationForCacheControl` (the default) the
+  client must be authorized to invalidate, which needs IAM verification this gateway cannot do, so
+  every such request is handled as unauthorized: `FAIL_WITH_403` answers `403`,
+  `SUCCEED_WITH_RESPONSE_HEADER` (the default) serves the request normally with the header
+  `Warning: 199 Cache-control headers were ignored because the caller was unauthorized.`, and
+  `SUCCEED_WITHOUT_RESPONSE_HEADER` serves it silently. With `requireAuthorizationForCacheControl`
+  off, any client's `max-age=0` request bypasses the cache and replaces the entry.
+- **Metrics:** `CacheHitCount` and `CacheMissCount` are published for requests that used the
+  cache ([Observability](#observability)).
 
 ## Observability
 

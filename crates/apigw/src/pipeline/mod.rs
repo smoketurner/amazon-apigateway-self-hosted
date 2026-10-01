@@ -20,6 +20,7 @@ use axum::response::{IntoResponse as _, Response};
 pub(crate) use context::RequestContext;
 
 use crate::authz::{AuthRequest, Denial};
+use crate::cache::CacheOutcome;
 use crate::cors::Cors;
 use crate::gateway::{ApiContext, GatewayError, MAX_BODY_BYTES};
 use crate::gateway_response::Failure;
@@ -106,19 +107,56 @@ impl<'a> Pipeline<'a> {
         if let Err(error) = self.decode_request(ctx) {
             return self.fail(ctx, &error.failure(self.api.kind));
         }
+        let plan = match self.route.cache.as_ref().map(|cache| cache.plan(ctx)) {
+            Some(Ok(plan)) => plan,
+            Some(Err(failure)) => return self.fail(ctx, &failure),
+            None => None,
+        };
+        if let Some(ref plan) = plan
+            && let Some(hit) = plan.lookup(&self.api.state).await
+        {
+            return self.encode(ctx, hit).await;
+        }
         let started = Instant::now();
         let result = self.integrate(ctx).await;
         let timing = IntegrationTiming(started.elapsed());
-        let result = match result {
-            Ok(response) => self.encode_response(ctx, response).await,
-            Err(error) => Err(error),
-        };
+        let succeeded = result.is_ok();
         let mut response = match result {
             Ok(response) => response,
             Err(error) => self.fail(ctx, &error.failure(self.api.kind)),
         };
         response.extensions_mut().insert(timing);
-        response
+        let response = match plan {
+            Some(plan) if succeeded => match plan.store(&self.api.state, response).await {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::warn!(%error, "the integration response failed while being read");
+                    return self.fail(
+                        ctx,
+                        &GatewayError::IntegrationFailure.failure(self.api.kind),
+                    );
+                }
+            },
+            Some(plan) => {
+                plan.finish(&mut response, CacheOutcome::Miss);
+                response
+            }
+            None => response,
+        };
+        if succeeded {
+            self.encode(ctx, response).await
+        } else {
+            response
+        }
+    }
+
+    /// Compresses an integration response for this client, or answers with the
+    /// gateway error when that fails.
+    async fn encode(&self, ctx: &RequestContext, response: Response) -> Response {
+        match self.encode_response(ctx, response).await {
+            Ok(response) => response,
+            Err(error) => self.fail(ctx, &error.failure(self.api.kind)),
+        }
     }
 
     /// REST APIs decompress `gzip` and `deflate` request bodies before the

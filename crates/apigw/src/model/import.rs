@@ -492,8 +492,8 @@ mod tests {
     use serde_json::json;
 
     use super::super::{
-        ConnectionType, ContentHandling, IntegrationType, ParameterLocation, PassthroughBehavior,
-        PayloadVersion, ResponseTransferMode,
+        ConnectionType, ContentHandling, Feature, IntegrationType, ParameterLocation,
+        PassthroughBehavior, PayloadVersion, ResponseTransferMode,
     };
     use super::*;
 
@@ -566,7 +566,7 @@ mod tests {
         );
         assert!(model.models.contains_key("Pet"));
         assert_eq!(model.authorizers.len(), 2);
-        assert!(model.unenforced().is_empty());
+        assert_eq!(model.unenforced(), vec![Feature::ContentHandling]);
 
         let ops = by_path(&model);
         let pets = ops["/pets"];

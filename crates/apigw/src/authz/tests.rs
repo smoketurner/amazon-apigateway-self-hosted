@@ -19,6 +19,7 @@ use tower::ServiceExt as _;
 
 use crate::authz::KeyStore;
 use crate::aws::{AwsClients, CredentialsMode, LambdaEndpoints};
+use crate::cache::CacheScope;
 use crate::gateway::{ApiContext, AuthorizationMode, Enforcement, Unsupported};
 use crate::gateway_response::GatewayResponses;
 use crate::identity::TrustedProxies;
@@ -236,6 +237,7 @@ impl Harness {
             observer: StageObserver::disabled(),
             release: None,
             payload: Arc::default(),
+            cache: CacheScope::Off,
             http: reqwest::Client::new(),
             aws,
             keys: Arc::new(keys),

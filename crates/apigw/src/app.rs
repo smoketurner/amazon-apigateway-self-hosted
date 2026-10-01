@@ -18,6 +18,7 @@ use crate::authz::KeyStore;
 use crate::aws::AwsClients;
 #[cfg(test)]
 use crate::aws::{CredentialsMode, LambdaEndpoints};
+use crate::cache::CacheScope;
 use crate::canary::{CanaryRelease, CanaryStructure, CanarySummary, Release, TrafficShare};
 use crate::config::Config;
 use crate::cors::Cors;
@@ -154,6 +155,12 @@ impl Builder {
                 &model.settings.binary_media_types,
                 model.settings.minimum_compression_size,
             )),
+            cache: CacheScope::of(
+                model.stage.cache_cluster_enabled,
+                release,
+                snapshot.stage_settings.canary.as_ref(),
+                snapshot.stamp.deployment_id.as_deref(),
+            ),
         });
         let (router, routes) = router::build(&model, &ctx, &self.base_path);
         Ok(BuiltRelease {
@@ -788,15 +795,15 @@ mod tests {
     #[tokio::test]
     async fn unenforced_features_are_summarized() {
         let mut snapshot = snapshot();
-        snapshot.openapi = json!({"paths": {}});
-        snapshot.stage_settings.cache_cluster_enabled = true;
+        snapshot.openapi = json!({"paths": {"/x": {"get": {"x-amazon-apigateway-integration": {
+            "type": "mock", "contentHandling": "CONVERT_TO_TEXT"}}}}});
         let inputs = Inputs {
             snapshot,
             overrides: IntegrationOverrides::default(),
         };
         let loaded = builder(None).build(&inputs).unwrap();
         let rendered = serde_json::to_value(&loaded.summary).unwrap();
-        assert_eq!(rendered["unenforced"], json!(["response_caching"]));
+        assert_eq!(rendered["unenforced"], json!(["content_handling"]));
     }
 
     #[tokio::test]

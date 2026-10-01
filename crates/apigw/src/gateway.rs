@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::authz::KeyStore;
 use crate::aws::AwsClients;
+use crate::cache::CacheScope;
 use crate::canary::Release;
 use crate::cors::Cors;
 use crate::gateway_response::{Failure, GatewayResponses};
@@ -163,6 +164,8 @@ pub(crate) struct ApiContext {
     pub(crate) release: Option<Release>,
     /// Binary media types and compression settings.
     pub(crate) payload: Arc<PayloadSettings>,
+    /// Whether this release caches responses, and where.
+    pub(crate) cache: CacheScope,
 }
 
 impl ApiContext {
