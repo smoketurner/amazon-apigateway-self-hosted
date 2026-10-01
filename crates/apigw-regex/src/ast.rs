@@ -208,14 +208,14 @@ pub(crate) enum Node {
     /// A back reference to group `n`, or to a group that does not exist (which never matches).
     BackReference(BackReference),
     /// A sequence of nodes.
-    Concat(Vec<Node>),
+    Concat(Vec<Self>),
     /// Alternatives separated by `|`.
-    Alternate(Vec<Node>),
+    Alternate(Vec<Self>),
     /// A group around a node.
-    Group(GroupKind, Box<Node>),
+    Group(GroupKind, Box<Self>),
     /// A quantified node.
     Repeat {
-        node: Box<Node>,
+        node: Box<Self>,
         min: u32,
         max: Option<u32>,
         greed: Greed,

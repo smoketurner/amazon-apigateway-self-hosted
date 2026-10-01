@@ -471,7 +471,7 @@ impl ApiModel {
             settings: document.settings(),
             authorizers: document.authorizers(),
             gateway_responses: document.gateway_responses.clone(),
-            models: document.components.schemas.clone(),
+            models: document.components.schemas,
             stage,
         })
     }

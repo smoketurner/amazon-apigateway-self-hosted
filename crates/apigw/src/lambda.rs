@@ -555,7 +555,7 @@ mod tests {
         assert_eq!(response.headers()["x-num"], "2");
         assert_eq!(response.headers().get_all("x-many").iter().count(), 2);
         assert_eq!(response.headers()["set-cookie"], "c=1");
-        assert_eq!(&body_of(response).await[..], b"hi");
+        assert_eq!(&*body_of(response).await, b"hi");
     }
 
     #[tokio::test]
@@ -564,7 +564,7 @@ mod tests {
             ProxyResponse::into_http(br#"{"hello":"world"}"#, PayloadVersion::V2).unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["content-type"], "application/json");
-        assert_eq!(&body_of(response).await[..], br#"{"hello":"world"}"#);
+        assert_eq!(&*body_of(response).await, br#"{"hello":"world"}"#);
     }
 
     #[test]

@@ -55,13 +55,13 @@ struct Shared {
 
 impl Shared {
     fn reply_for(&self, target: &str) -> Reply {
-        if let Some(reply) = self
+        let queued = self
             .once
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get_mut(target)
-            .and_then(VecDeque::pop_front)
-        {
+            .and_then(VecDeque::pop_front);
+        if let Some(reply) = queued {
             return reply;
         }
         if let Some(reply) = self

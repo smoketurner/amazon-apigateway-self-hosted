@@ -183,6 +183,7 @@ impl Record {
 )]
 mod tests {
     use super::*;
+    use crate::echo::EchoServer;
     use crate::fixture::{Observation, Observed};
 
     fn fixture(status: u16) -> Fixture {
@@ -245,7 +246,7 @@ mod tests {
 
     #[tokio::test]
     async fn records_fixtures_and_exports_from_a_live_endpoint() {
-        let echo = crate::echo::EchoServer::start().await.unwrap();
+        let echo = EchoServer::start().await.unwrap();
         let dir =
             std::env::temp_dir().join(format!("apigw-parity-record-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(dir.join("cases")).unwrap();

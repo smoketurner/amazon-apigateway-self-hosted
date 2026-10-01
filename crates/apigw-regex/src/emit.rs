@@ -21,9 +21,9 @@ const LINE_END: &str = r"(?:\z|(?=[\r\x{85}\x{2028}\x{2029}])|(?<!\r)(?=\n))";
 const LINE_END_UNIX: &str = r"(?:\z|(?=\n))";
 const LINE_BREAK: &str = r"(?:\r\n|[\n\x{B}\x{C}\r\x{85}\x{2028}\x{2029}])";
 const ASCII_WORD_BOUNDARY: &str =
-    r"(?:(?<=[a-zA-Z0-9_])(?![a-zA-Z0-9_])|(?<![a-zA-Z0-9_])(?=[a-zA-Z0-9_]))";
+    "(?:(?<=[a-zA-Z0-9_])(?![a-zA-Z0-9_])|(?<![a-zA-Z0-9_])(?=[a-zA-Z0-9_]))";
 const ASCII_NOT_WORD_BOUNDARY: &str =
-    r"(?:(?<=[a-zA-Z0-9_])(?=[a-zA-Z0-9_])|(?<![a-zA-Z0-9_])(?![a-zA-Z0-9_]))";
+    "(?:(?<=[a-zA-Z0-9_])(?=[a-zA-Z0-9_])|(?<![a-zA-Z0-9_])(?![a-zA-Z0-9_]))";
 const NEVER_MATCHES: &str = "(?!)";
 
 /// Writes the translation of a parsed pattern.

@@ -232,9 +232,10 @@ mod tests {
     use crate::integration::Integration;
     use crate::model::{ApiKind, MethodMatch, Protections, RouteKey};
     use crate::pipeline::context::QueryString;
+    use crate::pipeline::context::tests::request;
 
     fn incoming(params: &[(&str, &str)], query: Option<&str>) -> RequestContext {
-        let mut ctx = crate::pipeline::context::tests::request(ApiKind::Rest);
+        let mut ctx = request(ApiKind::Rest);
         ctx.headers
             .insert("x-tenant", HeaderValue::from_static("acme"));
         ctx.method = Method::GET;

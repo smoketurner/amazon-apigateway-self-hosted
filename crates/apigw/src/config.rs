@@ -11,7 +11,9 @@ use crate::gateway::{AuthorizationMode, Enforcement, Unsupported};
 use crate::identity::{TrustedProxies, TrustedProxy};
 use crate::listener::{Edge, ProxyProtocol};
 use crate::model::ApiKind;
-use crate::observability::{Delivery, LogGroup, MetricsNamespace, StreamName};
+use crate::observability::{
+    Delivery, LogGroup, MetricsNamespace, MetricsSettings, Settings, StreamName,
+};
 use crate::router::BasePath;
 use crate::source::Source;
 
@@ -232,16 +234,17 @@ impl Config {
 
     /// What to deliver to CloudWatch and how. `hostname` names the pod in the
     /// default log stream name.
-    pub(crate) fn observability(&self, hostname: Option<&str>) -> crate::observability::Settings {
-        crate::observability::Settings {
+    pub(crate) fn observability(&self, hostname: Option<&str>) -> Settings {
+        Settings {
             access_logs: self.access_logs,
             execution_logs: self.execution_logs,
-            metrics: self.metrics_log_group.as_deref().map(|group| {
-                crate::observability::MetricsSettings {
+            metrics: self
+                .metrics_log_group
+                .as_deref()
+                .map(|group| MetricsSettings {
                     group: LogGroup::new(group),
                     namespace: self.metrics_namespace.clone(),
-                }
-            }),
+                }),
             stream: StreamName::for_pod(
                 self.log_stream.as_deref(),
                 hostname,
@@ -303,7 +306,7 @@ mod tests {
     const TLS: [&str; 4] = ["--tls-cert", "c.pem", "--tls-key", "k.pem"];
 
     fn parse(args: &[&str]) -> Result<Config, clap::Error> {
-        Config::try_parse_from(["apigw"].iter().chain(args).chain(TLS.iter()))
+        Config::try_parse_from(std::iter::once(&"apigw").chain(args).chain(TLS.iter()))
     }
 
     #[test]
