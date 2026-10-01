@@ -14,6 +14,16 @@ All notable changes to this project are documented here. The format follows
   and `responseOverride`. REST `requestParameters` also read `method.request.body` (and JSON paths
   into it) and the `multivalue` query string and header forms. A selected status that the method
   does not declare, or no matching response, answers `500`.
+- REST binary media types: Lambda proxy events carry a request body as base64 when its
+  `Content-Type` matches `binaryMediaTypes` (exact, `type/*`, `*/*`) and as text otherwise, and a
+  function's base64 response is decoded only when the client's first `Accept` media type matches
+  (the response `Content-Type` when there is no `Accept`). `contentHandling` is no longer reported
+  for proxy integrations, where it has no effect.
+- REST payload compression: with `minimumCompressionSize`, buffered responses at least that large
+  are compressed for clients accepting `gzip` or `deflate` (the highest-weighted coding must be one
+  API Gateway supports), and `gzip`/`deflate` request bodies are decompressed before the
+  integration sees them. Adds the `flate2` dependency (pure Rust backend).
+
 - `crates/apigw-vtl`: an Apache Velocity 1.7 engine for mapping templates. It parses and renders
   references, `#set`, `#if`/`#elseif`/`#else`, `#foreach` (1,000-iteration cap, `$foreach.*`,
   `$velocityCount`), `#break`, `#stop`, comments, escaping, and Velocity's whitespace gobbling,
@@ -23,6 +33,12 @@ All notable changes to this project are documented here. The format follows
   provided, with Jayway JsonPath semantics for paths. Output size, evaluation steps, and nesting
   are bounded and reported as typed errors. Its tests replay about 960 templates rendered by
   Apache Velocity 1.7 and Jayway JsonPath 2.9, and a cargo-fuzz target lives in `fuzz/`.
+- `tools/vtl-oracle`: a Docker-run Java oracle (Apache Velocity 1.7, Jayway JsonPath 2.9, pinned
+  by digest and checksum) with a committed corpus of about 9,500 templates and their expected
+  output. `apigw-vtl`'s `oracle` test replays it, and `.github/workflows/vtl-oracle.yml` re-renders
+  it weekly, replays fresh random templates, and fuzzes the template, JSON path, and regex
+  parsers.
+
 - Resource policies are evaluated as API Gateway evaluates them: an explicit `Deny` ends the request
   before authentication, then the policy is combined with the authorizer's decision per the
   authorization-flow tables (no authorizer, Lambda authorizer, Cognito user pool). `aws:SourceIp`
@@ -123,6 +139,16 @@ All notable changes to this project are documented here. The format follows
   and `requestContext.identity.clientCert` and `requestContext.authentication.clientCert` in
   Lambda events, carry `clientCertPem`, `subjectDN`, `issuerDN`, `serialNumber`, and `validity`;
   a certificate reported by a trusted proxy in `X-Forwarded-Client-Cert` is described the same way.
+- Response caching: REST stages with `cacheClusterEnabled` cache responses of methods whose method
+  settings enable caching (`GET` methods through the stage-wide setting, other methods only through
+  their own), for the method's TTL (default 300 s, at most 3600 s, 0 off), in the state backend. Entries
+  are keyed by the method and the integration's `cacheKeyParameters` values, and responses over
+  1,048,576 bytes are not cached. `Cache-Control: max-age=0` follows
+  `requireAuthorizationForCacheControl` (default true) and
+  `unauthorizedCacheControlHeaderStrategy`; since this gateway cannot verify the IAM permission to
+  invalidate, every such request counts as unauthorized when authorization is required.
+  `CacheHitCount` and `CacheMissCount` are published with the other metrics. A canary release uses
+  the stage cache only with `useStageCache`, sharing entries only when it runs the same deployment.
 - Log delivery uses bounded queues that drop (and count) events instead of slowing requests,
   and flushes everything on shutdown.
 - REST gateway responses: every error the gateway generates (missing authentication token,

@@ -1,0 +1,85 @@
+name: VTL oracle
+
+# Weekly: re-render the committed corpus with Apache Velocity 1.7 in a pinned JDK image and fail
+# if the stored expectations drifted, replay fresh random templates against both engines, and
+# fuzz the template, JSON path, and regex parsers for a bounded time. A failure means a
+# divergence between this engine and Velocity (or a crash) that needs a look. Nothing here
+# talks to AWS.
+
+on:
+  schedule:
+    - cron: "41 4 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_WARNINGS: deny
+
+jobs:
+  oracle:
+    name: Replay against Velocity
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake clang
+      - name: Setup Rust toolchain
+        run: rustup show
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: "v1"
+          shared-key: "vtl-oracle-${{ runner.os }}"
+          save-if: "false"
+          cache-on-failure: true
+      - name: Regenerate the committed corpus
+        run: |
+          python3 tools/vtl-oracle/generate.py operators-arithmetic > tools/vtl-oracle/cases/operators-arithmetic.json
+          python3 tools/vtl-oracle/generate.py operators-comparison > tools/vtl-oracle/cases/operators-comparison.json
+          python3 tools/vtl-oracle/generate.py whitespace > tools/vtl-oracle/cases/whitespace.json
+          python3 tools/vtl-oracle/generate.py random 1 1500 > tools/vtl-oracle/cases/random.json
+          tools/vtl-oracle/run.sh
+      - name: Fail if the committed expectations drifted
+        run: git diff --exit-code -- tools/vtl-oracle/cases
+      - name: Replay the committed corpus
+        run: cargo test --locked -p apigw-vtl --test oracle
+      - name: Replay fresh random templates
+        env:
+          SEED: ${{ github.run_number }}
+        run: |
+          python3 tools/vtl-oracle/generate.py random "$SEED" 3000 > tools/vtl-oracle/cases/extra-random.json
+          tools/vtl-oracle/run.sh
+          cargo test --locked -p apigw-vtl --test oracle
+
+  fuzz:
+    name: Fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake clang
+      - name: Setup Rust toolchain
+        run: rustup toolchain install nightly --profile minimal
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --locked --version 0.13.2
+      - name: Fuzz each target
+        run: |
+          for target in render json_path java_regex; do
+            cargo +nightly fuzz run "$target" --fuzz-dir fuzz -- -max_total_time=300
+          done

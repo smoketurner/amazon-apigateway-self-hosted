@@ -10,49 +10,15 @@ use crate::model::ContentHandling;
 /// The media type API Gateway assumes for a request with no `Content-Type`.
 pub(crate) const DEFAULT_MEDIA_TYPE: &str = "application/json";
 
-/// The API's `binaryMediaTypes`: payloads of these types are binary.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct BinaryMediaTypes(Vec<String>);
-
-impl BinaryMediaTypes {
-    pub(crate) fn new(types: &[String]) -> Self {
-        Self(
-            types
-                .iter()
-                .map(|media_type| media_type.trim().to_ascii_lowercase())
-                .collect(),
-        )
-    }
-
-    /// Whether a payload of `content_type` is binary. `*/*` matches every
-    /// type and `type/*` every subtype; parameters such as `charset` are
-    /// ignored.
-    pub(crate) fn is_binary(&self, content_type: &str) -> bool {
-        let media_type = MediaType::of(content_type);
-        self.0.iter().any(|pattern| {
-            pattern == "*/*"
-                || *pattern == media_type.0
-                || pattern
-                    .strip_suffix("/*")
-                    .is_some_and(|kind| media_type.0.split('/').next() == Some(kind))
-        })
-    }
-}
-
-/// A `Content-Type` reduced to its lowercase `type/subtype`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MediaType(pub(crate) String);
-
-impl MediaType {
-    pub(crate) fn of(content_type: &str) -> Self {
-        let essence = content_type
-            .split(';')
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase();
-        Self(essence)
-    }
+/// A `Content-Type` reduced to its lowercase `type/subtype`, the key request and
+/// response templates are matched by.
+pub(crate) fn media_type(content_type: &str) -> String {
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
 }
 
 /// A payload that `contentHandling` could not convert.
@@ -100,35 +66,18 @@ pub(crate) fn apply(
     }
 }
 
-impl BinaryMediaTypes {
-    /// How a payload of `content_type` is classified.
-    pub(crate) fn payload(&self, content_type: &str) -> Payload {
-        if self.is_binary(content_type) {
-            Payload::Binary
-        } else {
-            Payload::Text
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn types(list: &[&str]) -> BinaryMediaTypes {
-        BinaryMediaTypes::new(&list.iter().map(|t| (*t).to_owned()).collect::<Vec<_>>())
-    }
-
     #[test]
-    fn binary_media_types_match_exactly_by_wildcard_and_ignore_parameters() {
-        let binary = types(&["image/png", "application/*"]);
-        assert!(binary.is_binary("image/png"));
-        assert!(binary.is_binary("IMAGE/PNG; q=1"));
-        assert!(binary.is_binary("application/octet-stream"));
-        assert!(!binary.is_binary("image/jpeg"));
-        assert!(!binary.is_binary("text/plain"));
-        assert!(types(&["*/*"]).is_binary("text/plain"));
-        assert!(!BinaryMediaTypes::default().is_binary("image/png"));
+    fn media_types_are_lowercase_without_parameters() {
+        assert_eq!(
+            media_type(" Application/JSON ; charset=UTF-8"),
+            "application/json"
+        );
+        assert_eq!(media_type("text/plain"), "text/plain");
+        assert_eq!(media_type(""), "");
     }
 
     #[test]

@@ -19,11 +19,11 @@ use tower::ServiceExt as _;
 
 use crate::authz::KeyStore;
 use crate::aws::{AwsClients, CredentialsMode, LambdaEndpoints};
+use crate::cache::CacheScope;
 use crate::gateway::{ApiContext, AuthorizationMode, Enforcement, Unsupported};
 use crate::gateway_response::GatewayResponses;
 use crate::identity::TrustedProxies;
 use crate::integration::StageVariables;
-use crate::mapped::content::BinaryMediaTypes;
 use crate::model::{ApiKind, ApiModel, IntegrationOverrides, StageSettings};
 use crate::observability::StageObserver;
 use crate::router::{BasePath, RouteSummary, build};
@@ -236,10 +236,11 @@ impl Harness {
             vpc_links: VpcLinks::default(),
             observer: StageObserver::disabled(),
             release: None,
+            payload: Arc::default(),
+            cache: CacheScope::Off,
             http: reqwest::Client::new(),
             aws,
             keys: Arc::new(keys),
-            binary_media_types: BinaryMediaTypes::default(),
         });
         let (router, summaries) = build(&model, &api, &BasePath::default());
         Self {

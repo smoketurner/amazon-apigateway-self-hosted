@@ -18,8 +18,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[cfg(test)]
-pub(crate) use stage::{AccessLogSettings, CanarySettings, MethodSettings, SettingsScope};
-pub(crate) use stage::{DeploymentStamp, ExecutionLogging, LoggingLevel, StageSettings};
+pub(crate) use stage::{AccessLogSettings, SettingsScope};
+pub(crate) use stage::{
+    CanarySettings, DeploymentStamp, ExecutionLogging, LoggingLevel, MethodSettings, StageSettings,
+};
 
 /// Which API Gateway product the definition came from. The two differ in Lambda
 /// payload defaults, error bodies, and response headers.
@@ -340,15 +342,12 @@ pub(crate) struct IntegrationSpec {
 impl IntegrationSpec {
     fn unenforced(&self) -> Vec<Feature> {
         let mut features = Vec::new();
-        let proxied = matches!(
-            self.integration_type,
-            IntegrationType::HttpProxy | IntegrationType::AwsProxy
-        );
-        if self.content_handling.is_some() && proxied {
+        // Proxy integrations never convert content, so `contentHandling` on them
+        // is as inert in API Gateway as it is here. `HTTP` and `MOCK` integrations
+        // apply it; `AWS` integrations do not yet.
+        let converts = matches!(self.integration_type, IntegrationType::Aws);
+        if self.content_handling.is_some() && converts {
             features.push(Feature::ContentHandling);
-        }
-        if !self.cache_key_parameters.is_empty() {
-            features.push(Feature::ResponseCaching);
         }
         features
     }
@@ -535,15 +534,12 @@ pub(crate) struct ApiModel {
 impl ApiModel {
     /// API- and stage-level settings imported but not enforced yet.
     pub(crate) fn unenforced(&self) -> Vec<Feature> {
-        let mut features = Vec::new();
-        if !self.settings.binary_media_types.is_empty() {
-            features.push(Feature::BinaryMediaTypes);
-        }
-        if self.settings.minimum_compression_size.is_some() {
-            features.push(Feature::Compression);
-        }
-        features.extend(self.stage.unenforced());
-        features
+        let features: BTreeSet<Feature> = self
+            .operations
+            .iter()
+            .flat_map(Operation::unenforced)
+            .collect();
+        features.into_iter().collect()
     }
 }
 
@@ -552,19 +548,13 @@ impl ApiModel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Feature {
-    BinaryMediaTypes,
-    Compression,
     ContentHandling,
-    ResponseCaching,
 }
 
 impl fmt::Display for Feature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
-            Self::BinaryMediaTypes => "binary media types",
-            Self::Compression => "compression",
             Self::ContentHandling => "content handling",
-            Self::ResponseCaching => "response caching",
         };
         f.write_str(name)
     }

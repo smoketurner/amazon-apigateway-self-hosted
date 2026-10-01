@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
@@ -17,9 +18,9 @@ use tower::ServiceExt as _;
 use crate::cors::Cors;
 use crate::gateway_response::GatewayResponses;
 use crate::integration::StageVariables;
-use crate::mapped::content::BinaryMediaTypes;
 use crate::model::{ApiKind, ApiModel, IntegrationOverrides, StageSettings};
-use crate::router::tests::{STRICT, context};
+use crate::payload::PayloadSettings;
+use crate::router::tests::{STRICT, ctx};
 use crate::router::{RouteSummary, build};
 
 struct Reply {
@@ -104,16 +105,15 @@ fn serve(doc: &Value, variables: &[(&str, &str)], binary: &[&str]) -> (Router, V
     let model =
         ApiModel::import(doc, ApiKind::Rest, stage, &IntegrationOverrides::default()).unwrap();
     let binary: Vec<String> = binary.iter().map(|t| (*t).to_owned()).collect();
-    let api = context(
+    let mut api = ctx(
         ApiKind::Rest,
         STRICT,
         GatewayResponses::compile(ApiKind::Rest, &model.gateway_responses),
         None::<Cors>,
-        (
-            BinaryMediaTypes::new(&binary),
-            StageVariables::new(variables),
-        ),
     );
+    let settings = Arc::get_mut(&mut api).unwrap();
+    settings.payload = Arc::new(PayloadSettings::new(&binary, None));
+    settings.stage_variables = Arc::new(StageVariables::new(variables));
     build(&model, &api, &"".parse().unwrap())
 }
 

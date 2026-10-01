@@ -17,6 +17,7 @@ use super::format::AccessLogFormat;
 use super::metrics::{MetricKey, MetricsAggregator, RequestMetrics, RouteDimensions};
 use super::queue::{LogEvent, LogQueue};
 use super::trace::{Sampler, SegmentOutcome, Trace};
+use crate::cache::CacheOutcome;
 use crate::canary::Release;
 use crate::gateway::ApiContext;
 use crate::model::{ApiKind, ApiModel, ExecutionLogging, MethodMatch, RouteKey};
@@ -275,6 +276,7 @@ impl StageObserver {
 
         if let Some(ref metrics) = inner.metrics {
             let request = RequestMetrics {
+                cache: response.extensions().get::<CacheOutcome>().copied(),
                 status,
                 latency_ms,
                 integration_latency_ms: integration_ms,
@@ -438,9 +440,9 @@ mod tests {
     use super::*;
     use crate::authz::KeyStore;
     use crate::aws::{AwsClients, CredentialsMode, LambdaEndpoints};
+    use crate::cache::CacheScope;
     use crate::gateway::{ApiContext, AuthorizationMode, Enforcement, RequestId, Unsupported};
     use crate::gateway_response::GatewayResponses;
-    use crate::mapped::content::BinaryMediaTypes;
     use crate::model::{
         AccessLogSettings, IntegrationOverrides, MethodSettings, SettingsScope, StageSettings,
     };
@@ -554,9 +556,10 @@ mod tests {
             http: reqwest::Client::new(),
             aws: clients,
             keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
-            binary_media_types: BinaryMediaTypes::default(),
             observer: StageObserver::new(&observability, &model, "abc", Some("prod"), None),
             release: None,
+            payload: Arc::default(),
+            cache: CacheScope::Off,
         });
         let (router, _) = build(&model, &ctx, &BasePath::default());
         (router, observability)

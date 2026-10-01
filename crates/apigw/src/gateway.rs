@@ -12,14 +12,15 @@ use uuid::Uuid;
 
 use crate::authz::KeyStore;
 use crate::aws::AwsClients;
+use crate::cache::CacheScope;
 use crate::canary::Release;
 use crate::cors::Cors;
 use crate::gateway_response::{Failure, GatewayResponses};
 use crate::integration::StageVariables;
 use crate::limits::LimitExceeded;
-use crate::mapped::content::BinaryMediaTypes;
 use crate::model::{ApiKind, Protection, ResponseType};
 use crate::observability::StageObserver;
+use crate::payload::PayloadSettings;
 use crate::pipeline::RequestContext;
 use crate::route::Route;
 use crate::state::StateBackend;
@@ -157,13 +158,14 @@ pub(crate) struct ApiContext {
     pub(crate) http: reqwest::Client,
     pub(crate) aws: Arc<AwsClients>,
     pub(crate) keys: Arc<KeyStore>,
-    /// The API's `binaryMediaTypes`, which decide how `contentHandling`
-    /// converts payloads.
-    pub(crate) binary_media_types: BinaryMediaTypes,
     pub(crate) observer: StageObserver,
     /// Which release of a canary stage this context serves; `None` when the
     /// stage has no canary.
     pub(crate) release: Option<Release>,
+    /// Binary media types and compression settings.
+    pub(crate) payload: Arc<PayloadSettings>,
+    /// Whether this release caches responses, and where.
+    pub(crate) cache: CacheScope,
 }
 
 impl ApiContext {

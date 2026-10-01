@@ -19,3 +19,4 @@ thiserror   = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 proptest = { workspace = true, features = ["std"] }
+serde      = { workspace = true, features = ["derive", "std"] }

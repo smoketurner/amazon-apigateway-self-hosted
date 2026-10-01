@@ -675,6 +675,7 @@ mod tests {
             policy: RoutePolicy::None,
             unenforced: Vec::new(),
             throttle: None,
+            cache: None,
         }
     }
 

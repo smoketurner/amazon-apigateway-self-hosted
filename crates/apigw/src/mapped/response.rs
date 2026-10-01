@@ -9,9 +9,9 @@ use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::Response;
 
-use crate::gateway::{ApiContext, GatewayError};
+use crate::gateway::GatewayError;
 use crate::integration::ParamSource;
-use crate::mapped::content::{self, DEFAULT_MEDIA_TYPE, MediaType};
+use crate::mapped::content::{self, DEFAULT_MEDIA_TYPE, Payload, media_type};
 use crate::mapped::vtl::{CompiledTemplate, GatewayInput, render};
 use crate::model::{ContentHandling, IntegrationResponseSpec, IntegrationSpec};
 use crate::pipeline::RequestContext;
@@ -189,7 +189,6 @@ impl ResponseSide {
     /// client's response.
     pub(crate) fn finish(
         &self,
-        api: &ApiContext,
         ctx: &RequestContext,
         reply: &BackendReply,
     ) -> Result<Response, GatewayError> {
@@ -211,7 +210,7 @@ impl ResponseSide {
             );
             return Err(GatewayError::ApiConfiguration);
         }
-        selected.build(api, ctx, reply, status)
+        selected.build(ctx, reply, status)
     }
 }
 
@@ -245,10 +244,7 @@ impl IntegrationResponse {
             .iter()
             .filter_map(|(content_type, source)| {
                 let source = source.as_deref()?;
-                Some((
-                    MediaType::of(content_type).0,
-                    CompiledTemplate::compile(source),
-                ))
+                Some((media_type(content_type), CompiledTemplate::compile(source)))
             })
             .collect();
         Self {
@@ -263,13 +259,11 @@ impl IntegrationResponse {
     /// The template for the client's `Accept` header, falling back to the
     /// `application/json` template.
     fn template_for(&self, accept: Option<&str>) -> Option<&CompiledTemplate> {
-        let preferred = accept.into_iter().flat_map(|accept| {
-            accept
-                .split(',')
-                .map(|media_type| MediaType::of(media_type).0)
-        });
-        for media_type in preferred {
-            if let Some(template) = self.templates.get(&media_type) {
+        let preferred = accept
+            .into_iter()
+            .flat_map(|accept| accept.split(',').map(media_type));
+        for candidate in preferred {
+            if let Some(template) = self.templates.get(&candidate) {
                 return Some(template);
             }
         }
@@ -278,7 +272,6 @@ impl IntegrationResponse {
 
     fn build(
         &self,
-        api: &ApiContext,
         ctx: &RequestContext,
         reply: &BackendReply,
         status: u16,
@@ -286,9 +279,16 @@ impl IntegrationResponse {
         let backend_type = reply
             .headers
             .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default();
-        let payload = api.binary_media_types.payload(backend_type);
+            .and_then(|value| value.to_str().ok());
+        let payload = if ctx
+            .payload
+            .negotiate(&ctx.headers)
+            .wants_binary(backend_type)
+        {
+            Payload::Binary
+        } else {
+            Payload::Text
+        };
         let body =
             content::apply(self.content_handling, reply.body.clone(), payload).map_err(|err| {
                 tracing::warn!(%err, "integration response payload could not be converted");

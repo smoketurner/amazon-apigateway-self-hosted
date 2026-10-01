@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use axum::body::Bytes;
 use axum::http::{HeaderValue, header};
 
-use crate::gateway::{ApiContext, GatewayError};
-use crate::mapped::content::{self, DEFAULT_MEDIA_TYPE, MediaType};
+use crate::gateway::GatewayError;
+use crate::mapped::content::{self, DEFAULT_MEDIA_TYPE, Payload, media_type};
 use crate::mapped::vtl::{CompiledTemplate, GatewayInput, RequestOverrides, render};
 use crate::model::{ContentHandling, IntegrationSpec, PassthroughBehavior};
 use crate::pipeline::RequestContext;
@@ -46,7 +46,7 @@ impl RequestSide {
                 continue;
             };
             templates.insert(
-                MediaType::of(content_type).0,
+                media_type(content_type),
                 Template {
                     content_type: content_type.clone(),
                     compiled: CompiledTemplate::compile(source),
@@ -77,14 +77,14 @@ impl RequestSide {
     /// Builds the integration request: converts the payload as
     /// `contentHandling` says, then renders the template for the request's
     /// content type, or applies `passthroughBehavior` when there is none.
-    pub(crate) fn prepare(
-        &self,
-        api: &ApiContext,
-        ctx: &RequestContext,
-    ) -> Result<BackendRequest, GatewayError> {
+    pub(crate) fn prepare(&self, ctx: &RequestContext) -> Result<BackendRequest, GatewayError> {
         let declared = ctx.header_str(header::CONTENT_TYPE.as_str());
         let content_type = declared.unwrap_or(DEFAULT_MEDIA_TYPE);
-        let payload = api.binary_media_types.payload(content_type);
+        let payload = if ctx.payload.request_is_binary(&ctx.headers) {
+            Payload::Binary
+        } else {
+            Payload::Text
+        };
         let body =
             content::apply(self.content_handling, ctx.body.clone(), payload).map_err(|err| {
                 tracing::warn!(%err, "request payload could not be converted");
@@ -114,7 +114,7 @@ impl RequestSide {
     fn template_for(&self, content_type: &str) -> Option<&Template> {
         self.templates
             .get(&content_type.trim().to_ascii_lowercase())
-            .or_else(|| self.templates.get(&MediaType::of(content_type).0))
+            .or_else(|| self.templates.get(&media_type(content_type)))
     }
 
     fn passthrough(

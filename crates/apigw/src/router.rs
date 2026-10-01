@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::authz::{Authorizers, ResourcePolicies};
 use crate::aws::{AwsClients, RoleArn, RoleStatus};
+use crate::cache::CacheSettings;
 use crate::canary::{CanaryRelease, CanarySummary};
 use crate::domain::{DomainName, DomainRegistry, DomainSummary, Resolution};
 use crate::gateway::{ApiContext, Enforcement, GatewayError, RequestId};
@@ -240,11 +241,8 @@ fn axum_path(path: &str) -> Result<String, String> {
     Ok(out)
 }
 
-pub(crate) fn build(
-    model: &ApiModel,
-    ctx: &Arc<ApiContext>,
-    base: &BasePath,
-) -> (Router, Vec<RouteSummary>) {
+/// Compiles every operation of `model` into a route of the release `ctx` serves.
+fn compile_routes(model: &ApiModel, ctx: &ApiContext) -> Vec<Route> {
     let authorizers = Authorizers::compile(model, &ctx.stage_variables);
     let policies = ResourcePolicies::compile(model, &ctx.api_id);
     let throttling = ThrottleSettings::new(
@@ -253,11 +251,17 @@ pub(crate) fn build(
         model.stage.clone(),
         ctx.replicas,
     );
-    let routes: Vec<Route> = model
+    let caching = CacheSettings::new(
+        &ctx.api_id,
+        ctx.stage.as_deref(),
+        model.stage.clone(),
+        ctx.cache.clone(),
+    );
+    model
         .operations
         .iter()
         .map(|operation| {
-            Route::compile(
+            let mut route = Route::compile(
                 operation,
                 model.kind,
                 &ctx.stage_variables,
@@ -265,9 +269,19 @@ pub(crate) fn build(
                 &policies,
                 &throttling,
                 &ctx.vpc_links,
-            )
+            );
+            route.cache = caching.for_route(operation);
+            route
         })
-        .collect();
+        .collect()
+}
+
+pub(crate) fn build(
+    model: &ApiModel,
+    ctx: &Arc<ApiContext>,
+    base: &BasePath,
+) -> (Router, Vec<RouteSummary>) {
+    let routes = compile_routes(model, ctx);
     let mut summaries = Vec::with_capacity(routes.len());
     let mut default = None;
     let mut by_path: BTreeMap<String, BTreeMap<MethodMatch, Route>> = BTreeMap::new();
@@ -544,14 +558,14 @@ pub(crate) mod tests {
     use super::*;
     use crate::authz::KeyStore;
     use crate::aws::{CredentialsMode, LambdaEndpoints};
+    use crate::cache::CacheScope;
     use crate::cors::Cors;
     use crate::gateway::{AuthorizationMode, Unsupported};
     use crate::gateway_response::GatewayResponses;
-    use crate::integration::StageVariables;
-    use crate::mapped::content::BinaryMediaTypes;
     use crate::model::{IntegrationOverrides, Protection, StageSettings};
     use crate::model::{MethodSettings, SettingsScope};
     use crate::observability::StageObserver;
+    use crate::payload::PayloadSettings;
     use crate::state::{InMemory, InMemoryLimits, StateBackend};
     use crate::vpc_link::VpcLinks;
     use std::num::NonZeroU32;
@@ -579,33 +593,17 @@ pub(crate) mod tests {
         ))
     }
 
-    fn ctx(
+    pub(crate) fn ctx(
         kind: ApiKind,
         enforcement: Enforcement,
         responses: GatewayResponses,
         cors: Option<Cors>,
-    ) -> Arc<ApiContext> {
-        context(
-            kind,
-            enforcement,
-            responses,
-            cors,
-            (BinaryMediaTypes::default(), StageVariables::default()),
-        )
-    }
-
-    pub(crate) fn context(
-        kind: ApiKind,
-        enforcement: Enforcement,
-        responses: GatewayResponses,
-        cors: Option<Cors>,
-        (binary_media_types, variables): (BinaryMediaTypes, StageVariables),
     ) -> Arc<ApiContext> {
         Arc::new(ApiContext {
             kind,
             api_id: "abc".to_owned(),
             stage: None,
-            stage_variables: Arc::new(variables),
+            stage_variables: Arc::default(),
             responses,
             cors,
             state: test_state(),
@@ -615,9 +613,10 @@ pub(crate) mod tests {
             http: reqwest::Client::new(),
             aws: aws(),
             keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
-            binary_media_types,
             observer: StageObserver::disabled(),
             release: None,
+            payload: Arc::default(),
+            cache: CacheScope::Off,
         })
     }
 
@@ -664,11 +663,12 @@ pub(crate) mod tests {
         let model = ApiModel::import(doc, kind, stage, &IntegrationOverrides::default()).unwrap();
         let responses = GatewayResponses::compile(kind, &model.gateway_responses);
         let cors = model.settings.cors.as_ref().map(Cors::compile);
-        build(
-            &model,
-            &ctx(kind, enforcement, responses, cors),
-            &base.parse().unwrap(),
-        )
+        let mut context = ctx(kind, enforcement, responses, cors);
+        Arc::get_mut(&mut context).unwrap().payload = Arc::new(PayloadSettings::new(
+            &model.settings.binary_media_types,
+            model.settings.minimum_compression_size,
+        ));
+        build(&model, &context, &base.parse().unwrap())
     }
 
     fn protected_doc() -> Value {
@@ -1197,6 +1197,176 @@ pub(crate) mod tests {
         );
     }
 
+    async fn exchange(
+        router: &Router,
+        method: Method,
+        uri: &str,
+        headers: &[(&str, &str)],
+        body: Vec<u8>,
+    ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        let mut builder = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let request = builder.body(Body::from(body)).unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        let (parts, body) = response.into_parts();
+        let body = axum::body::to_bytes(body, 1 << 20).await.unwrap();
+        (parts.status, parts.headers, body.to_vec())
+    }
+
+    async fn echo_backend() -> std::net::SocketAddr {
+        let app = Router::new().fallback(|request: Request| async move {
+            let (parts, body) = request.into_parts();
+            let body = axum::body::to_bytes(body, 1 << 20).await.unwrap();
+            let encoding = parts
+                .headers
+                .get("content-encoding")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("-")
+                .to_owned();
+            format!("{encoding}|{}", String::from_utf8_lossy(&body))
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
+    #[tokio::test]
+    async fn rest_apis_compress_responses_and_decompress_requests() {
+        use std::io::{Read as _, Write as _};
+
+        let backend = echo_backend().await;
+        let body = "{\"hello\": \"world, world, world, world\"}";
+        let doc = json!({
+            "x-amazon-apigateway-minimum-compression-size": 20,
+            "paths": {
+                "/small": {"get": {"x-amazon-apigateway-integration": {"type": "mock",
+                    "requestTemplates": {"application/json": "{\"statusCode\": 200}"},
+                    "responses": {"default": {"statusCode": "200",
+                        "responseTemplates": {"application/json": "tiny"}}}}}},
+                "/big": {"get": {"x-amazon-apigateway-integration": {"type": "mock",
+                    "requestTemplates": {"application/json": "{\"statusCode\": 200}"},
+                    "responses": {"default": {"statusCode": "200",
+                        "responseTemplates": {"application/json": body}}}}}},
+                "/echo": {"post": {"x-amazon-apigateway-integration": {"type": "http_proxy",
+                    "httpMethod": "POST", "uri": format!("http://{backend}/echo")}}}
+            }
+        });
+        let (rest, _) = router(&doc, ApiKind::Rest, AuthorizationMode::Enforce, "");
+
+        let (status, headers, plain) = exchange(&rest, Method::GET, "/big", &[], Vec::new()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(headers.get("content-encoding").is_none());
+        assert_eq!(plain, body.as_bytes());
+
+        let (_, headers, packed) = exchange(
+            &rest,
+            Method::GET,
+            "/big",
+            &[("accept-encoding", "gzip;q=1.0, identity;q=0.5")],
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(headers.get("content-encoding").unwrap(), "gzip");
+        let mut unpacked = String::new();
+        flate2::read::GzDecoder::new(packed.as_slice())
+            .read_to_string(&mut unpacked)
+            .unwrap();
+        assert_eq!(unpacked, body);
+
+        let (_, headers, small) = exchange(
+            &rest,
+            Method::GET,
+            "/small",
+            &[("accept-encoding", "gzip")],
+            Vec::new(),
+        )
+        .await;
+        assert!(
+            headers.get("content-encoding").is_none(),
+            "below the minimum size"
+        );
+        assert_eq!(small, b"tiny");
+
+        let (_, headers, unsupported) = exchange(
+            &rest,
+            Method::GET,
+            "/big",
+            &[("accept-encoding", "br, gzip;q=0.5")],
+            Vec::new(),
+        )
+        .await;
+        assert!(headers.get("content-encoding").is_none());
+        assert_eq!(unsupported, body.as_bytes());
+
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(b"squeezed request").unwrap();
+        let (status, _, echoed) = exchange(
+            &rest,
+            Method::POST,
+            "/echo",
+            &[("content-encoding", "gzip")],
+            encoder.finish().unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            String::from_utf8(echoed).unwrap(),
+            "-|squeezed request",
+            "the backend gets the decompressed body without Content-Encoding"
+        );
+
+        let (status, _, _) = exchange(
+            &rest,
+            Method::POST,
+            "/echo",
+            &[("content-encoding", "gzip")],
+            b"definitely not gzip".to_vec(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (http, _) = router(&doc, ApiKind::Http, AuthorizationMode::Enforce, "");
+        let (_, headers, _) = exchange(
+            &http,
+            Method::GET,
+            "/big",
+            &[("accept-encoding", "gzip")],
+            Vec::new(),
+        )
+        .await;
+        assert!(
+            headers.get("content-encoding").is_none(),
+            "HTTP APIs have no compression"
+        );
+    }
+
+    #[tokio::test]
+    async fn streamed_responses_are_never_compressed() {
+        let backend = echo_backend().await;
+        let doc = json!({
+            "x-amazon-apigateway-minimum-compression-size": 0,
+            "paths": {"/echo": {"post": {"x-amazon-apigateway-integration": {
+                "type": "http_proxy", "httpMethod": "POST",
+                "responseTransferMode": "STREAM",
+                "uri": format!("http://{backend}/echo")}}}}
+        });
+        let (rest, _) = router(&doc, ApiKind::Rest, AuthorizationMode::Enforce, "");
+        let (status, headers, body) = exchange(
+            &rest,
+            Method::POST,
+            "/echo",
+            &[("accept-encoding", "gzip")],
+            b"streamed".to_vec(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(headers.get("content-encoding").is_none());
+        assert_eq!(body, b"-|streamed");
+    }
+
     struct Reply {
         status: StatusCode,
         headers: axum::http::HeaderMap,
@@ -1517,9 +1687,10 @@ pub(crate) mod tests {
             http: reqwest::Client::new(),
             aws,
             keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
-            binary_media_types: BinaryMediaTypes::default(),
             observer: StageObserver::disabled(),
             release: None,
+            payload: Arc::default(),
+            cache: CacheScope::Off,
         });
         let (router, _) = build(&model, &api, &BasePath::default());
         let request = Request::builder()

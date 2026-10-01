@@ -51,8 +51,8 @@ Invariants the compiler does **not** catch. Read before implementing or reviewin
 - [ ] Own-crate items are imported with `use`, never spelled as `crate::a::b::C` in code
       (`clippy::absolute_paths`). A new dependency in `[workspace.dependencies]` is also added
       to `absolute-paths-allowed-crates` in `.clippy.toml`.
-- [ ] IDs use `Uuid::now_v7()` and time uses `jiff` (`clippy::disallowed_methods` enforces
-      both).
+- [ ] IDs use `Uuid::now_v7()` (uuid's `v4` feature stays disabled, so v4 cannot be
+      called) and time uses `jiff` (`clippy::disallowed_methods` bans `SystemTime::now`).
 - [ ] `thiserror` for module errors, `anyhow` at the binary edge; `tracing`, never `println!`.
 
 ## Before opening a PR

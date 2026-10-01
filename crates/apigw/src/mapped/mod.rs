@@ -86,12 +86,12 @@ impl MappedIntegration {
         route: &Route,
         ctx: &mut RequestContext,
     ) -> Result<Response, GatewayError> {
-        let request = self.request.prepare(api, ctx)?;
+        let request = self.request.prepare(ctx)?;
         let reply = match self.backend {
             Backend::Http(ref http) => http.exchange(&api.http, route, ctx, request).await?,
             Backend::Mock => mock_reply(&request),
         };
-        self.response.finish(api, ctx, &reply)
+        self.response.finish(ctx, &reply)
     }
 }
 

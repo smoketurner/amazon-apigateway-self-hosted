@@ -509,6 +509,32 @@ mod tests {
     };
     use super::*;
 
+    #[test]
+    fn content_handling_is_reported_only_where_it_is_not_applied() {
+        use super::super::Feature;
+
+        for (integration_type, reported) in [
+            ("http", false),
+            ("aws", true),
+            ("mock", false),
+            ("http_proxy", false),
+            ("aws_proxy", false),
+        ] {
+            let doc = json!({"paths": {"/x": {"get": {"x-amazon-apigateway-integration": {
+                "type": integration_type,
+                "uri": "http://example.com/",
+                "contentHandling": "CONVERT_TO_BINARY"
+            }}}}});
+            let model = import(&doc, ApiKind::Rest);
+            let operation = by_path(&model)["/x"];
+            assert_eq!(
+                operation.unenforced() == vec![Feature::ContentHandling],
+                reported,
+                "{integration_type}"
+            );
+        }
+    }
+
     fn import(doc: &Value, kind: ApiKind) -> ApiModel {
         ApiModel::import(
             doc,
@@ -552,10 +578,7 @@ mod tests {
         );
         assert!(model.models.contains_key("Pet"));
         assert_eq!(model.authorizers.len(), 2);
-        assert_eq!(
-            model.unenforced(),
-            vec![Feature::BinaryMediaTypes, Feature::Compression]
-        );
+        assert_eq!(model.unenforced(), vec![Feature::ContentHandling]);
 
         let ops = by_path(&model);
         let pets = ops["/pets"];

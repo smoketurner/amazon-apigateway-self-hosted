@@ -4,6 +4,7 @@
 mod app;
 mod authz;
 mod aws;
+mod cache;
 mod canary;
 mod client_cert;
 mod config;
@@ -27,6 +28,7 @@ mod mapped;
 mod mapping;
 mod model;
 mod observability;
+mod payload;
 mod pipeline;
 mod proxy;
 mod route;
