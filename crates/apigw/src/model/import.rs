@@ -530,11 +530,7 @@ mod tests {
         assert_eq!(model.authorizers.len(), 2);
         assert_eq!(
             model.unenforced(),
-            vec![
-                Feature::GatewayResponses,
-                Feature::BinaryMediaTypes,
-                Feature::Compression
-            ]
+            vec![Feature::BinaryMediaTypes, Feature::Compression]
         );
 
         let ops = by_path(&model);

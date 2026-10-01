@@ -25,8 +25,7 @@ impl LambdaProxy {
         route: &Route,
         ctx: &RequestContext,
         stage_variables: &StageVariables,
-    ) -> Response {
-        let kind = ctx.api.kind;
+    ) -> Result<Response, GatewayError> {
         let event = ProxyEvent {
             ctx,
             stage_variables,
@@ -41,25 +40,22 @@ impl LambdaProxy {
         let invocation = match tokio::time::timeout(self.timeout, call).await {
             Err(_) => {
                 tracing::warn!(route = %route.key, function = %self.function, "Lambda invocation timed out");
-                return GatewayError::IntegrationTimeout.response(kind);
+                return Err(GatewayError::IntegrationTimeout);
             }
             Ok(Err(err)) => {
                 tracing::error!(route = %route.key, function = %self.function, %err, "Lambda invocation failed");
-                return GatewayError::IntegrationFailure.response(kind);
+                return Err(GatewayError::IntegrationFailure);
             }
             Ok(Ok(invocation)) => invocation,
         };
         if let Some(function_error) = invocation.function_error {
             tracing::warn!(route = %route.key, function = %self.function, function_error, "Lambda function returned an error");
-            return GatewayError::IntegrationFailure.response(kind);
+            return Err(GatewayError::IntegrationFailure);
         }
-        match ProxyResponse::into_http(&invocation.payload, self.payload) {
-            Ok(response) => response,
-            Err(reason) => {
-                tracing::error!(route = %route.key, function = %self.function, reason, "malformed Lambda proxy response");
-                GatewayError::IntegrationFailure.response(kind)
-            }
-        }
+        ProxyResponse::into_http(&invocation.payload, self.payload).map_err(|reason| {
+            tracing::error!(route = %route.key, function = %self.function, reason, "malformed Lambda proxy response");
+            GatewayError::IntegrationFailure
+        })
     }
 }
 
@@ -375,7 +371,7 @@ mod tests {
 
     use super::*;
     use crate::model::ApiKind;
-    use crate::pipeline::QueryString;
+    use crate::pipeline::context::QueryString;
     use crate::pipeline::context::tests::request;
 
     fn variables() -> StageVariables {

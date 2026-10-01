@@ -25,8 +25,23 @@ All notable changes to this project are documented here. The format follows
 - Istio `X-Forwarded-Client-Cert` is parsed (Subject, Hash, URI/DNS SANs, `Cert`) from trusted
   proxies and kept with the client identity for upcoming mTLS support.
 
+- REST gateway responses: every error the gateway generates (missing authentication token,
+  invalid API key, unauthorized, integration failure and timeout, 413, and the rest) uses API
+  Gateway's default status and message and applies the API's customizations from
+  `x-amazon-apigateway-gateway-responses`: status code, `gatewayresponse.header.*` parameters
+  (literals, `context.*`, `method.request.*`, `stageVariables.*`), and body templates with simple
+  `$context`, `$stageVariables`, and `$method.request.*` substitution (no VTL), with
+  `DEFAULT_4XX`/`DEFAULT_5XX` fallback. Error responses carry `x-amzn-ErrorType` and
+  `x-amz-apigw-id`. The 413 response is not customizable. HTTP APIs keep fixed messages.
+
 ### Changed
 
+- An `HTTP_PROXY` backend that cannot be reached now answers REST clients 504 `Network error
+  communicating with endpoint` (`INTEGRATION_FAILURE`) instead of 502; an invalid integration URI
+  answers 500 (`API_CONFIGURATION_ERROR`).
+- `$context.extendedRequestId` is a 12-character token, the same value as the `x-amz-apigw-id`
+  response header.
+- `requestParameters` mappings accept `context.*` and `stageVariables.*` sources.
 - `X-Forwarded-For` sent by a client that is not a trusted proxy is no longer forwarded to
   `HTTP_PROXY` integrations: it is replaced by the client's address. `X-Forwarded-Client-Cert` is
   removed from such requests. Set `--trusted-proxies` to keep forwarding a proxy's headers.
