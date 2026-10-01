@@ -8,6 +8,7 @@ use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use serde_json::Value;
 
 use crate::aws::{FunctionArn, IntegrationCredentials, RoleArn};
+use crate::mapping::{RequestMapping, ResponseMapping};
 use crate::model::{
     ApiKind, ConnectionType, IntegrationSpec, IntegrationType, PayloadVersion, ResponseTransferMode,
 };
@@ -143,7 +144,7 @@ impl Integration {
         match spec.integration_type {
             IntegrationType::HttpProxy => {
                 let uri = uri.ok_or("HTTP_PROXY integration has no uri")?;
-                HttpProxy::compile(spec, uri, timeout, transfer).map(Self::HttpProxy)
+                HttpProxy::compile(spec, uri, timeout, transfer, kind).map(Self::HttpProxy)
             }
             IntegrationType::Mock => MockResponse::compile(spec).map(Self::Mock),
             IntegrationType::AwsProxy if spec.subtype.is_some() => Err(format!(
@@ -204,6 +205,10 @@ pub(crate) struct HttpProxy {
     pub(crate) path_params: BTreeMap<String, ParamSource>,
     pub(crate) query_params: BTreeMap<String, ParamSource>,
     pub(crate) headers: BTreeMap<String, ParamSource>,
+    /// HTTP API `requestParameters` (`append:header.x`, `overwrite:path`, ...).
+    pub(crate) request_mapping: RequestMapping,
+    /// HTTP API `responseParameters`, by backend status code.
+    pub(crate) response_mapping: ResponseMapping,
     pub(crate) timeout: Duration,
     pub(crate) transfer: ResponseTransferMode,
 }
@@ -214,6 +219,7 @@ impl HttpProxy {
         uri: String,
         timeout: Duration,
         transfer: ResponseTransferMode,
+        kind: ApiKind,
     ) -> Result<Self, String> {
         let method = match spec.http_method.as_deref() {
             None => None,
@@ -227,6 +233,9 @@ impl HttpProxy {
         let mut query_params = BTreeMap::new();
         let mut headers = BTreeMap::new();
         for (target, source) in &spec.request_parameters {
+            if kind == ApiKind::Http && target.contains(':') {
+                continue;
+            }
             let Some(source) = ParamSource::parse(source) else {
                 tracing::warn!(
                     target,
@@ -251,6 +260,8 @@ impl HttpProxy {
             path_params,
             query_params,
             headers,
+            request_mapping: RequestMapping::compile(&spec.request_parameters),
+            response_mapping: ResponseMapping::compile(&spec.response_parameters),
             timeout,
             transfer,
         })

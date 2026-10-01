@@ -539,6 +539,7 @@ mod tests {
             stage: Some("prod".to_owned()),
             stage_variables: Arc::default(),
             responses: GatewayResponses::default(),
+            cors: None,
             state: Arc::new(StateBackend::InMemory(InMemory::new(
                 InMemoryLimits::default(),
             ))),

@@ -18,6 +18,7 @@ Java regex syntax to `fancy-regex` and provides Java's matching, replacement, an
 | `authz` | Compiles the API's authorizers (`Authorizers`, per route `RouteAuthorizer`) and evaluates them before the integration: Lambda authorizers with identity sources, a bounded TTL cache, and IAM policy evaluation (`PolicyDocument`, `MethodArn`, wildcard `Glob`); token authorizers (`authz::jwt`): Cognito and HTTP API JWT verification against an issuer's cached public keys (`KeyStore`); `Denial` maps each refusal to its gateway response |
 | `state`, `throttle` | `StateBackend` (token buckets, period quota counters, TTL cache; in-memory today, shaped for a shared Valkey backend) and the stage throttle settings that become one bucket per route |
 | `digest` | SHA-256 digests, so credentials never appear in cache keys |
+| `cors`, `http_routes`, `mapping` | HTTP API CORS (preflight answers and response headers), route selection by path and method together for HTTP APIs, and `requestParameters`/`responseParameters` mapping for `HTTP_PROXY` |
 | `aws` | `AwsClients`: per-region Lambda clients, assumed integration-role credentials, Lambda endpoint overrides, trace header propagation |
 | `proxy` | `HTTP_PROXY` forwarding |
 | `lambda`, `lambda_response` | `AWS_PROXY` event construction (payload 1.0 and 2.0), invocation (buffered `Invoke` or streamed `InvokeWithResponseStream`), and response mapping |
