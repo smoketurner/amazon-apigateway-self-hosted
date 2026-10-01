@@ -10,8 +10,8 @@
 //! Each accepted connection runs in its own task:
 //!
 //! ```text
-//! accept → set_nodelay → connection cap → spawn → TLS handshake (timeout)
-//!   → hyper-util auto HTTP/1 or HTTP/2 (TokioTimer, idle limit)
+//! accept → set_nodelay → connection cap → spawn → PROXY header (timeout)
+//!   → TLS handshake (timeout) → hyper-util auto HTTP/1 or HTTP/2 (TokioTimer, idle limit)
 //! ```
 //!
 //! The task is spawned before any per-connection I/O, so a client that stalls
@@ -28,11 +28,12 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::ConnectInfo;
 use hyper::body::{Body as HttpBody, Frame, Incoming, SizeHint};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
+use proxy_header::io::ProxiedStream;
+use proxy_header::{ParseConfig, Protocol};
 use rustls::pki_types::pem::PemObject as _;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
@@ -44,10 +45,16 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 
+use crate::identity::TrustedProxies;
+
 /// Time limits applied to every connection.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ConnLimits {
-    /// From TCP accept to a finished TLS handshake.
+    /// From TCP accept to a complete PROXY protocol header, on a listener that
+    /// requires one.
+    pub(crate) proxy_header: Duration,
+    /// From the end of the PROXY header (or TCP accept, without one) to a
+    /// finished TLS handshake.
     pub(crate) handshake: Duration,
     /// hyper's HTTP/1 header read timeout, and the idle limit: a connection with
     /// no request in flight for this long is closed. The idle limit covers what
@@ -64,6 +71,10 @@ impl ConnLimits {
     /// `drain` covers API Gateway's longest default integration timeout (30s), so
     /// shutdown never cuts off a request that could still have completed.
     pub(crate) const DEFAULT: Self = Self {
+        // The PROXY protocol spec (proxy-protocol.txt section 2) lets the
+        // receiver time out a missing header, "at least 3 seconds to cover a TCP
+        // retransmit".
+        proxy_header: Duration::from_secs(5),
         handshake: Duration::from_secs(5),
         header_read: Duration::from_secs(10),
         h2_keep_alive_interval: Duration::from_secs(20),
@@ -225,6 +236,135 @@ impl Tls {
     }
 }
 
+/// The stream the TLS handshake starts from: the accepted TCP stream, after any
+/// PROXY protocol header. Bytes read past the header (the start of the TLS
+/// `ClientHello`, when both arrive in one segment) are replayed on the first read.
+type ClientStream = ProxiedStream<TcpStream>;
+
+/// PROXY protocol v2 on one listener.
+///
+/// A TCP proxy that relays TLS without terminating it (Istio/Envoy
+/// `PASSTHROUGH`, nginx `stream`, `HAProxy` `mode tcp`) opens its own connection
+/// and cannot add `X-Forwarded-For` to ciphertext; it sends the client's address
+/// in a PROXY header ahead of the relayed bytes instead.
+///
+/// The spec (<https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt>)
+/// shapes each rule here:
+///
+/// - section 2: the receiver "MUST not try to guess whether the protocol header
+///   is present or not". On an enabled listener the header is required.
+/// - section 2: "only trusted proxies are allowed to use this protocol". A
+///   connection from outside `--trusted-proxies` is closed before anything is
+///   read.
+/// - section 2: the receiver "MUST NOT start processing the connection before
+///   it receives a complete and valid PROXY protocol header". The header is read
+///   in full, under [`ConnLimits::proxy_header`], before the TLS handshake.
+///
+/// Only v2 is accepted: the load balancers and gateways this is for send v2,
+/// and turning v1 off keeps the text parser out of reach.
+#[derive(Clone, Debug)]
+pub(crate) struct ProxyProtocol {
+    pub(crate) required_from: Option<TrustedProxies>,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ProxyHeaderError {
+    #[error("peer is outside --trusted-proxies")]
+    Untrusted,
+    #[error("header refused: {0}")]
+    Invalid(#[from] io::Error),
+    #[error("header timed out")]
+    TimedOut,
+}
+
+/// v2 only, and no TLVs: nothing reads them.
+const PROXY_PARSE: ParseConfig = ParseConfig {
+    include_tlvs: false,
+    allow_v1: false,
+    allow_v2: true,
+};
+
+impl ProxyProtocol {
+    /// The PROXY protocol is off: the TCP peer is the client.
+    pub(crate) fn off() -> Self {
+        Self {
+            required_from: None,
+        }
+    }
+
+    /// Require a PROXY header from peers `trusted` covers.
+    pub(crate) fn required_from(trusted: TrustedProxies) -> Self {
+        Self {
+            required_from: Some(trusted),
+        }
+    }
+
+    /// Reads the header from `tcp`, returning the stream after it and the
+    /// client's address. Without the protocol the stream is untouched and the
+    /// TCP peer is the client.
+    ///
+    /// A `LOCAL` header (the proxy's own health check) carries no address, and
+    /// the spec says the receiver "must use the real connection endpoints"; the
+    /// same holds for a `PROXY` command with an `UNSPEC` or `AF_UNIX` family.
+    /// Both keep `tcp_peer`, which is the proxy. A UDP address cannot describe a
+    /// TCP connection, so it is refused.
+    async fn accept(
+        &self,
+        tcp: TcpStream,
+        tcp_peer: SocketAddr,
+        limit: Duration,
+    ) -> Result<(ClientStream, SocketAddr), ProxyHeaderError> {
+        let Some(ref trusted) = self.required_from else {
+            return Ok((ProxiedStream::unproxied(tcp), tcp_peer));
+        };
+        if !trusted.contains(tcp_peer.ip()) {
+            return Err(ProxyHeaderError::Untrusted);
+        }
+        let stream =
+            tokio::time::timeout(limit, ProxiedStream::create_from_tokio(tcp, PROXY_PARSE))
+                .await
+                .map_err(|_| ProxyHeaderError::TimedOut)??;
+        let client = match stream.proxy_header().proxied_address() {
+            None => tcp_peer,
+            Some(addr) if addr.protocol == Protocol::Stream => addr.source,
+            Some(_) => {
+                return Err(ProxyHeaderError::Invalid(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "PROXY header describes a datagram connection",
+                )));
+            }
+        };
+        Ok((stream, client))
+    }
+}
+
+/// Who may be a proxy in front of a listener, and what each connection must
+/// send first.
+#[derive(Clone, Debug)]
+pub(crate) struct Edge {
+    pub(crate) trusted: TrustedProxies,
+    pub(crate) proxy_protocol: ProxyProtocol,
+}
+
+impl Edge {
+    /// A listener with no proxy in front of it: the TCP peer is the client.
+    pub(crate) fn direct() -> Self {
+        Self {
+            trusted: TrustedProxies::none(),
+            proxy_protocol: ProxyProtocol::off(),
+        }
+    }
+}
+
+/// What every connection of one listener shares.
+#[derive(Clone)]
+struct ConnShared {
+    tls: TlsAcceptor,
+    app: Router,
+    limits: ConnLimits,
+    edge: Edge,
+}
+
 /// Serve `app` on `listener` until `shutdown` is cancelled, then give open
 /// connections [`ConnLimits::drain`] to finish. At most `max_connections` are
 /// served at once; further clients wait in the kernel backlog.
@@ -234,9 +374,16 @@ pub(crate) async fn serve(
     app: Router,
     limits: ConnLimits,
     max_connections: usize,
+    edge: Edge,
     shutdown: CancellationToken,
 ) {
     let slots = Arc::new(Semaphore::new(max_connections));
+    let shared = ConnShared {
+        tls: tls.acceptor.clone(),
+        app,
+        limits,
+        edge,
+    };
     let mut conns = JoinSet::new();
 
     loop {
@@ -267,9 +414,7 @@ pub(crate) async fn serve(
             tcp,
             peer,
             slot,
-            tls.acceptor.clone(),
-            app.clone(),
-            limits,
+            shared.clone(),
             shutdown.clone(),
         ));
     }
@@ -308,14 +453,31 @@ async fn handle_accept_error(err: io::Error) {
 /// place under the connection cap until it closes.
 async fn serve_connection(
     tcp: TcpStream,
-    peer: SocketAddr,
+    tcp_peer: SocketAddr,
     _slot: OwnedSemaphorePermit,
-    tls: TlsAcceptor,
-    app: Router,
-    limits: ConnLimits,
+    shared: ConnShared,
     shutdown: CancellationToken,
 ) {
-    let handshake = tokio::time::timeout(limits.handshake, tls.accept(tcp));
+    let ConnShared {
+        tls,
+        app,
+        limits,
+        edge,
+    } = shared;
+    let header = edge
+        .proxy_protocol
+        .accept(tcp, tcp_peer, limits.proxy_header);
+    let (stream, peer) = tokio::select! {
+        () = shutdown.cancelled() => return,
+        header = header => match header {
+            Ok(accepted) => accepted,
+            Err(err) => {
+                tracing::debug!(remote_addr = %tcp_peer, "PROXY protocol connection refused: {err}");
+                return;
+            }
+        },
+    };
+    let handshake = tokio::time::timeout(limits.handshake, tls.accept(stream));
     let io = tokio::select! {
         () = shutdown.cancelled() => return,
         handshake = handshake => match handshake {
@@ -336,7 +498,8 @@ async fn serve_connection(
     let service =
         TowerToHyperService::new(tower::service_fn(move |req: hyper::Request<Incoming>| {
             let mut req = req.map(Body::new);
-            req.extensions_mut().insert(ConnectInfo(peer));
+            let identity = edge.trusted.identify(peer, req.headers_mut());
+            req.extensions_mut().insert(identity);
             let in_flight = activity.begin();
             let response = app.clone().oneshot(req);
             async move {
@@ -500,6 +663,26 @@ pub(crate) mod test_tls {
         }
 
         pub(crate) async fn connect(&self, addr: std::net::SocketAddr) -> TlsStream<TcpStream> {
+            self.connect_after(addr, b"").await
+        }
+
+        /// Connects, writes `prefix` (a PROXY header) on the bare TCP stream, then
+        /// starts the TLS handshake.
+        pub(crate) async fn connect_after(
+            &self,
+            addr: std::net::SocketAddr,
+            prefix: &[u8],
+        ) -> TlsStream<TcpStream> {
+            self.try_connect_after(addr, prefix).await.unwrap()
+        }
+
+        /// [`Self::connect_after`] that reports a refused handshake.
+        pub(crate) async fn try_connect_after(
+            &self,
+            addr: std::net::SocketAddr,
+            prefix: &[u8],
+        ) -> std::io::Result<TlsStream<TcpStream>> {
+            use tokio::io::AsyncWriteExt as _;
             let mut roots = rustls::RootCertStore::empty();
             roots.add(self.cert.clone()).unwrap();
             let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
@@ -508,11 +691,11 @@ pub(crate) mod test_tls {
                 .unwrap()
                 .with_root_certificates(roots)
                 .with_no_client_auth();
-            let tcp = TcpStream::connect(addr).await.unwrap();
+            let mut tcp = TcpStream::connect(addr).await.unwrap();
+            tcp.write_all(prefix).await?;
             TlsConnector::from(Arc::new(config))
                 .connect(ServerName::try_from("localhost").unwrap(), tcp)
                 .await
-                .unwrap()
         }
 
         /// Sends one HTTP/1.1 request and returns the raw response.
@@ -522,8 +705,19 @@ pub(crate) mod test_tls {
             head: &str,
             body: &[u8],
         ) -> String {
+            self.request_after(addr, b"", head, body).await
+        }
+
+        /// [`Self::request`] after a PROXY header written ahead of the handshake.
+        pub(crate) async fn request_after(
+            &self,
+            addr: std::net::SocketAddr,
+            prefix: &[u8],
+            head: &str,
+            body: &[u8],
+        ) -> String {
             use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-            let mut stream = self.connect(addr).await;
+            let mut stream = self.connect_after(addr, prefix).await;
             stream.write_all(head.as_bytes()).await.unwrap();
             stream.write_all(body).await.unwrap();
             let mut out = Vec::new();
@@ -542,13 +736,18 @@ pub(crate) mod test_tls {
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests assert on known-good setup")]
 mod tests {
+    use axum::Extension;
+    use axum::http::HeaderMap;
     use axum::routing::get;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    use crate::identity::ClientIdentity;
 
     use super::test_tls::{TestCert, generate};
     use super::*;
 
     const SHORT: ConnLimits = ConnLimits {
+        proxy_header: Duration::from_millis(300),
         handshake: Duration::from_millis(300),
         header_read: Duration::from_millis(300),
         h2_keep_alive_interval: Duration::from_secs(20),
@@ -558,30 +757,83 @@ mod tests {
     const BOUND: Duration = Duration::from_secs(10);
     const GET_PEER: &str = "GET /peer HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n";
 
+    /// `/peer` answers with the request's source IP; `/forwarded` with the
+    /// `X-Forwarded-For` and `X-Forwarded-Client-Cert` an integration would see.
+    fn app() -> Router {
+        Router::new()
+            .route(
+                "/peer",
+                get(
+                    |Extension(identity): Extension<ClientIdentity>| async move {
+                        identity
+                            .source_ip()
+                            .ip()
+                            .map_or_else(|| "unknown".to_owned(), |ip| ip.to_string())
+                    },
+                ),
+            )
+            .route(
+                "/forwarded",
+                get(|headers: HeaderMap| async move {
+                    let show = |name: &str| {
+                        headers
+                            .get(name)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or("-")
+                            .to_owned()
+                    };
+                    format!(
+                        "{}|{}",
+                        show("x-forwarded-for"),
+                        show("x-forwarded-client-cert")
+                    )
+                }),
+            )
+    }
+
     async fn start(
         cert: &TestCert,
         max_connections: usize,
     ) -> (SocketAddr, CancellationToken, tokio::task::JoinHandle<()>) {
+        start_with(cert, SHORT, max_connections, Edge::direct()).await
+    }
+
+    async fn start_with(
+        cert: &TestCert,
+        limits: ConnLimits,
+        max_connections: usize,
+        edge: Edge,
+    ) -> (SocketAddr, CancellationToken, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let app = Router::new().route(
-            "/peer",
-            get(|ConnectInfo(peer): ConnectInfo<SocketAddr>| async move { peer.ip().to_string() }),
-        );
         let shutdown = CancellationToken::new();
         let handle = tokio::spawn(serve(
             listener,
             cert.server(),
-            app,
-            SHORT,
+            app(),
+            limits,
             max_connections,
+            edge,
             shutdown.clone(),
         ));
         (addr, shutdown, handle)
     }
 
+    fn trusting(nets: &[&str], hops: u8) -> TrustedProxies {
+        let nets: Vec<_> = nets.iter().map(|net| net.parse().unwrap()).collect();
+        TrustedProxies::new(&nets, std::num::NonZeroU8::new(hops).unwrap())
+    }
+
+    fn proxied(nets: &[&str]) -> Edge {
+        let trusted = trusting(nets, 1);
+        Edge {
+            proxy_protocol: ProxyProtocol::required_from(trusted.clone()),
+            trusted,
+        }
+    }
+
     #[tokio::test]
-    async fn serves_requests_over_tls_with_connect_info() {
+    async fn serves_requests_over_tls_with_a_client_identity() {
         let cert = generate();
         let (addr, shutdown, handle) = start(&cert, 8).await;
         let response = cert.request(addr, GET_PEER, b"").await;
@@ -695,6 +947,7 @@ mod tests {
             app,
             SHORT,
             8,
+            Edge::direct(),
             shutdown.clone(),
         ));
         assert!(
@@ -725,5 +978,229 @@ mod tests {
                 .starts_with("HTTP/1.1 200")
         );
         shutdown.cancel();
+    }
+
+    const GET_FORWARDED: &str = "GET /forwarded HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\nx-forwarded-for: 203.0.113.9\r\nx-forwarded-client-cert: Hash=abc\r\n\r\n";
+    const LOOPBACK: &[&str] = &["127.0.0.0/8"];
+
+    fn get_peer_with_forwarded() -> String {
+        GET_FORWARDED.replace("/forwarded", "/peer")
+    }
+
+    fn body(response: &str) -> &str {
+        response.rsplit("\r\n\r\n").next().unwrap_or_default()
+    }
+
+    async fn serves(cert: &TestCert, edge: Edge, prefix: &[u8], request: &str) -> String {
+        let (addr, shutdown, _handle) = start_with(cert, SHORT, 8, edge).await;
+        let response = cert.request_after(addr, prefix, request, b"").await;
+        shutdown.cancel();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        body(&response).to_owned()
+    }
+
+    fn trusting_loopback() -> Edge {
+        Edge {
+            trusted: trusting(LOOPBACK, 1),
+            proxy_protocol: ProxyProtocol::off(),
+        }
+    }
+
+    /// A PROXY v2 header for a TCP connection from `source`.
+    fn proxy_v2(source: &str) -> Vec<u8> {
+        let header = proxy_header::ProxyHeader::with_address(proxy_header::ProxiedAddress::stream(
+            source.parse().unwrap(),
+            "192.0.2.1:443".parse().unwrap(),
+        ));
+        let mut buf = Vec::new();
+        header.encode_v2(&mut buf).unwrap();
+        buf
+    }
+
+    /// Whether the server closes a connection that starts with `prefix` before
+    /// the TLS handshake completes.
+    async fn handshake_refused(cert: &TestCert, addr: SocketAddr, prefix: &[u8]) -> bool {
+        tokio::time::timeout(BOUND, cert.try_connect_after(addr, prefix))
+            .await
+            .unwrap()
+            .is_err()
+    }
+
+    /// Sends `bytes` on a bare TCP stream and reports whether the server closed
+    /// the connection without answering.
+    async fn closed_without_reply(addr: SocketAddr, bytes: &[u8]) -> bool {
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let _write = stream.write_all(bytes).await;
+        let mut received = Vec::new();
+        let read = tokio::time::timeout(BOUND, stream.read_to_end(&mut received))
+            .await
+            .unwrap();
+        read.is_err() || received.is_empty()
+    }
+
+    #[tokio::test]
+    async fn forwarded_headers_from_an_untrusted_peer_are_replaced() {
+        let cert = generate();
+        let edge = Edge {
+            trusted: trusting(&["192.0.2.0/24"], 1),
+            proxy_protocol: ProxyProtocol::off(),
+        };
+        assert_eq!(
+            serves(&cert, edge.clone(), b"", GET_FORWARDED).await,
+            "127.0.0.1|-"
+        );
+        assert_eq!(
+            serves(&cert, edge, b"", &get_peer_with_forwarded()).await,
+            "127.0.0.1"
+        );
+    }
+
+    #[tokio::test]
+    async fn forwarded_headers_from_a_trusted_peer_are_believed() {
+        let cert = generate();
+        assert_eq!(
+            serves(&cert, trusting_loopback(), b"", GET_FORWARDED).await,
+            "203.0.113.9, 127.0.0.1|Hash=abc"
+        );
+        assert_eq!(
+            serves(&cert, trusting_loopback(), b"", &get_peer_with_forwarded()).await,
+            "203.0.113.9"
+        );
+    }
+
+    #[tokio::test]
+    async fn trusted_peer_with_an_unreadable_forwarded_for_is_unknown() {
+        let cert = generate();
+        let request = get_peer_with_forwarded().replace("203.0.113.9", "unknown");
+        assert_eq!(
+            serves(&cert, trusting_loopback(), b"", &request).await,
+            "unknown"
+        );
+    }
+
+    /// The header's source address, not the proxy's, is the client. The
+    /// handshake begins right behind the header, so any bytes read past it must be
+    /// replayed to rustls.
+    #[tokio::test]
+    async fn proxy_header_source_becomes_the_client() {
+        let cert = generate();
+        let response = serves(
+            &cert,
+            proxied(LOOPBACK),
+            &proxy_v2("203.0.113.9:40000"),
+            GET_PEER,
+        )
+        .await;
+        assert_eq!(response, "203.0.113.9");
+    }
+
+    /// The header's source is the connection's peer, so its `X-Forwarded-For` is
+    /// believed only when that address is itself a trusted proxy.
+    #[tokio::test]
+    async fn proxy_header_source_decides_whether_forwarded_for_is_believed() {
+        let cert = generate();
+        let request = get_peer_with_forwarded().replace("203.0.113.9", "198.51.100.1");
+        assert_eq!(
+            serves(
+                &cert,
+                proxied(LOOPBACK),
+                &proxy_v2("203.0.113.9:40000"),
+                &request
+            )
+            .await,
+            "203.0.113.9"
+        );
+        assert_eq!(
+            serves(
+                &cert,
+                proxied(LOOPBACK),
+                &proxy_v2("127.0.0.2:40000"),
+                &request
+            )
+            .await,
+            "198.51.100.1"
+        );
+    }
+
+    /// proxy-protocol.txt section 2: only trusted proxies may use the protocol,
+    /// so a well-formed header from anyone else is a client forging its address
+    /// and is closed unanswered.
+    #[tokio::test]
+    async fn proxy_header_from_an_untrusted_peer_is_refused() {
+        let cert = generate();
+        let (addr, _shutdown, _handle) =
+            start_with(&cert, SHORT, 8, proxied(&["192.0.2.0/24"])).await;
+        assert!(handshake_refused(&cert, addr, &proxy_v2("203.0.113.9:40000")).await);
+    }
+
+    /// Section 2: the receiver "MUST not try to guess whether the protocol
+    /// header is present or not", so a trusted peer without one is refused.
+    #[tokio::test]
+    async fn missing_proxy_header_is_refused() {
+        let cert = generate();
+        let (addr, _shutdown, _handle) = start_with(&cert, SHORT, 8, proxied(LOOPBACK)).await;
+        assert!(handshake_refused(&cert, addr, b"").await);
+    }
+
+    #[tokio::test]
+    async fn proxy_v1_header_is_refused() {
+        let cert = generate();
+        let (addr, _shutdown, _handle) = start_with(&cert, SHORT, 8, proxied(LOOPBACK)).await;
+        assert!(
+            handshake_refused(
+                &cert,
+                addr,
+                b"PROXY TCP4 203.0.113.9 192.0.2.1 40000 443\r\n"
+            )
+            .await
+        );
+    }
+
+    /// A UDP address cannot describe the TCP connection it arrived on.
+    #[tokio::test]
+    async fn proxy_header_for_a_datagram_is_refused() {
+        let cert = generate();
+        let (addr, _shutdown, _handle) = start_with(&cert, SHORT, 8, proxied(LOOPBACK)).await;
+        let header =
+            proxy_header::ProxyHeader::with_address(proxy_header::ProxiedAddress::datagram(
+                "203.0.113.9:40000".parse().unwrap(),
+                "192.0.2.1:443".parse().unwrap(),
+            ));
+        let mut buf = Vec::new();
+        header.encode_v2(&mut buf).unwrap();
+        assert!(handshake_refused(&cert, addr, &buf).await);
+    }
+
+    /// Section 2.2, LOCAL: the receiver "must use the real connection
+    /// endpoints", so a proxy's own health check is served with the TCP peer as
+    /// the client.
+    #[tokio::test]
+    async fn local_proxy_header_keeps_the_tcp_peer() {
+        let cert = generate();
+        let mut header = Vec::new();
+        proxy_header::ProxyHeader::with_local()
+            .encode_v2(&mut header)
+            .unwrap();
+        assert_eq!(
+            serves(&cert, proxied(LOOPBACK), &header, GET_PEER).await,
+            "127.0.0.1"
+        );
+    }
+
+    /// A trusted peer that never finishes its header is closed by the header
+    /// timeout; the other limits are far beyond the test's bound, so only it can
+    /// close the connection.
+    #[tokio::test]
+    async fn stalled_proxy_header_is_closed() {
+        let cert = generate();
+        let limits = ConnLimits {
+            proxy_header: Duration::from_millis(300),
+            handshake: Duration::from_secs(3600),
+            header_read: Duration::from_secs(3600),
+            ..SHORT
+        };
+        let (addr, _shutdown, _handle) = start_with(&cert, limits, 8, proxied(LOOPBACK)).await;
+        let header = proxy_v2("203.0.113.9:40000");
+        assert!(closed_without_reply(addr, header.first_chunk::<10>().unwrap().as_slice()).await);
     }
 }

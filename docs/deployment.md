@@ -134,10 +134,43 @@ already TLS, so the sidecar forwards it (inside its own mTLS) without trying to 
 
 ### Client IP
 
-Behind a proxy, the TCP peer is the proxy. `apigw` appends the peer address to
-`X-Forwarded-For` on `HTTP_PROXY` requests and reports it as `sourceIp` in Lambda events; it
-does not yet trust an incoming `X-Forwarded-For` or the PROXY protocol, so Lambda functions
-see the proxy's address, not the client's.
+`sourceIp` in Lambda events, and later `aws:SourceIp` in resource policies and per-IP
+throttling, need the client's address, but behind Istio or a load balancer the TCP peer is the
+proxy. Forwarding headers are written by whoever sends the request, so `apigw` believes them
+only from proxies you name:
+
+| Setting | Behavior |
+|---|---|
+| `--trusted-proxies` unset | The TCP peer is the client. An incoming `X-Forwarded-For` is replaced by the peer address and `X-Forwarded-Client-Cert` is removed before the request reaches an integration. |
+| Peer inside `--trusted-proxies` | The client is read from `X-Forwarded-For`, walking from the right: with `--trusted-proxy-hops 1` (default) the last entry, with 2 the one before it, and so on. The walk stops early at the first address outside `--trusted-proxies`. Entries to the left of the client are never read, so a client cannot spoof its address by sending its own header. The peer is appended to `X-Forwarded-For` for the integration, and `X-Forwarded-Client-Cert` is kept and parsed. |
+| Peer outside `--trusted-proxies` | The TCP peer is the client; any `X-Forwarded-For` it sent is ignored. |
+
+A trusted peer that sends no `X-Forwarded-For` is the client itself. If it sends one that cannot be
+read (an entry that is not an address, an empty entry, fewer entries than `--trusted-proxy-hops`
+when every one is a trusted proxy), the client address is **unknown**: Lambda events carry no
+`sourceIp`, and features that depend on the address must refuse the request instead of guessing.
+
+For Istio, `--trusted-proxies` must cover the address the sidecar (or the ingress gateway, when
+`apigw` runs behind one) connects from, which is a loopback or pod address, not the client's.
+`--trusted-proxy-hops` follows Envoy's `xff_num_trusted_hops`, which Istio exposes as
+`gatewayTopology.numTrustedProxies`: use the same number the mesh is configured with. How many
+entries the mesh appends depends on that configuration, so check a request's `X-Forwarded-For`
+at the application once before relying on the setting.
+
+**PROXY protocol.** A load balancer or Istio `PASSTHROUGH` gateway that relays TLS without
+terminating it cannot add headers. Start `apigw` with `--proxy-protocol` (requires
+`--trusted-proxies`) and have the proxy send a PROXY protocol **v2** header: its source address
+becomes the client. The header is mandatory on `--listen` (the admin listener never takes one),
+connections from peers outside `--trusted-proxies` are closed without being read, v1 and datagram
+headers are refused, a header that does not arrive within 5 seconds closes the connection, and a
+`LOCAL` header (a proxy's own health check) keeps the TCP peer as the client. After the header, the
+connection is treated like any other whose peer is the header's source: its `X-Forwarded-For` is
+believed only if that source is itself a trusted proxy.
+
+**Client certificates.** Istio's `X-Forwarded-Client-Cert` (Subject, Hash, URI and DNS SANs, and
+the PEM `Cert`) is parsed only from trusted peers and recorded with the request's client
+identity; nothing authenticates with it yet. A header that cannot be parsed is recorded as
+malformed.
 
 ## Authorization
 

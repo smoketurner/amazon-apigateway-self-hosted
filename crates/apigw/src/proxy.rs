@@ -37,15 +37,6 @@ pub(crate) async fn forward(
             headers.append(name.clone(), value.clone());
         }
     }
-    if let Some(ref ip) = incoming.source_ip {
-        let forwarded = match incoming.header_str("x-forwarded-for") {
-            Some(existing) => format!("{existing}, {ip}"),
-            None => ip.clone(),
-        };
-        if let Ok(value) = HeaderValue::try_from(forwarded) {
-            headers.insert(HeaderName::from_static("x-forwarded-for"), value);
-        }
-    }
     for (name, source) in &target.headers {
         let Some(value) = resolve(source, &incoming) else {
             continue;
@@ -404,9 +395,10 @@ mod tests {
         request
             .headers
             .insert("connection", HeaderValue::from_static("keep-alive"));
-        request
-            .headers
-            .insert("x-forwarded-for", HeaderValue::from_static("198.51.100.1"));
+        request.headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("198.51.100.1, 192.0.2.9"),
+        );
         let response = send(target, "/{proxy+}", request).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["x-upstream"], "yes");

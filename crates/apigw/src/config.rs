@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::num::NonZeroU8;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{ArgGroup, Parser, ValueEnum};
 
 use crate::gateway::{AuthorizationMode, Enforcement, Unsupported};
+use crate::identity::{TrustedProxies, TrustedProxy};
+use crate::listener::{Edge, ProxyProtocol};
 use crate::model::ApiKind;
 use crate::router::BasePath;
 use crate::source::Source;
@@ -82,6 +85,28 @@ pub(crate) struct Config {
     #[arg(long, env = "APIGW_LISTEN", default_value = "0.0.0.0:8443")]
     pub(crate) listen: SocketAddr,
 
+    /// Proxies, as CIDR blocks or addresses, whose `X-Forwarded-For` and
+    /// `X-Forwarded-Client-Cert` headers are believed. A peer outside this list is
+    /// the client, and its forwarding headers are replaced or removed.
+    #[arg(
+        long,
+        env = "APIGW_TRUSTED_PROXIES",
+        value_delimiter = ',',
+        value_name = "CIDR,..."
+    )]
+    pub(crate) trusted_proxies: Vec<TrustedProxy>,
+
+    /// Trusted proxies in front of the gateway, counting the one that connects to
+    /// it: 1 reads the client from the last `X-Forwarded-For` entry, 2 from the one
+    /// before it.
+    #[arg(long, env = "APIGW_TRUSTED_PROXY_HOPS", default_value_t = NonZeroU8::MIN, requires = "trusted_proxies")]
+    pub(crate) trusted_proxy_hops: NonZeroU8,
+
+    /// Require a PROXY protocol v2 header on the API listener, from
+    /// --trusted-proxies only; its source address is the client.
+    #[arg(long, env = "APIGW_PROXY_PROTOCOL", requires = "trusted_proxies")]
+    pub(crate) proxy_protocol: bool,
+
     /// Address for `/healthz` and `/routes`. Disabled when unset.
     #[arg(long, env = "APIGW_ADMIN_LISTEN")]
     pub(crate) admin_listen: Option<SocketAddr>,
@@ -142,6 +167,25 @@ impl Config {
             },
             resource_policy: self.unsupported_resource_policy,
             request_validation: self.unsupported_validation,
+        }
+    }
+
+    pub(crate) fn trusted_proxies(&self) -> TrustedProxies {
+        TrustedProxies::new(&self.trusted_proxies, self.trusted_proxy_hops)
+    }
+
+    /// What may sit in front of the API listener. The admin listener is never
+    /// proxied.
+    pub(crate) fn api_edge(&self) -> Edge {
+        let trusted = self.trusted_proxies();
+        let proxy_protocol = if self.proxy_protocol {
+            ProxyProtocol::required_from(trusted.clone())
+        } else {
+            ProxyProtocol::off()
+        };
+        Edge {
+            trusted,
+            proxy_protocol,
         }
     }
 
@@ -346,5 +390,63 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    const OPENAPI: [&str; 2] = ["--openapi-file", "api.json"];
+
+    fn parse_proxied(extra: &[&str]) -> Result<Config, clap::Error> {
+        let args: Vec<&str> = OPENAPI.iter().chain(extra).copied().collect();
+        parse(&args)
+    }
+
+    #[test]
+    fn trusted_proxies_take_a_comma_separated_list_and_default_to_one_hop() {
+        let config =
+            parse_proxied(&["--trusted-proxies", "10.0.0.0/8,192.0.2.7,fd00::/8"]).unwrap();
+        assert_eq!(config.trusted_proxies.len(), 3);
+        assert_eq!(config.trusted_proxy_hops.get(), 1);
+        let trusted = config.trusted_proxies();
+        assert!(trusted.contains("10.1.2.3".parse().unwrap()));
+        assert!(trusted.contains("192.0.2.7".parse().unwrap()));
+        assert!(trusted.contains("fd00::1".parse().unwrap()));
+        assert!(!trusted.contains("192.0.2.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn invalid_trusted_proxies_and_hops_are_rejected() {
+        assert!(parse_proxied(&["--trusted-proxies", "10.0.0.0/33"]).is_err());
+        assert!(parse_proxied(&["--trusted-proxies", "nonsense"]).is_err());
+        assert!(
+            parse_proxied(&[
+                "--trusted-proxies",
+                "10.0.0.0/8",
+                "--trusted-proxy-hops",
+                "0"
+            ])
+            .is_err()
+        );
+        let config = parse_proxied(&[
+            "--trusted-proxies",
+            "10.0.0.0/8",
+            "--trusted-proxy-hops",
+            "2",
+        ])
+        .unwrap();
+        assert_eq!(config.trusted_proxy_hops.get(), 2);
+    }
+
+    #[test]
+    fn hops_and_proxy_protocol_need_trusted_proxies() {
+        assert!(parse_proxied(&["--trusted-proxy-hops", "2"]).is_err());
+        assert!(parse_proxied(&["--proxy-protocol"]).is_err());
+        assert!(parse_proxied(&["--proxy-protocol", "--trusted-proxies", "10.0.0.0/8"]).is_ok());
+    }
+
+    #[test]
+    fn proxy_protocol_applies_to_the_api_listener_only_when_asked() {
+        let off = parse_proxied(&["--trusted-proxies", "10.0.0.0/8"]).unwrap();
+        assert!(off.api_edge().proxy_protocol.required_from.is_none());
+        let on = parse_proxied(&["--trusted-proxies", "10.0.0.0/8", "--proxy-protocol"]).unwrap();
+        assert!(on.api_edge().proxy_protocol.required_from.is_some());
     }
 }

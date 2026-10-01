@@ -21,8 +21,10 @@ base64               = { workspace = true, features = ["std"] }
 clap                 = { workspace = true, features = ["std", "derive", "env", "help", "usage", "error-context"] }
 hyper                = { workspace = true, features = ["http1", "http2", "server"] }
 hyper-util           = { workspace = true, features = ["server-auto", "service", "tokio"] }
+ipnet                = { workspace = true, features = ["std"] }
 jiff                 = { workspace = true, features = ["std"] }
 matchit              = { workspace = true }
+proxy-header         = { workspace = true, features = ["tokio"] }
 reqwest              = { workspace = true, features = ["rustls", "http2", "stream"] }
 rustls               = { workspace = true, features = ["aws-lc-rs", "std", "tls12", "prefer-post-quantum"] }
 serde                = { workspace = true, features = ["std", "derive"] }
