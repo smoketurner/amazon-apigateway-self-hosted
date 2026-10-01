@@ -34,6 +34,7 @@ absolute-paths-allowed-crates = [
     "aws_sdk_lambda",
     "aws_sdk_s3",
     "aws_sdk_xray",
+    "aws_sigv4",
     "axum",
     "base64",
     "clap",
