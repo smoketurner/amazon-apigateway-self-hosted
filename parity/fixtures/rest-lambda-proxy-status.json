@@ -1,0 +1,11 @@
+{
+  "name": "rest-lambda-proxy-status",
+  "source": "hand_written",
+  "api": "rest",
+  "response": {
+    "status": 418,
+    "headers": {
+      "content-type": "application/json"
+    }
+  }
+}

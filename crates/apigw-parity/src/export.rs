@@ -1,7 +1,7 @@
 //! The raw `OpenAPI` export of a reference API plus its stage variables, stored with
 //! the fixtures so replay can serve exactly the definition that was recorded.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -194,6 +194,32 @@ impl ExportRecord {
         overrides
     }
 
+    /// The names of the Lambda functions the integrations invoke, so replay can
+    /// point each at the in-process Lambda endpoint.
+    pub(crate) fn lambda_functions(&self) -> BTreeSet<String> {
+        let mut functions = BTreeSet::new();
+        let Some(Value::Object(paths)) = self.openapi.get("paths") else {
+            return functions;
+        };
+        for operation in paths
+            .values()
+            .filter_map(Value::as_object)
+            .flat_map(|item| item.values())
+        {
+            let uri = operation
+                .get(INTEGRATION_KEY)
+                .and_then(|integration| integration.get("uri"))
+                .and_then(Value::as_str);
+            if let Some((_, rest)) = uri.and_then(|uri| uri.split_once(":function:"))
+                && let Some(name) = rest.split(['/', ':']).next()
+                && !name.is_empty()
+            {
+                functions.insert(name.to_owned());
+            }
+        }
+        functions
+    }
+
     fn method_label(key: &str) -> Option<String> {
         if key == ANY_METHOD_KEY {
             Some("ANY".to_owned())
@@ -270,6 +296,27 @@ mod tests {
         );
         assert_eq!(proxy["timeoutInMillis"], 5000);
         assert_eq!(proxy["type"], "http_proxy");
+    }
+
+    #[test]
+    fn lambda_functions_come_from_integration_uris_only() {
+        let record = ExportRecord {
+            openapi: json!({
+                "paths": {
+                    "/a": {"get": {"x-amazon-apigateway-integration": {"uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:echo/invocations"}}},
+                    "/b": {"post": {"x-amazon-apigateway-integration": {"uri": "arn:aws:lambda:us-east-1:[account-id]:function:other:live"}}},
+                    "/c": {"get": {"x-amazon-apigateway-integration": {"uri": "https://example.com/x"}}},
+                    "/d": {"get": {}, "parameters": []}
+                },
+                "components": {"securitySchemes": {"a": {"x-amazon-apigateway-authorizer": {"authorizerUri": "arn:aws:lambda:r:1:function:authorizer"}}}}
+            }),
+            ..record()
+        };
+        let names: Vec<_> = record.lambda_functions().into_iter().collect();
+        assert_eq!(names, ["echo", "other"]);
+        let mut empty = record;
+        empty.openapi = json!({});
+        assert!(empty.lambda_functions().is_empty());
     }
 
     #[test]

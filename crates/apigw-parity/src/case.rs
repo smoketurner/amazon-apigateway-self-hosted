@@ -130,6 +130,8 @@ pub(crate) enum EchoField {
     Path,
     Query,
     Body,
+    Resource,
+    PathParameters,
 }
 
 /// Which parts of what the echo backend received are compared: the listed

@@ -77,7 +77,8 @@ integrations only ever see the rewritten headers.
 `crates/apigw-parity` is a dev tool, not part of the gateway. `replay` starts the `apigw`
 binary with `--openapi-file` pointing at a recorded export, `--base-path /<stage>`, the
 recorded stage variables, and an `--integration-overrides` file that moves every integration
-built from the `echo_host` stage variable to an in-process echo server over plain HTTP. It
-then sends the case requests over TLS and diffs the responses against fixtures recorded from
-real API Gateway. Everything it needs from `apigw` is public: the flags above and the admin
-`/healthz` endpoint. See [parity/README.md](../parity/README.md).
+built from the `echo_host` stage variable to an in-process echo server over plain HTTP. Every
+Lambda function the export invokes gets a `--lambda-endpoint` pointing at the same server, which
+speaks Lambda's Invoke protocol. It then sends the case requests over TLS and diffs the responses
+against fixtures recorded from real API Gateway. Everything it needs from `apigw` is public: the
+flags above and the admin `/healthz` endpoint. See [parity/README.md](../parity/README.md).
