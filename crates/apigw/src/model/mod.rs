@@ -333,17 +333,19 @@ pub(crate) struct IntegrationSpec {
     /// HTTP API response parameter mapping, keyed by backend status code.
     #[serde(default)]
     pub(crate) response_parameters: BTreeMap<String, BTreeMap<String, String>>,
+    /// The status codes of the method's declared responses; filled from the
+    /// operation's `responses` on import, never read from an integration.
+    #[serde(skip)]
+    pub(crate) method_responses: BTreeSet<u16>,
 }
 
 impl IntegrationSpec {
     fn unenforced(&self) -> Vec<Feature> {
         let mut features = Vec::new();
         // Proxy integrations never convert content, so `contentHandling` on them
-        // is as inert in API Gateway as it is here.
-        let converts = matches!(
-            self.integration_type,
-            IntegrationType::Http | IntegrationType::Aws | IntegrationType::Mock
-        );
+        // is as inert in API Gateway as it is here. `HTTP` and `MOCK` integrations
+        // apply it; `AWS` integrations do not yet.
+        let converts = matches!(self.integration_type, IntegrationType::Aws);
         if self.content_handling.is_some() && converts {
             features.push(Feature::ContentHandling);
         }

@@ -857,7 +857,7 @@ mod tests {
     async fn unenforced_features_are_summarized() {
         let mut snapshot = snapshot();
         snapshot.openapi = json!({"paths": {"/x": {"get": {"x-amazon-apigateway-integration": {
-            "type": "mock", "contentHandling": "CONVERT_TO_TEXT"}}}}});
+            "type": "aws", "contentHandling": "CONVERT_TO_TEXT"}}}}});
         let inputs = Inputs {
             snapshot,
             overrides: IntegrationOverrides::default(),
@@ -933,7 +933,8 @@ mod tests {
         let doc = scratch("api.json");
         let write = |status: u16| {
             json!({"paths": {"/pets": {"get": {"x-amazon-apigateway-integration": {"type": "mock",
-                "requestTemplates": {"application/json": format!("{{\"statusCode\": {status}}}")}}}}}})
+                "requestTemplates": {"application/json": format!("{{\"statusCode\": {status}}}")},
+                "responses": {"default": {"statusCode": status.to_string()}}}}}}})
             .to_string()
         };
         tokio::fs::write(&doc, write(200)).await.unwrap();

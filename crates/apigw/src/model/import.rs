@@ -195,6 +195,9 @@ struct RawOperation {
     parameters: Vec<Value>,
     #[serde(rename = "requestBody")]
     request_body: Option<Value>,
+    /// The method's declared responses, keyed by status code.
+    #[serde(default)]
+    responses: BTreeMap<String, Value>,
 }
 
 #[derive(Deserialize)]
@@ -325,21 +328,30 @@ impl OperationSource<'_> {
         references: &References<'_>,
         overrides: &IntegrationOverrides,
     ) -> Result<Option<IntegrationSpec>, ImportError> {
-        if let Some(value) = overrides.get(&self.route_key) {
-            return IntegrationSpec::deserialize(value)
-                .map(Some)
-                .map_err(|source| ImportError::InvalidOverride {
-                    route_key: self.route_key.clone(),
-                    source,
-                });
-        }
-        let Some(ref raw) = self.raw.integration else {
-            return Ok(None);
+        let mut spec = if let Some(value) = overrides.get(&self.route_key) {
+            IntegrationSpec::deserialize(value).map_err(|source| ImportError::InvalidOverride {
+                route_key: self.route_key.clone(),
+                source,
+            })?
+        } else {
+            let Some(ref raw) = self.raw.integration else {
+                return Ok(None);
+            };
+            let value = self.resolve(references, raw)?;
+            IntegrationSpec::deserialize(value).map_err(|source| self.operation_error(source))?
         };
-        let value = self.resolve(references, raw)?;
-        IntegrationSpec::deserialize(value)
-            .map(Some)
-            .map_err(|source| self.operation_error(source))
+        spec.method_responses = self.method_responses();
+        Ok(Some(spec))
+    }
+
+    /// The numeric status codes of the method's declared responses; `default`
+    /// and other non-numeric keys are not status codes.
+    fn method_responses(&self) -> BTreeSet<u16> {
+        self.raw
+            .responses
+            .keys()
+            .filter_map(|status| status.parse().ok())
+            .collect()
     }
 
     fn parameters(&self, references: &References<'_>) -> Result<Vec<ParameterSpec>, ImportError> {
@@ -498,13 +510,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn content_handling_is_reported_only_for_integrations_that_convert() {
+    fn content_handling_is_reported_only_where_it_is_not_applied() {
         use super::super::Feature;
 
         for (integration_type, reported) in [
-            ("http", true),
+            ("http", false),
             ("aws", true),
-            ("mock", true),
+            ("mock", false),
             ("http_proxy", false),
             ("aws_proxy", false),
         ] {

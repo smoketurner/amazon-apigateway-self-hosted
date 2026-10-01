@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Non-proxy REST integrations: `HTTP` and `MOCK` integrations run `requestParameters`, a Velocity
+  request template chosen by `Content-Type` (`passthroughBehavior`, `415 Unsupported Media Type`,
+  `contentHandling` by `binaryMediaTypes`), the backend call, `selectionPattern` selection, and
+  `responseParameters` plus a response template chosen by `Accept`, with `$context.requestOverride`
+  and `responseOverride`. REST `requestParameters` also read `method.request.body` (and JSON paths
+  into it) and the `multivalue` query string and header forms. A selected status that the method
+  does not declare, or no matching response, answers `500`.
 - `--valkey-url` (and `--valkey-ca-cert`) keep throttle buckets, usage-plan quotas, and cached
   authorizer results in a Valkey or Redis-compatible server shared by every replica, so limits are
   exact across the fleet and `--replicas` no longer divides them. TLS (`rediss://`) is recommended and

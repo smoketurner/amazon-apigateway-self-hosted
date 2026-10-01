@@ -25,7 +25,7 @@ Management's
 | `HTTP_PROXY` integrations | Forwarded, streaming the response; `requestParameters` path/query/header mappings and `timeoutInMillis` honored |
 | `AWS_PROXY` (Lambda) integrations | Invoked with the API Gateway proxy event, payload format 1.0 or 2.0, including qualified ARNs and aliases; REST payload 1.0 keeps the client's header case; 6 MB request/response limit (`502`) |
 | REST response streaming (`responseTransferMode: STREAM`) | Lambda via `InvokeWithResponseStream` (`.../response-streaming-invocations` URIs, metadata + 8 null bytes + payload), and `HTTP_PROXY`; up to 15 minutes, 5 minute idle limit |
-| `MOCK` integrations | Status, literal response headers, and response template returned (templates are not evaluated as VTL) |
+| `HTTP` (non-proxy) and `MOCK` integrations | The request is mapped by `requestParameters` and a Velocity request template chosen by `Content-Type` (`passthroughBehavior` and `415` when none applies, `contentHandling`), sent to the backend, and the integration response is selected by `selectionPattern`, mapped by `responseParameters`, and rendered with a response template chosen by `Accept` (`$context.requestOverride`/`responseOverride` honored). Client headers and query string reach an `HTTP` backend only when mapped |
 | Stage variables | Read from the stage and substituted into integration URIs; overridable locally |
 | Lambda authorizers | `TOKEN` and `REQUEST` (REST), `REQUEST` with payload 1.0/2.0 and simple responses (HTTP): invoked, cached by identity source, and the returned policy evaluated per method; `--insecure-skip-authorization` skips them |
 | Cognito user pool authorizers (REST), JWT authorizers (HTTP) | Tokens are verified against the issuer's published keys, fetched over HTTPS (the gateway needs outbound access to the identity provider); claims and scopes are checked as API Gateway checks them; `--insecure-skip-authorization` skips them |
@@ -33,7 +33,7 @@ Management's
 | IAM (`AWS_IAM`) auth | Cannot be verified outside AWS. REST answers `403 Missing Authentication Token`, HTTP `403 Forbidden`, unless `--insecure-skip-authorization` is set |
 | Resource policies | Evaluated in two phases as API Gateway evaluates them: an explicit `Deny` ends the request before authentication, then the policy is combined with the authorizer's decision per AWS's outcome tables. `aws:SourceIp` uses the trusted client address (see `--trusted-proxies`). Never skipped by `--insecure-skip-authorization`; a policy that cannot be read refuses every route with `403` |
 | Request validators | **Not run yet.** Validated routes answer `501` unless `--unsupported-validation=ignore` |
-| `AWS`/`HTTP` (non-proxy, VTL mapping templates) | Answer `501`; listed with the reason on `/routes` |
+| `AWS` service integrations, non-proxy Lambda | Answer `501`; listed with the reason on `/routes` |
 | VPC links (`HTTP_PROXY`) | Served from an in-cluster URL with `--vpc-link`; a link with no mapping answers `501` with the reason on `/routes` |
 | Unknown route | REST: `403 {"message":"Missing Authentication Token"}`; HTTP: `404 {"message":"Not Found"}` |
 

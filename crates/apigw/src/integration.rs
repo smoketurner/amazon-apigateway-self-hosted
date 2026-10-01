@@ -4,11 +4,11 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::time::Duration;
 
-use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
-use serde_json::Value;
+use axum::http::{HeaderValue, Method};
 
 use crate::aws::{FunctionArn, IntegrationCredentials, RoleArn};
 use crate::integration_tls::TlsClient;
+use crate::mapped::{Backend, MappedIntegration};
 use crate::mapping::{RequestMapping, ResponseMapping};
 use crate::model::{
     ApiKind, ConnectionType, IntegrationSpec, IntegrationType, PayloadVersion, ResponseTransferMode,
@@ -102,16 +102,19 @@ impl<'a> IntoIterator for &'a StageVariables {
 #[derive(Debug, Clone)]
 pub(crate) enum Integration {
     HttpProxy(HttpProxy),
-    Mock(MockResponse),
+    /// A non-proxy `HTTP` or `MOCK` integration that runs mapping templates.
+    Mapped(Box<MappedIntegration>),
     Lambda(LambdaProxy),
-    Unsupported { reason: String },
+    Unsupported {
+        reason: String,
+    },
 }
 
 impl Integration {
     pub(crate) fn kind(&self) -> &'static str {
         match self {
             Self::HttpProxy(_) => "HTTP_PROXY",
-            Self::Mock(_) => "MOCK",
+            Self::Mapped(mapped) => mapped.kind(),
             Self::Lambda(_) => "AWS_PROXY",
             Self::Unsupported { .. } => "UNSUPPORTED",
         }
@@ -139,8 +142,13 @@ impl Integration {
         vpc_links: &VpcLinks,
     ) -> Result<Self, String> {
         let private = spec.connection_type == Some(ConnectionType::VpcLink);
-        if private && spec.integration_type != IntegrationType::HttpProxy {
-            return Err("only HTTP_PROXY integrations can use a VPC link".to_owned());
+        if private
+            && !matches!(
+                spec.integration_type,
+                IntegrationType::HttpProxy | IntegrationType::Http
+            )
+        {
+            return Err("only HTTP and HTTP_PROXY integrations can use a VPC link".to_owned());
         }
         let transfer = spec
             .response_transfer_mode
@@ -165,8 +173,9 @@ impl Integration {
         );
         let uri = spec.uri.as_deref().map(|uri| variables.substitute(uri));
         match spec.integration_type {
-            IntegrationType::HttpProxy => {
-                let uri = uri.ok_or("HTTP_PROXY integration has no uri")?;
+            IntegrationType::HttpProxy | IntegrationType::Http => {
+                let uri =
+                    uri.ok_or_else(|| format!("{} integration has no uri", spec.integration_type))?;
                 let (uri, private) = if private {
                     let (uri, routing) =
                         PrivateRouting::resolve(spec, &uri, kind, variables, vpc_links)?;
@@ -174,9 +183,20 @@ impl Integration {
                 } else {
                     (uri, None)
                 };
-                HttpProxy::compile(spec, uri, timeout, transfer, kind, private).map(Self::HttpProxy)
+                let proxy = HttpProxy::compile(spec, uri, timeout, transfer, kind, private)?;
+                if spec.integration_type == IntegrationType::Http {
+                    Ok(Self::Mapped(Box::new(MappedIntegration::compile(
+                        spec,
+                        Backend::Http(Box::new(proxy)),
+                    ))))
+                } else {
+                    Ok(Self::HttpProxy(proxy))
+                }
             }
-            IntegrationType::Mock => MockResponse::compile(spec).map(Self::Mock),
+            IntegrationType::Mock => Ok(Self::Mapped(Box::new(MappedIntegration::compile(
+                spec,
+                Backend::Mock,
+            )))),
             IntegrationType::AwsProxy if spec.subtype.is_some() => Err(format!(
                 "{} integrations are not supported yet",
                 spec.subtype.as_deref().unwrap_or_default()
@@ -212,10 +232,9 @@ impl Integration {
                     transfer,
                 }))
             }
-            IntegrationType::Http | IntegrationType::Aws => Err(format!(
-                "{} integrations need mapping templates, which are not supported yet",
-                spec.integration_type
-            )),
+            IntegrationType::Aws => {
+                Err("AWS service integrations are not supported yet".to_owned())
+            }
         }
     }
 
@@ -334,9 +353,15 @@ impl HttpProxy {
             };
             if let Some(name) = target.strip_prefix("integration.request.path.") {
                 path_params.insert(name.to_owned(), source);
-            } else if let Some(name) = target.strip_prefix("integration.request.querystring.") {
+            } else if let Some(name) = target
+                .strip_prefix("integration.request.querystring.")
+                .or_else(|| target.strip_prefix("integration.request.multivaluequerystring."))
+            {
                 query_params.insert(name.to_owned(), source);
-            } else if let Some(name) = target.strip_prefix("integration.request.header.") {
+            } else if let Some(name) = target
+                .strip_prefix("integration.request.header.")
+                .or_else(|| target.strip_prefix("integration.request.multivalueheader."))
+            {
                 headers.insert(name.to_owned(), source);
             } else {
                 tracing::warn!(target, "ignoring unsupported request parameter mapping");
@@ -363,7 +388,15 @@ impl HttpProxy {
 pub(crate) enum ParamSource {
     Path(String),
     Query(String),
+    /// `method.request.multivaluequerystring.<name>`: every value.
+    MultiQuery(String),
     Header(String),
+    /// `method.request.multivalueheader.<name>`: every value.
+    MultiHeader(String),
+    /// `method.request.body`: the whole body.
+    Body,
+    /// `method.request.body.<json path>`: a field of a JSON body.
+    BodyPath(String),
     /// A `context.<variable>` path into `$context`.
     Context(String),
     StageVariable(String),
@@ -375,108 +408,33 @@ impl ParamSource {
         if let Some(literal) = expr.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
             return Some(Self::Literal(literal.to_owned()));
         }
-        if let Some(name) = expr.strip_prefix("method.request.path.") {
-            return Some(Self::Path(name.to_owned()));
+        let Some(request) = expr.strip_prefix("method.request.") else {
+            return Self::parse_variable(expr);
+        };
+        if request == "body" {
+            return Some(Self::Body);
         }
-        if let Some(name) = expr.strip_prefix("method.request.querystring.") {
-            return Some(Self::Query(name.to_owned()));
+        if let Some(path) = request.strip_prefix("body.") {
+            return Some(Self::BodyPath(path.to_owned()));
         }
-        if let Some(name) = expr.strip_prefix("method.request.header.") {
-            return Some(Self::Header(name.to_owned()));
+        let (kind, name) = request.split_once('.')?;
+        let name = name.to_owned();
+        match kind {
+            "path" => Some(Self::Path(name)),
+            "querystring" => Some(Self::Query(name)),
+            "multivaluequerystring" => Some(Self::MultiQuery(name)),
+            "header" => Some(Self::Header(name)),
+            "multivalueheader" => Some(Self::MultiHeader(name)),
+            _ => None,
         }
+    }
+
+    fn parse_variable(expr: &str) -> Option<Self> {
         if let Some(path) = expr.strip_prefix("context.") {
             return Some(Self::Context(path.to_owned()));
         }
-        if let Some(name) = expr.strip_prefix("stageVariables.") {
-            return Some(Self::StageVariable(name.to_owned()));
-        }
-        None
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct MockResponse {
-    pub(crate) status: StatusCode,
-    pub(crate) headers: Vec<(HeaderName, HeaderValue)>,
-    pub(crate) content_type: Option<HeaderValue>,
-    pub(crate) body: String,
-}
-
-impl MockResponse {
-    /// API Gateway selects the integration response by the `statusCode` in the
-    /// request template; templates are returned verbatim because VTL is not
-    /// evaluated yet.
-    fn compile(spec: &IntegrationSpec) -> Result<Self, String> {
-        let requested = spec
-            .request_templates
-            .values()
-            .flatten()
-            .next()
-            .and_then(|template| Self::requested_status(template))
-            .unwrap_or(200);
-        let responses = &spec.responses;
-        let selected = responses
-            .get(&requested.to_string())
-            .or_else(|| responses.get("default"))
-            .or_else(|| responses.values().next());
-        let Some(response) = selected else {
-            let status = StatusCode::from_u16(requested)
-                .map_err(|_| format!("invalid mock status code {requested}"))?;
-            return Ok(Self {
-                status,
-                headers: Vec::new(),
-                content_type: None,
-                body: String::new(),
-            });
-        };
-        let status = response.status().unwrap_or(requested);
-        let status = StatusCode::from_u16(status)
-            .map_err(|_| format!("invalid mock status code {status}"))?;
-        let mut headers = Vec::new();
-        for (target, source) in &response.response_parameters {
-            let Some(name) = target.strip_prefix("method.response.header.") else {
-                continue;
-            };
-            let Some(ParamSource::Literal(value)) = ParamSource::parse(source) else {
-                tracing::warn!(
-                    header = name,
-                    "mock response header is not a literal; skipping"
-                );
-                continue;
-            };
-            match (HeaderName::try_from(name), HeaderValue::try_from(value)) {
-                (Ok(name), Ok(value)) => headers.push((name, value)),
-                (Err(_), _) | (_, Err(_)) => {
-                    tracing::warn!(header = name, "invalid mock response header; skipping");
-                }
-            }
-        }
-        let templates = &response.response_templates;
-        let template = templates
-            .get_key_value("application/json")
-            .or_else(|| templates.iter().next());
-        let (content_type, body) = match template {
-            Some((content_type, body)) => (
-                HeaderValue::try_from(content_type.as_str()).ok(),
-                body.clone().unwrap_or_default(),
-            ),
-            None => (None, String::new()),
-        };
-        Ok(Self {
-            status,
-            headers,
-            content_type,
-            body,
-        })
-    }
-
-    fn requested_status(template: &str) -> Option<u16> {
-        let value: Value = serde_json::from_str(template).ok()?;
-        match value.get("statusCode")? {
-            Value::Number(n) => n.as_u64().and_then(|n| u16::try_from(n).ok()),
-            Value::String(s) => s.parse().ok(),
-            Value::Null | Value::Bool(_) | Value::Array(_) | Value::Object(_) => None,
-        }
+        expr.strip_prefix("stageVariables.")
+            .map(|name| Self::StageVariable(name.to_owned()))
     }
 }
 
@@ -543,7 +501,7 @@ impl FromStr for LambdaTarget {
 #[expect(clippy::panic, reason = "tests fail loudly on unexpected variants")]
 mod tests {
     use serde::Deserialize;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::*;
 
@@ -568,7 +526,7 @@ mod tests {
                     "integration.request.path.id": "method.request.path.petId",
                     "integration.request.header.x-api": "'static'",
                     "integration.request.querystring.q": "method.request.querystring.search",
-                    "integration.request.header.bad": "method.request.body.id",
+                    "integration.request.header.bad": "method.request.unknown.id",
                     "integration.response.header.x": "'ignored'"
                 },
                 "timeoutInMillis": 5000
@@ -593,6 +551,97 @@ mod tests {
             Some(&ParamSource::Query("search".to_owned()))
         );
         assert!(!proxy.headers.contains_key("bad"));
+    }
+
+    #[test]
+    fn request_parameter_sources_cover_every_rest_form() {
+        let source = |expr: &str| ParamSource::parse(expr);
+        assert_eq!(
+            source("method.request.path.id"),
+            Some(ParamSource::Path("id".to_owned()))
+        );
+        assert_eq!(
+            source("method.request.querystring.q"),
+            Some(ParamSource::Query("q".to_owned()))
+        );
+        assert_eq!(
+            source("method.request.multivaluequerystring.q"),
+            Some(ParamSource::MultiQuery("q".to_owned()))
+        );
+        assert_eq!(
+            source("method.request.header.X-A"),
+            Some(ParamSource::Header("X-A".to_owned()))
+        );
+        assert_eq!(
+            source("method.request.multivalueheader.X-A"),
+            Some(ParamSource::MultiHeader("X-A".to_owned()))
+        );
+        assert_eq!(source("method.request.body"), Some(ParamSource::Body));
+        assert_eq!(
+            source("method.request.body.a.b[0]"),
+            Some(ParamSource::BodyPath("a.b[0]".to_owned()))
+        );
+        assert_eq!(
+            source("context.requestId"),
+            Some(ParamSource::Context("requestId".to_owned()))
+        );
+        assert_eq!(
+            source("stageVariables.env"),
+            Some(ParamSource::StageVariable("env".to_owned()))
+        );
+        assert_eq!(
+            source("'fixed'"),
+            Some(ParamSource::Literal("fixed".to_owned()))
+        );
+        for unknown in [
+            "method.request.cookie.c",
+            "method.request.path",
+            "integration.request.header.x",
+            "",
+        ] {
+            assert_eq!(source(unknown), None, "{unknown}");
+        }
+    }
+
+    #[test]
+    fn multi_value_targets_compile_into_the_query_and_header_maps() {
+        let Integration::HttpProxy(proxy) = compile(
+            json!({"type": "http_proxy", "httpMethod": "GET", "uri": "http://b/",
+            "requestParameters": {
+                "integration.request.multivaluequerystring.tag": "method.request.multivaluequerystring.tag",
+                "integration.request.multivalueheader.x-all": "method.request.multivalueheader.x-all",
+            }}),
+            ApiKind::Rest,
+        ) else {
+            panic!("expected HTTP proxy");
+        };
+        assert_eq!(
+            proxy.query_params.get("tag"),
+            Some(&ParamSource::MultiQuery("tag".to_owned()))
+        );
+        assert_eq!(
+            proxy.headers.get("x-all"),
+            Some(&ParamSource::MultiHeader("x-all".to_owned()))
+        );
+    }
+
+    #[test]
+    fn http_and_mock_integrations_compile_to_mapped_integrations() {
+        let http = compile(
+            json!({"type": "http", "httpMethod": "POST", "uri": "http://b/x"}),
+            ApiKind::Rest,
+        );
+        assert_eq!(http.kind(), "HTTP");
+        let mock = compile(json!({"type": "mock"}), ApiKind::Rest);
+        assert_eq!(mock.kind(), "MOCK");
+        let private = compile_private(
+            json!({"type": "http", "httpMethod": "GET", "connectionType": "VPC_LINK", "connectionId": "vl1",
+                "uri": "http://nlb.internal/x"}),
+            ApiKind::Rest,
+            &["vl1=http://svc"],
+            &[],
+        );
+        assert_eq!(private.kind(), "HTTP");
     }
 
     #[test]
@@ -670,58 +719,6 @@ mod tests {
             ApiKind::Rest,
         );
         assert!(matches!(integration, Integration::Unsupported { .. }));
-    }
-
-    #[test]
-    fn mock_selects_response_by_requested_status() {
-        let integration = compile(
-            json!({
-                "type": "mock",
-                "requestTemplates": {"application/json": "{\"statusCode\": 201}"},
-                "responses": {
-                    "default": {"statusCode": "200"},
-                    "201": {
-                        "statusCode": "201",
-                        "responseParameters": {
-                            "method.response.header.Access-Control-Allow-Origin": "'*'",
-                            "method.response.header.X-Dynamic": "integration.response.header.x",
-                            "method.response.header.Bad Name": "'v'"
-                        },
-                        "responseTemplates": {"application/json": "{\"ok\":true}"}
-                    }
-                }
-            }),
-            ApiKind::Rest,
-        );
-        let Integration::Mock(mock) = integration else {
-            panic!("expected mock");
-        };
-        assert_eq!(mock.status, StatusCode::CREATED);
-        assert_eq!(mock.body, "{\"ok\":true}");
-        assert_eq!(mock.headers.len(), 1);
-        assert_eq!(mock.content_type.unwrap(), "application/json");
-    }
-
-    #[test]
-    fn mock_without_responses_returns_requested_status_or_rejects_invalid() {
-        let mock = |template: &str| {
-            compile(
-                json!({"type": "mock", "requestTemplates": {"application/json": template}}),
-                ApiKind::Rest,
-            )
-        };
-        let Integration::Mock(m) = mock("{\"statusCode\": 204}") else {
-            panic!("expected mock")
-        };
-        assert_eq!(m.status, StatusCode::NO_CONTENT);
-        assert!(matches!(
-            mock("{\"statusCode\": 42}"),
-            Integration::Unsupported { .. }
-        ));
-        let Integration::Mock(m) = mock("#set($x = 1)") else {
-            panic!("expected mock")
-        };
-        assert_eq!(m.status, StatusCode::OK);
     }
 
     fn compile_private(
@@ -883,7 +880,7 @@ mod tests {
     fn unservable_integrations_are_unsupported_with_reasons() {
         let cases = [
             json!({"type": "aws", "uri": "arn:aws:apigateway:us-east-1:sqs:path/q"}),
-            json!({"type": "http", "uri": "http://x"}),
+            json!({"type": "http"}),
             json!({"type": "http_proxy", "connectionType": "VPC_LINK", "uri": "http://x"}),
             json!({"type": "http_proxy"}),
             json!({"type": "http_proxy", "httpMethod": "GE T", "uri": "http://x"}),

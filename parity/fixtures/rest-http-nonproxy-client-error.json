@@ -1,0 +1,12 @@
+{
+  "name": "rest-http-nonproxy-client-error",
+  "source": "hand_written",
+  "api": "rest",
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": "{\"upstreamStatus\":\"client-error\"}"
+  }
+}
