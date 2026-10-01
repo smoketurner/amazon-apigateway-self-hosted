@@ -17,6 +17,7 @@ use crate::cors::Cors;
 use crate::gateway_response::{Failure, GatewayResponses};
 use crate::integration::StageVariables;
 use crate::limits::LimitExceeded;
+use crate::mapped::content::BinaryMediaTypes;
 use crate::model::{ApiKind, Protection, ResponseType};
 use crate::observability::StageObserver;
 use crate::pipeline::RequestContext;
@@ -156,6 +157,9 @@ pub(crate) struct ApiContext {
     pub(crate) http: reqwest::Client,
     pub(crate) aws: Arc<AwsClients>,
     pub(crate) keys: Arc<KeyStore>,
+    /// The API's `binaryMediaTypes`, which decide how `contentHandling`
+    /// converts payloads.
+    pub(crate) binary_media_types: BinaryMediaTypes,
     pub(crate) observer: StageObserver,
     /// Which release of a canary stage this context serves; `None` when the
     /// stage has no canary.
@@ -205,6 +209,9 @@ pub(crate) enum GatewayError {
     RequestTooLarge,
     /// An integration this gateway can't execute yet.
     UnsupportedIntegration,
+    /// No request template matches the request's `Content-Type` and the
+    /// integration's `passthroughBehavior` does not allow the body through.
+    UnsupportedMediaType,
     /// A streaming integration's output doesn't follow the response streaming
     /// format; API Gateway answers `500`.
     MalformedStreamingResponse,
@@ -259,6 +266,7 @@ impl GatewayError {
                 StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
                 "Request Header Fields Too Large",
             ),
+            (Self::UnsupportedMediaType, _) => Failure::new(ResponseType::UnsupportedMediaType),
             (Self::UnsupportedIntegration, _) => Failure::gateway(
                 StatusCode::NOT_IMPLEMENTED,
                 "Integration not supported by this gateway",

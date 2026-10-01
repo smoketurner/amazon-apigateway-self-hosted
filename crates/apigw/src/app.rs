@@ -29,6 +29,7 @@ use crate::gateway_response::GatewayResponses;
 use crate::integration::StageVariables;
 use crate::integration_tls;
 use crate::listener::{self, ConnLimits, Edge, Tls};
+use crate::mapped::content::BinaryMediaTypes;
 use crate::model::{ApiModel, Feature, IntegrationOverrides, StageSettings};
 use crate::observability::{Observability, StageObserver};
 use crate::router::{self, BasePath, LoadSummary, Loaded, RouteSummary};
@@ -141,6 +142,7 @@ impl Builder {
             http: self.http.clone(),
             aws: Arc::clone(&self.aws),
             keys: Arc::clone(&self.keys),
+            binary_media_types: BinaryMediaTypes::new(&model.settings.binary_media_types),
             observer: StageObserver::new(
                 &self.observability,
                 &model,
@@ -894,7 +896,8 @@ mod tests {
         let doc = scratch("api.json");
         let write = |status: u16| {
             json!({"paths": {"/pets": {"get": {"x-amazon-apigateway-integration": {"type": "mock",
-                "requestTemplates": {"application/json": format!("{{\"statusCode\": {status}}}")}}}}}})
+                "requestTemplates": {"application/json": format!("{{\"statusCode\": {status}}}")},
+                "responses": {"default": {"statusCode": status.to_string()}}}}}}})
             .to_string()
         };
         tokio::fs::write(&doc, write(200)).await.unwrap();

@@ -440,6 +440,7 @@ mod tests {
     use crate::aws::{AwsClients, CredentialsMode, LambdaEndpoints};
     use crate::gateway::{ApiContext, AuthorizationMode, Enforcement, RequestId, Unsupported};
     use crate::gateway_response::GatewayResponses;
+    use crate::mapped::content::BinaryMediaTypes;
     use crate::model::{
         AccessLogSettings, IntegrationOverrides, MethodSettings, SettingsScope, StageSettings,
     };
@@ -553,6 +554,7 @@ mod tests {
             http: reqwest::Client::new(),
             aws: clients,
             keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
+            binary_media_types: BinaryMediaTypes::default(),
             observer: StageObserver::new(&observability, &model, "abc", Some("prod"), None),
             release: None,
         });

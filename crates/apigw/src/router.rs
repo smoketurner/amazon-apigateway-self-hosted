@@ -132,7 +132,10 @@ impl RouteSummary {
         let target = match route.integration {
             Integration::HttpProxy(ref proxy) => Some(proxy.uri.clone()),
             Integration::Lambda(ref lambda) => Some(lambda.function.to_string()),
-            Integration::Mock(_) => None,
+            Integration::Mapped(ref mapped) => {
+                problems.extend(mapped.problems());
+                mapped.target()
+            }
             Integration::Unsupported { ref reason } => {
                 problems.push(reason.clone());
                 None
@@ -140,9 +143,9 @@ impl RouteSummary {
         };
         let credentials = match route.integration {
             Integration::Lambda(ref lambda) => lambda.credentials.clone(),
-            Integration::HttpProxy(_) | Integration::Mock(_) | Integration::Unsupported { .. } => {
-                None
-            }
+            Integration::HttpProxy(_)
+            | Integration::Mapped(_)
+            | Integration::Unsupported { .. } => None,
         };
         Self {
             route_key: route.key.clone(),
@@ -532,7 +535,7 @@ pub(crate) fn admin(current: watch::Receiver<Arc<Loaded>>, aws: Arc<AwsClients>)
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests assert on known-good fixtures")]
-mod tests {
+pub(crate) mod tests {
     use axum::body::Body;
     use axum::http::StatusCode;
     use proptest::prelude::*;
@@ -544,6 +547,8 @@ mod tests {
     use crate::cors::Cors;
     use crate::gateway::{AuthorizationMode, Unsupported};
     use crate::gateway_response::GatewayResponses;
+    use crate::integration::StageVariables;
+    use crate::mapped::content::BinaryMediaTypes;
     use crate::model::{IntegrationOverrides, Protection, StageSettings};
     use crate::model::{MethodSettings, SettingsScope};
     use crate::observability::StageObserver;
@@ -551,7 +556,7 @@ mod tests {
     use crate::vpc_link::VpcLinks;
     use std::num::NonZeroU32;
 
-    const STRICT: Enforcement = Enforcement {
+    pub(crate) const STRICT: Enforcement = Enforcement {
         authorization: AuthorizationMode::Enforce,
         request_validation: Unsupported::Reject,
     };
@@ -580,11 +585,27 @@ mod tests {
         responses: GatewayResponses,
         cors: Option<Cors>,
     ) -> Arc<ApiContext> {
+        context(
+            kind,
+            enforcement,
+            responses,
+            cors,
+            (BinaryMediaTypes::default(), StageVariables::default()),
+        )
+    }
+
+    pub(crate) fn context(
+        kind: ApiKind,
+        enforcement: Enforcement,
+        responses: GatewayResponses,
+        cors: Option<Cors>,
+        (binary_media_types, variables): (BinaryMediaTypes, StageVariables),
+    ) -> Arc<ApiContext> {
         Arc::new(ApiContext {
             kind,
             api_id: "abc".to_owned(),
             stage: None,
-            stage_variables: Arc::default(),
+            stage_variables: Arc::new(variables),
             responses,
             cors,
             state: test_state(),
@@ -594,6 +615,7 @@ mod tests {
             http: reqwest::Client::new(),
             aws: aws(),
             keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
+            binary_media_types,
             observer: StageObserver::disabled(),
             release: None,
         })
@@ -1495,6 +1517,7 @@ mod tests {
             http: reqwest::Client::new(),
             aws,
             keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
+            binary_media_types: BinaryMediaTypes::default(),
             observer: StageObserver::disabled(),
             release: None,
         });

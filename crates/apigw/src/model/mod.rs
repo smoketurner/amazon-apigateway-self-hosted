@@ -331,12 +331,20 @@ pub(crate) struct IntegrationSpec {
     /// HTTP API response parameter mapping, keyed by backend status code.
     #[serde(default)]
     pub(crate) response_parameters: BTreeMap<String, BTreeMap<String, String>>,
+    /// The status codes of the method's declared responses; filled from the
+    /// operation's `responses` on import, never read from an integration.
+    #[serde(skip)]
+    pub(crate) method_responses: BTreeSet<u16>,
 }
 
 impl IntegrationSpec {
     fn unenforced(&self) -> Vec<Feature> {
         let mut features = Vec::new();
-        if self.content_handling.is_some() {
+        let proxied = matches!(
+            self.integration_type,
+            IntegrationType::HttpProxy | IntegrationType::AwsProxy
+        );
+        if self.content_handling.is_some() && proxied {
             features.push(Feature::ContentHandling);
         }
         if !self.cache_key_parameters.is_empty() {

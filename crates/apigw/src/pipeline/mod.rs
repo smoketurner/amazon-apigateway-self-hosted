@@ -14,8 +14,7 @@ use std::time::Instant;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{FromRequestParts as _, RawPathParams, Request};
-use axum::http::header;
-use axum::response::{IntoResponse as _, Response};
+use axum::response::Response;
 
 pub(crate) use context::RequestContext;
 
@@ -23,7 +22,7 @@ use crate::authz::{AuthRequest, Denial};
 use crate::cors::Cors;
 use crate::gateway::{ApiContext, GatewayError, MAX_BODY_BYTES};
 use crate::gateway_response::Failure;
-use crate::integration::{Integration, MockResponse};
+use crate::integration::Integration;
 use crate::model::{Protection, ResponseType};
 use crate::observability::IntegrationTiming;
 use crate::route::Route;
@@ -170,26 +169,11 @@ impl<'a> Pipeline<'a> {
                     .invoke(&self.api.aws, self.route, ctx, &self.api.stage_variables)
                     .await
             }
-            Integration::Mock(ref mock) => Ok(mock.respond()),
+            Integration::Mapped(ref mapped) => mapped.run(self.api, self.route, ctx).await,
             Integration::Unsupported { ref reason } => {
                 tracing::warn!(route = %self.route.key, reason, "unsupported integration invoked");
                 Err(GatewayError::UnsupportedIntegration)
             }
         }
-    }
-}
-
-impl MockResponse {
-    fn respond(&self) -> Response {
-        let mut response = Response::new(Body::from(self.body.clone()));
-        *response.status_mut() = self.status;
-        let headers = response.headers_mut();
-        if let Some(ref content_type) = self.content_type {
-            headers.insert(header::CONTENT_TYPE, content_type.clone());
-        }
-        for (name, value) in &self.headers {
-            headers.insert(name.clone(), value.clone());
-        }
-        response.into_response()
     }
 }

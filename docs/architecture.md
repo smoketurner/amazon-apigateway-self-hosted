@@ -27,7 +27,8 @@ gateway supplies the request through `TemplateInput` and reads `requestOverride`
 | `cors`, `http_routes`, `mapping` | HTTP API CORS (preflight answers and response headers), route selection by path and method together for HTTP APIs, and `requestParameters`/`responseParameters` mapping for `HTTP_PROXY` |
 | `vpc_link` | `--vpc-link` mappings from a VPC link connection ID to an in-cluster base URL, used when compiling `HTTP_PROXY` integrations |
 | `aws` | `AwsClients`: per-region Lambda clients, assumed integration-role credentials, Lambda endpoint overrides, trace header propagation |
-| `proxy` | `HTTP_PROXY` forwarding |
+| `proxy` | `HTTP_PROXY` forwarding, and the HTTP exchange non-proxy `HTTP` integrations use |
+| `mapped` | Non-proxy REST integrations (`HTTP`, `MOCK`): request templates and `passthroughBehavior` (`request`), `selectionPattern` selection and response mapping (`response`), `contentHandling` and `binaryMediaTypes` (`content`), and rendering with `apigw-vtl` (`vtl`) |
 | `lambda`, `lambda_response` | `AWS_PROXY` event construction (payload 1.0 and 2.0), invocation (buffered `Invoke` or streamed `InvokeWithResponseStream`), and response mapping |
 | `header_case` | Recovers the client's HTTP/1 header name spelling (hyper keeps it private) by watching request heads on the connection |
 | `listener` | TLS accept loop, PROXY protocol v2, certificate reload |

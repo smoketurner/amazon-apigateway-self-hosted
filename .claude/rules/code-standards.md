@@ -31,7 +31,7 @@ Invariants the compiler does **not** catch. Read before implementing or reviewin
 - [ ] Routes with an authorizer, IAM auth, or API key requirement answer `401` unless
       `--insecure-skip-authorization` is set. New integration types must not bypass the gate
       in `gateway::handle`.
-- [ ] Integrations that can't be served faithfully (VTL mapping templates, VPC links) answer
+- [ ] Integrations that can't be served faithfully (AWS service integrations, unmapped VPC links) answer
       `501` and are reported on `/routes`, never approximated silently.
 
 ## API Gateway fidelity
