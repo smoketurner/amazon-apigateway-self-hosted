@@ -1,10 +1,8 @@
 cases:
-  # Resource policies are not evaluated yet; APIs that carry one answer 403 for
-  # every route, so the allowed route is a known gap and the denied route matches.
+  # The policy allows every route and denies /ip-denied from any address.
   - name: policy-open-route
     api: rest_policy
     path: /open
-    known_gap: "#37"
     compare:
       headers: [content-type]
 
