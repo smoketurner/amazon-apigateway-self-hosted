@@ -1,0 +1,17 @@
+{
+  "name": "http-parameter-mapping",
+  "source": "hand_written",
+  "api": "http",
+  "response": {
+    "status": 200,
+    "headers": {}
+  },
+  "echo": {
+    "method": "GET",
+    "path": "/http-mapped/42",
+    "query": "appended=ref&fixed=literal&q=1",
+    "headers": {
+      "x-appended": "ref"
+    }
+  }
+}

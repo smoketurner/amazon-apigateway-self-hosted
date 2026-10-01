@@ -1,0 +1,280 @@
+{
+  "source": "hand_written",
+  "api": "rest",
+  "stage": "ref",
+  "stage_variables": {
+    "echo_host": "echo.lambda-url.us-east-1.on.aws"
+  },
+  "openapi": {
+    "openapi": "3.0.1",
+    "info": {
+      "title": "apigw-ref-rest",
+      "version": "1.0"
+    },
+    "paths": {
+      "/mock": {
+        "get": {
+          "x-amazon-apigateway-integration": {
+            "type": "mock",
+            "passthroughBehavior": "when_no_match",
+            "requestTemplates": {
+              "application/json": "{\"statusCode\": 200}"
+            },
+            "responses": {
+              "default": {
+                "statusCode": "200",
+                "responseParameters": {
+                  "method.response.header.X-Mock": "'yes'"
+                },
+                "responseTemplates": {
+                  "application/json": "{\"message\":\"mock\"}"
+                }
+              }
+            }
+          }
+        }
+      },
+      "/mock/teapot": {
+        "get": {
+          "x-amazon-apigateway-integration": {
+            "type": "mock",
+            "passthroughBehavior": "when_no_match",
+            "requestTemplates": {
+              "application/json": "{\"statusCode\": 418}"
+            },
+            "responses": {
+              "default": {
+                "statusCode": "418",
+                "responseTemplates": {
+                  "application/json": "{\"message\":\"teapot\"}"
+                }
+              }
+            }
+          }
+        }
+      },
+      "/mock/vtl": {
+        "get": {
+          "x-amazon-apigateway-integration": {
+            "type": "mock",
+            "passthroughBehavior": "when_no_match",
+            "requestTemplates": {
+              "application/json": "{\"statusCode\": 200}"
+            },
+            "responses": {
+              "default": {
+                "statusCode": "200",
+                "responseTemplates": {
+                  "application/json": "#set($name = $input.params('name'))\n{\"hello\":\"$name\",\"stage\":\"$context.stage\",\"method\":\"$context.httpMethod\"}"
+                }
+              }
+            }
+          }
+        }
+      },
+      "/cors": {
+        "get": {
+          "x-amazon-apigateway-integration": {
+            "type": "mock",
+            "passthroughBehavior": "when_no_match",
+            "requestTemplates": {
+              "application/json": "{\"statusCode\": 200}"
+            },
+            "responses": {
+              "default": {
+                "statusCode": "200",
+                "responseParameters": {
+                  "method.response.header.Access-Control-Allow-Origin": "'https://example.com'"
+                },
+                "responseTemplates": {
+                  "application/json": "{\"cors\":true}"
+                }
+              }
+            }
+          }
+        },
+        "options": {
+          "x-amazon-apigateway-integration": {
+            "type": "mock",
+            "passthroughBehavior": "when_no_match",
+            "requestTemplates": {
+              "application/json": "{\"statusCode\": 200}"
+            },
+            "responses": {
+              "default": {
+                "statusCode": "200",
+                "responseParameters": {
+                  "method.response.header.Access-Control-Allow-Origin": "'https://example.com'",
+                  "method.response.header.Access-Control-Allow-Methods": "'GET,OPTIONS'",
+                  "method.response.header.Access-Control-Allow-Headers": "'content-type,x-api-key'"
+                }
+              }
+            }
+          }
+        }
+      },
+      "/http-proxy/{proxy+}": {
+        "x-amazon-apigateway-any-method": {
+          "x-amazon-apigateway-integration": {
+            "type": "http_proxy",
+            "httpMethod": "ANY",
+            "uri": "https://${stageVariables.echo_host}/http-proxy/{proxy}",
+            "passthroughBehavior": "when_no_match",
+            "timeoutInMillis": 5000,
+            "requestParameters": {
+              "integration.request.path.proxy": "method.request.path.proxy",
+              "integration.request.header.x-echo-secret": "stageVariables.echo_secret"
+            }
+          }
+        }
+      },
+      "/http-mapped/{id}": {
+        "get": {
+          "x-amazon-apigateway-integration": {
+            "type": "http_proxy",
+            "httpMethod": "GET",
+            "uri": "https://${stageVariables.echo_host}/http-mapped/{backendId}",
+            "passthroughBehavior": "when_no_match",
+            "timeoutInMillis": 5000,
+            "requestParameters": {
+              "integration.request.path.backendId": "method.request.path.id",
+              "integration.request.querystring.mappedQuery": "method.request.querystring.q",
+              "integration.request.querystring.fixed": "'literal'",
+              "integration.request.header.x-mapped-header": "method.request.header.x-from-client",
+              "integration.request.header.x-echo-secret": "stageVariables.echo_secret"
+            }
+          }
+        }
+      },
+      "/keyed": {
+        "get": {
+          "x-amazon-apigateway-integration": {
+            "type": "aws_proxy",
+            "httpMethod": "POST",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations",
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "passthroughBehavior": "when_no_match"
+          },
+          "security": [
+            {
+              "api_key": []
+            }
+          ]
+        }
+      },
+      "/authz/token": {
+        "get": {
+          "x-amazon-apigateway-integration": {
+            "type": "aws_proxy",
+            "httpMethod": "POST",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations",
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "passthroughBehavior": "when_no_match"
+          },
+          "security": [
+            {
+              "token_authorizer": []
+            }
+          ]
+        }
+      },
+      "/authz/request": {
+        "get": {
+          "x-amazon-apigateway-integration": {
+            "type": "aws_proxy",
+            "httpMethod": "POST",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations",
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "passthroughBehavior": "when_no_match"
+          },
+          "security": [
+            {
+              "request_authorizer": []
+            }
+          ]
+        }
+      },
+      "/authz/cognito": {
+        "get": {
+          "x-amazon-apigateway-integration": {
+            "type": "aws_proxy",
+            "httpMethod": "POST",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations",
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "passthroughBehavior": "when_no_match"
+          },
+          "security": [
+            {
+              "cognito": []
+            }
+          ]
+        }
+      },
+      "/validated/{id}": {
+        "post": {
+          "x-amazon-apigateway-integration": {
+            "type": "aws_proxy",
+            "httpMethod": "POST",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations",
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "passthroughBehavior": "when_no_match"
+          },
+          "x-amazon-apigateway-request-validator": "all"
+        }
+      }
+    },
+    "components": {
+      "securitySchemes": {
+        "api_key": {
+          "type": "apiKey",
+          "name": "x-api-key",
+          "in": "header"
+        },
+        "token_authorizer": {
+          "type": "apiKey",
+          "name": "Authorization",
+          "in": "header",
+          "x-amazon-apigateway-authtype": "custom",
+          "x-amazon-apigateway-authorizer": {
+            "type": "token",
+            "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-authorizer/invocations",
+            "authorizerCredentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "authorizerResultTtlInSeconds": 0,
+            "identityValidationExpression": "^[a-z]+$"
+          }
+        },
+        "request_authorizer": {
+          "type": "apiKey",
+          "name": "x-auth",
+          "in": "header",
+          "x-amazon-apigateway-authtype": "custom",
+          "x-amazon-apigateway-authorizer": {
+            "type": "request",
+            "identitySource": "method.request.header.x-auth",
+            "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-authorizer/invocations",
+            "authorizerCredentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "authorizerResultTtlInSeconds": 30
+          }
+        },
+        "cognito": {
+          "type": "apiKey",
+          "name": "Authorization",
+          "in": "header",
+          "x-amazon-apigateway-authtype": "cognito_user_pools",
+          "x-amazon-apigateway-authorizer": {
+            "type": "cognito_user_pools",
+            "providerARNs": [
+              "arn:aws:cognito-idp:us-east-1:[account-id]:userpool/us-east-1_EXAMPLE"
+            ]
+          }
+        }
+      }
+    },
+    "x-amazon-apigateway-request-validators": {
+      "all": {
+        "validateRequestBody": true,
+        "validateRequestParameters": true
+      }
+    }
+  }
+}

@@ -1,0 +1,31 @@
+cases:
+  - name: http-http-proxy-greedy
+    api: http
+    path: /http-proxy/x/y
+    query: {k: v}
+    compare:
+      headers: [content-type]
+      body: ignore
+      echo: {}
+
+  - name: http-jwt-authorizer-missing-token
+    api: http
+    path: /authz/jwt
+    compare:
+      headers: [content-type]
+
+  - name: http-lambda-authorizer-missing-identity
+    api: http
+    path: /authz/lambda-simple
+    compare:
+      headers: [content-type]
+
+  # Parameter mapping (overwrite/append/remove) is not applied yet
+  - name: http-parameter-mapping
+    api: http
+    path: /mapped/42
+    query: {q: "1"}
+    known_gap: "#19"
+    compare:
+      body: ignore
+      echo: {headers: [x-appended]}
