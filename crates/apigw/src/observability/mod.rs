@@ -13,7 +13,7 @@ mod observer;
 mod queue;
 #[cfg(test)]
 #[expect(clippy::panic, reason = "a test helper that fails loudly on timeout")]
-mod testing;
+pub(crate) mod testing;
 mod trace;
 
 use std::collections::HashMap;
@@ -28,6 +28,7 @@ pub(crate) use metrics::MetricsNamespace;
 pub(crate) use observer::{IntegrationTiming, StageObserver};
 pub(crate) use trace::Trace;
 
+use crate::canary::Release;
 use destination::Destination;
 use metrics::MetricsAggregator;
 use queue::{CloudWatchShipper, FirehoseShipper, LogQueue, Shipper, Worker, XRayShipper};
@@ -170,36 +171,54 @@ impl Observability {
     }
 
     /// Where a stage's access log lines go, given the destination ARN in its
-    /// access log settings.
-    pub(crate) fn access_log_queue(&self, destination_arn: Option<&str>) -> Option<LogQueue> {
-        match self.settings.access_logs {
-            Delivery::Off => None,
-            Delivery::Stdout => Some(self.queue(Destination::Stdout)),
-            Delivery::Aws => {
-                let destination = match destination_arn.map(str::parse::<Destination>) {
-                    Some(Ok(destination)) => destination,
-                    Some(Err(err)) => {
-                        tracing::warn!(%err, "writing access logs to stdout instead");
-                        Destination::Stdout
-                    }
-                    None => Destination::Stdout,
-                };
-                Some(self.queue(destination))
-            }
-        }
+    /// access log settings: the destination, and for canary requests also its
+    /// canary variant. Empty when access logs are off.
+    pub(crate) fn access_log_queues(
+        &self,
+        destination_arn: Option<&str>,
+        release: Option<Release>,
+    ) -> Vec<LogQueue> {
+        let destination = match self.settings.access_logs {
+            Delivery::Off => return Vec::new(),
+            Delivery::Stdout => Destination::Stdout,
+            Delivery::Aws => match destination_arn.map(str::parse::<Destination>) {
+                Some(Ok(destination)) => destination,
+                Some(Err(err)) => {
+                    tracing::warn!(%err, "writing access logs to stdout instead");
+                    Destination::Stdout
+                }
+                None => Destination::Stdout,
+            },
+        };
+        self.with_canary(destination, release)
     }
 
-    /// Where a stage's execution logs go.
-    pub(crate) fn execution_queue(&self, api_id: &str, stage: &str) -> Option<LogQueue> {
-        match self.settings.execution_logs {
-            Delivery::Off => None,
-            Delivery::Stdout => Some(self.queue(Destination::Stdout)),
-            Delivery::Aws => Some(self.queue(Destination::CloudWatch {
+    /// Where a stage's execution logs go, as for [`Self::access_log_queues`].
+    pub(crate) fn execution_queues(
+        &self,
+        api_id: &str,
+        stage: &str,
+        release: Option<Release>,
+    ) -> Vec<LogQueue> {
+        let destination = match self.settings.execution_logs {
+            Delivery::Off => return Vec::new(),
+            Delivery::Stdout => Destination::Stdout,
+            Delivery::Aws => Destination::CloudWatch {
                 region: None,
                 group: LogGroup::execution_logs(api_id, stage),
                 create_group: true,
-            })),
-        }
+            },
+        };
+        self.with_canary(destination, release)
+    }
+
+    fn with_canary(&self, destination: Destination, release: Option<Release>) -> Vec<LogQueue> {
+        let canary = (release == Some(Release::Canary))
+            .then(|| destination.canary())
+            .flatten();
+        let mut queues = vec![self.queue(destination)];
+        queues.extend(canary.map(|destination| self.queue(destination)));
+        queues
     }
 
     /// Where trace segments go, when tracing is on.

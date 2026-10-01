@@ -218,6 +218,7 @@ impl Harness {
             )),
             replicas: std::num::NonZeroU32::MIN,
             observer: crate::observability::StageObserver::disabled(),
+            release: None,
             http: reqwest::Client::new(),
             aws,
         });

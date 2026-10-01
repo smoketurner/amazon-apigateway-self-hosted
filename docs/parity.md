@@ -91,7 +91,7 @@ Routes whose protection is not evaluated yet are refused, never served unprotect
 | Stage, method, and route throttling (`429`) | Partial | Partial | Token buckets per method (REST `methodSettings`, `*/*` default) and per route (HTTP route settings, default route settings); `429` through the `THROTTLED` gateway response (REST) or `{"message":"Too Many Requests"}` (HTTP). Account-level and usage-plan throttles are not applied; limits are per replica (see below) |
 | Shared limiter state across replicas | Partial | Partial | In-memory per replica; `--replicas N` divides throttle rates and bursts by `N`, so the API-wide rate is approximately the configured one (a replica's bucket holds at least one token, so with more replicas than burst tokens the API-wide burst is larger). An optional Valkey backend that makes limits exact is planned ([#35](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/35)) |
 | Response caching | Planned | n/a | Cache settings and key parameters are imported and reported ([#38](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/38)) |
-| Canary releases | Planned | n/a | The deployed stage is served; the canary split is reported ([#39](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/39)) |
+| Canary releases | Partial | n/a | Traffic is split by `percentTraffic` with the canary's stage variable overrides, `$context.isCanaryRequest`, and separate canary logs and metrics. The canary's structure comes from `--canary-export-stage` (a stage holding the canary deployment); without it only stage variables differ. `useStageCache` waits for [#38](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/38) ([#39](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/39)) |
 
 ## Observability
 
@@ -147,7 +147,6 @@ Imported settings that are not enforced yet map to issues as follows:
 | `cors`, `parameter_mapping` | [#19](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/19) |
 | `integration_tls_config` | [#16](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/16) |
 | `response_caching` | [#38](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/38) |
-| `canary` | [#39](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/39) |
 
 ## Fidelity limits of the export
 
@@ -155,7 +154,7 @@ Imported settings that are not enforced yet map to issues as follows:
   deployment. Only `GetExport` for a stage and HTTP `ExportApi` with a stage name reflect what
   is deployed, so the export is the structural source and usage plans, API keys, and domain
   mappings are read live.
-- A canary deployment cannot be exported; only the stage's main deployment is served until
-  [#39](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/39).
+- A canary deployment cannot be exported. The canary release is built from the stage's export
+  unless `--canary-export-stage` supplies a stage that holds the canary deployment.
 - Control-plane calls share a 10 requests per second per-account limit, so refreshes are
   conditional and jittered.

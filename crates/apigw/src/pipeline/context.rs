@@ -14,6 +14,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
+use crate::canary::Release;
 use crate::gateway::{ApiContext, RequestId};
 use crate::identity::ClientIdentity;
 use crate::integration::StageVariables;
@@ -27,6 +28,8 @@ pub(crate) struct ApiInfo {
     pub(crate) kind: ApiKind,
     pub(crate) api_id: String,
     pub(crate) stage: Option<String>,
+    /// Which release serves the request, for stages that have a canary.
+    pub(crate) release: Option<Release>,
 }
 
 impl ApiInfo {
@@ -264,6 +267,7 @@ impl RequestContext {
                 kind: api.kind,
                 api_id: api.api_id.clone(),
                 stage: api.stage.clone(),
+                release: api.release,
             },
             route_key,
             resource_path,
@@ -360,6 +364,9 @@ impl RequestContext {
         if let (Value::Object(fields), Some(trace)) = (&mut context, self.trace) {
             fields.insert("xrayTraceId".to_owned(), json!(trace.id().to_string()));
         }
+        if let (Value::Object(fields), Some(release)) = (&mut context, self.api.release) {
+            fields.insert("isCanaryRequest".to_owned(), json!(release.is_canary()));
+        }
         let mut integration = BTreeMap::new();
         if let Some(status) = self.integration.status {
             integration.insert("status", json!(status));
@@ -400,6 +407,7 @@ pub(crate) mod tests {
                 kind,
                 api_id: "abc123".to_owned(),
                 stage: Some("prod".to_owned()),
+                release: None,
             },
             route_key: RouteKey::from("POST /pets/{petId}"),
             resource_path: "/pets/{petId}".to_owned(),
@@ -501,6 +509,7 @@ pub(crate) mod tests {
             kind: ApiKind::Http,
             api_id: "a".to_owned(),
             stage: None,
+            release: None,
         };
         assert_eq!(info.stage_name(), "$default");
     }
