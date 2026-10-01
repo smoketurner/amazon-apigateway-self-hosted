@@ -63,7 +63,6 @@ impl Builder {
             base_path: BasePath::default(),
             enforcement: Enforcement {
                 authorization: AuthorizationMode::Enforce,
-                resource_policy: Unsupported::Reject,
                 request_validation: Unsupported::Reject,
             },
             stage_variable_overrides: BTreeMap::new(),
