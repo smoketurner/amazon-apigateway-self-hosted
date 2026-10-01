@@ -2,6 +2,7 @@
 //! definition and serves its routes from a single binary.
 
 mod app;
+mod authz;
 mod aws;
 mod config;
 mod gateway;
@@ -17,6 +18,8 @@ mod proxy;
 mod route;
 mod router;
 mod source;
+mod state;
+mod throttle;
 
 use clap::Parser as _;
 use tracing_subscriber::EnvFilter;

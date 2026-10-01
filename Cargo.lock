@@ -39,6 +39,7 @@ name = "apigw"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "apigw-regex",
  "aws-config",
  "aws-sdk-apigateway",
  "aws-sdk-apigatewayv2",

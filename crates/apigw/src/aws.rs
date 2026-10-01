@@ -23,8 +23,17 @@ use serde::Serialize;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct FunctionArn {
     raw: String,
-    region: Option<String>,
+    scope: Option<ArnScope>,
     name: String,
+}
+
+/// The partition, region, and account of an ARN: the part of an
+/// `execute-api` method ARN that does not depend on the request.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct ArnScope {
+    pub(crate) partition: String,
+    pub(crate) region: String,
+    pub(crate) account: String,
 }
 
 impl FunctionArn {
@@ -33,7 +42,12 @@ impl FunctionArn {
     }
 
     pub(crate) fn region(&self) -> Option<&str> {
-        self.region.as_deref()
+        self.scope.as_ref().map(|scope| scope.region.as_str())
+    }
+
+    /// Where the function lives, unless it was given as a bare name.
+    pub(crate) fn scope(&self) -> Option<ArnScope> {
+        self.scope.clone()
     }
 
     pub(crate) fn name(&self) -> &str {
@@ -57,20 +71,24 @@ impl FromStr for FunctionArn {
         ) {
             (
                 Some("arn"),
-                Some(_partition),
+                Some(partition),
                 Some("lambda"),
                 Some(region),
-                Some(_account),
+                Some(account),
                 Some("function"),
                 Some(name),
             ) if !region.is_empty() && !name.is_empty() => Ok(Self {
                 raw: raw.to_owned(),
-                region: Some(region.to_owned()),
+                scope: Some(ArnScope {
+                    partition: partition.to_owned(),
+                    region: region.to_owned(),
+                    account: account.to_owned(),
+                }),
                 name: name.to_owned(),
             }),
             (Some(name), None, ..) if !name.is_empty() && !raw.contains('/') => Ok(Self {
                 raw: raw.to_owned(),
-                region: None,
+                scope: None,
                 name: name.to_owned(),
             }),
             _ => Err(format!("{raw:?} is not a Lambda function ARN")),

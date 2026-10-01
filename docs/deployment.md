@@ -65,6 +65,10 @@ own principal does the calling, so:
   `/routes` reports each role the gateway tried to assume and whether it worked. With
   `--integration-credentials=gateway` the roles are ignored and the gateway's own credentials
   are used.
+- **Lambda authorizers** are invoked like Lambda integrations: with the `authorizerCredentials`
+  role when the authorizer has one (same trust policy requirement as above), otherwise as the
+  gateway's principal. An authorizer that cannot be invoked or answers in an invalid format
+  answers `500`, as API Gateway does; check the gateway's logs.
 - **Lambda functions without a role**: grant the gateway's principal `lambda:InvokeFunction`
   (identity policy, or the function's resource policy for cross-account functions).
 - **Caller passthrough** (`arn:aws:iam::*:user/*`) needs IAM-authenticated callers and cannot
@@ -225,7 +229,7 @@ Gateway answers a caller who fails that check, and lists each one per route on `
 |---|---|---|
 | Resource policy (any statement) | `403 Forbidden` | `--unsupported-resource-policy=ignore` |
 | IAM (`AWS_IAM`) | REST `403 Missing Authentication Token`, HTTP `403 Forbidden` | `--insecure-skip-authorization` |
-| Lambda, Cognito, or JWT authorizer | `401 Unauthorized` | `--insecure-skip-authorization` |
+| Cognito or JWT authorizer, or a Lambda authorizer that cannot be evaluated (see `/routes`) | `401 Unauthorized` | `--insecure-skip-authorization` |
 | API key | `403 Forbidden` | `--insecure-skip-authorization` |
 | Request validator | `501` | `--unsupported-validation=ignore` |
 

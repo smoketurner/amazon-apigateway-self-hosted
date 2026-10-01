@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::num::NonZeroU8;
+use std::num::{NonZeroU8, NonZeroU32};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -125,6 +125,14 @@ pub(crate) struct Config {
     /// --trusted-proxies only; its source address is the client.
     #[arg(long, env = "APIGW_PROXY_PROTOCOL", requires = "trusted_proxies")]
     pub(crate) proxy_protocol: bool,
+
+    /// How many gateway replicas serve this API. Throttle limits are divided by
+    /// this count because each replica keeps its own buckets, so the API-wide rate
+    /// is approximately the configured one. A replica's bucket always holds at
+    /// least one token, so with more replicas than burst tokens the API-wide burst
+    /// is larger than configured.
+    #[arg(long, env = "APIGW_REPLICAS", default_value_t = NonZeroU32::MIN)]
+    pub(crate) replicas: NonZeroU32,
 
     /// Address for `/healthz` and `/routes`. Disabled when unset.
     #[arg(long, env = "APIGW_ADMIN_LISTEN")]
@@ -393,6 +401,15 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn replicas_default_to_one_and_must_be_positive() {
+        let config = parse(&["--http-api-id", "a", "--stage", "s"]).unwrap();
+        assert_eq!(config.replicas.get(), 1);
+        let config = parse(&["--http-api-id", "a", "--stage", "s", "--replicas", "3"]).unwrap();
+        assert_eq!(config.replicas.get(), 3);
+        assert!(parse(&["--http-api-id", "a", "--stage", "s", "--replicas", "0"]).is_err());
     }
 
     #[test]

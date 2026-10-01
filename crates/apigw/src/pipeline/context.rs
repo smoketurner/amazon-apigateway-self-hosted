@@ -17,7 +17,7 @@ use uuid::Uuid;
 use crate::gateway::{ApiContext, RequestId};
 use crate::identity::ClientIdentity;
 use crate::integration::StageVariables;
-use crate::model::{ApiKind, RouteKey};
+use crate::model::{ApiKind, PayloadVersion, RouteKey};
 use crate::observability::Trace;
 use crate::route::Route;
 
@@ -100,6 +100,52 @@ impl FormEncoded<'_> {
     }
 }
 
+/// What produced `$context.authorizer`, which decides how Lambda proxy events
+/// of HTTP API payload format 2.0 nest it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum AuthorizerSource {
+    #[default]
+    None,
+    Lambda,
+}
+
+/// `$context.authorizer.*`: what the request's authorizer produced.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct AuthorizerContext {
+    values: Map<String, Value>,
+    source: AuthorizerSource,
+}
+
+impl AuthorizerContext {
+    /// A Lambda authorizer's `principalId` and `context` map.
+    pub(crate) fn lambda(values: Map<String, Value>) -> Self {
+        Self {
+            values,
+            source: AuthorizerSource::Lambda,
+        }
+    }
+
+    pub(crate) fn values(&self) -> &Map<String, Value> {
+        &self.values
+    }
+
+    /// The value of `requestContext.authorizer` in a Lambda proxy event of this
+    /// payload version, if an authorizer ran.
+    pub(crate) fn event_value(&self, version: PayloadVersion) -> Option<Value> {
+        match (self.source, version) {
+            (AuthorizerSource::None, _) => None,
+            (AuthorizerSource::Lambda, PayloadVersion::V1) => {
+                Some(Value::Object(self.values.clone()))
+            }
+            (AuthorizerSource::Lambda, PayloadVersion::V2) => {
+                let mut context = self.values.clone();
+                context.remove("principalId");
+                Some(json!({ "lambda": context }))
+            }
+        }
+    }
+}
+
 /// Outcome of the integration call, for `$context.integration.*`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct IntegrationOutcome {
@@ -125,8 +171,7 @@ pub(crate) struct RequestContext {
     pub(crate) path_params: Vec<(String, String)>,
     pub(crate) identity: ClientIdentity,
     pub(crate) body: Bytes,
-    /// `$context.authorizer.*`, filled by authorizers.
-    pub(crate) authorizer: Map<String, Value>,
+    pub(crate) authorizer: AuthorizerContext,
     pub(crate) stage_variables: Arc<StageVariables>,
     /// This request's place in an X-Ray trace, when the stage traces.
     pub(crate) trace: Option<Trace>,
@@ -231,7 +276,7 @@ impl RequestContext {
             path_params,
             identity,
             body: Bytes::new(),
-            authorizer: Map::new(),
+            authorizer: AuthorizerContext::default(),
             stage_variables: Arc::clone(&api.stage_variables),
             trace,
             integration: IntegrationOutcome::default(),
@@ -310,7 +355,7 @@ impl RequestContext {
             "resourcePath": self.resource_path,
             "routeKey": self.route_key.as_str(),
             "stage": self.api.stage_name(),
-            "authorizer": Value::Object(self.authorizer.clone()),
+            "authorizer": Value::Object(self.authorizer.values().clone()),
         });
         if let (Value::Object(fields), Some(trace)) = (&mut context, self.trace) {
             fields.insert("xrayTraceId".to_owned(), json!(trace.id().to_string()));
@@ -367,7 +412,7 @@ pub(crate) mod tests {
             path_params: vec![("petId".to_owned(), "7".to_owned())],
             identity,
             body: Bytes::new(),
-            authorizer: Map::new(),
+            authorizer: AuthorizerContext::default(),
             trace: None,
             stage_variables: Arc::default(),
             integration: IntegrationOutcome::default(),
@@ -407,9 +452,10 @@ pub(crate) mod tests {
             latency_ms: Some(12),
             error: None,
         };
-        request
-            .authorizer
-            .insert("principalId".to_owned(), json!("user-1"));
+        request.authorizer = AuthorizerContext::lambda(Map::from_iter([
+            ("principalId".to_owned(), json!("user-1")),
+            ("tenant".to_owned(), json!("acme")),
+        ]));
         let vars = request.variables();
         assert_eq!(vars["apiId"], "abc123");
         assert_eq!(vars["stage"], "prod");
@@ -423,6 +469,30 @@ pub(crate) mod tests {
         assert_eq!(vars["integration"]["status"], 200);
         assert_eq!(vars["authorizer"]["principalId"], "user-1");
         assert!(vars["integration"].get("error").is_none());
+    }
+
+    #[test]
+    fn lambda_authorizer_context_nests_by_payload_version() {
+        let context = AuthorizerContext::lambda(Map::from_iter([
+            ("principalId".to_owned(), json!("user-1")),
+            ("tenant".to_owned(), json!("acme")),
+        ]));
+        assert_eq!(
+            context.event_value(PayloadVersion::V1),
+            Some(json!({"principalId": "user-1", "tenant": "acme"}))
+        );
+        assert_eq!(
+            context.event_value(PayloadVersion::V2),
+            Some(json!({"lambda": {"tenant": "acme"}}))
+        );
+        assert_eq!(
+            AuthorizerContext::default().event_value(PayloadVersion::V1),
+            None
+        );
+        assert_eq!(
+            AuthorizerContext::default().event_value(PayloadVersion::V2),
+            None
+        );
     }
 
     #[test]

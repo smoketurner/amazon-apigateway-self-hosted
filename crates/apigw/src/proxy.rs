@@ -233,6 +233,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::authz::RouteAuthorizer;
     use crate::integration::Integration;
     use crate::model::{ApiKind, MethodMatch, Protections, RouteKey};
     use crate::pipeline::context::QueryString;
@@ -269,7 +270,9 @@ mod tests {
             path,
             integration: Integration::HttpProxy(target.clone()),
             protections: Protections::default(),
+            authorizer: RouteAuthorizer::None,
             unenforced: Vec::new(),
+            throttle: None,
         }
     }
 

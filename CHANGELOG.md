@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Lambda authorizers are evaluated. REST `TOKEN` (with `identityValidationExpression`) and `REQUEST`
+  authorizers and HTTP API `REQUEST` authorizers (payload 1.0 and 2.0, simple responses) are invoked
+  with the request's identity sources, their results are cached by identity source and TTL, and the
+  returned IAM policy is evaluated against each method ARN, including `*` and `?` wildcards. A
+  missing identity source answers `401`, a denying policy `403`, a failing or invalid authorizer
+  `500`; `principalId` and `context` reach `$context.authorizer` and Lambda events. Cognito and JWT
+  authorizers still answer `401`.
 - `crates/apigw-regex`: a `java.util.regex` translator for `fancy-regex` covering whole-string
   `matches`, ASCII `\w \d \s \b`, Java line terminators for `.` `^` `$`, flags, `\Q..\E`, POSIX
   classes, replacement strings with greedy `$n` and `${name}`, and `split` limits. Constructs
@@ -59,6 +66,13 @@ All notable changes to this project are documented here. The format follows
   `$context`, `$stageVariables`, and `$method.request.*` substitution (no VTL), with
   `DEFAULT_4XX`/`DEFAULT_5XX` fallback. Error responses carry `x-amzn-ErrorType` and
   `x-amz-apigw-id`. The 413 response is not customizable. HTTP APIs keep fixed messages.
+
+- Stage throttling: REST `methodSettings` (including the `*/*` default) and HTTP API route
+  settings (including the default route settings) limit each method or route with a token
+  bucket and answer `429` (`THROTTLED` gateway response for REST, `{"message":"Too Many
+  Requests"}` for HTTP). `--replicas` (`APIGW_REPLICAS`) divides the limits per replica.
+- A `StateBackend` (in-memory, bounded, with LRU eviction) holding token buckets, calendar-aligned
+  day/week/month quota counters, and a TTL cache, for usage plans and response caching to use.
 
 ### Changed
 
