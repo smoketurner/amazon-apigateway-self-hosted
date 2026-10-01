@@ -1,0 +1,13 @@
+{
+  "name": "rest-mock-ok",
+  "source": "hand_written",
+  "api": "rest",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "x-mock": "yes"
+    },
+    "body": "{\"message\":\"mock\"}"
+  }
+}

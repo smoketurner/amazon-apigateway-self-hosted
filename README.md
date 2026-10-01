@@ -132,6 +132,7 @@ previous routes keep serving), so a typo never goes unnoticed.
 | [docs/crypto.md](docs/crypto.md) | aws-lc-rs as the only crypto provider |
 | [docs/ci-cd.md](docs/ci-cd.md) | CI jobs |
 | [terraform/README.md](terraform/README.md) | Terraform modules and the `dev` environment that deploys the reference APIs parity is measured against |
+| [parity/README.md](parity/README.md) | The parity runner: request cases, fixtures, `record` and `replay` |
 
 ## Development
 
@@ -139,6 +140,7 @@ previous routes keep serving), so a typo never goes unnoticed.
 make lint   # cargo clippy --workspace --all-targets --all-features -- -D warnings
 make test   # cargo test --workspace --all-features
 make deny   # cargo deny check
+make parity # replay the recorded API Gateway fixtures against a local build
 make image  # docker build -t apigw:local .
 ```
 

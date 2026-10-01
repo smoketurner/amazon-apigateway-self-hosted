@@ -46,6 +46,10 @@ the environment pins exact versions and configures the provider and backend.
 | Service targets | SQS queue, DynamoDB table, Step Functions EXPRESS state machine, EventBridge bus (events are also written to a log group) |
 | CI | GitHub OIDC provider (unless you pass an existing one) and a read-only role for the nightly workflow |
 
+Gateway responses are customized only for `BAD_REQUEST_BODY`, `BAD_REQUEST_PARAMETERS`,
+`THROTTLED`, and `DEFAULT_5XX`; the missing-token, unauthorized, and forbidden responses stay
+stock so their default form can be recorded.
+
 The echo Lambda accepts `echo_status=<code>`, `echo_binary=1`, and `echo_content_type=<mime>`
 query parameters to control the response, and redacts the shared secret from the event it
 returns. The authorizer returns Allow for the credential `allow`, Deny for `deny`, and raises

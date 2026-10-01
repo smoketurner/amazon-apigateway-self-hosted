@@ -1,0 +1,12 @@
+{
+  "name": "http-lambda-authorizer-missing-identity",
+  "source": "hand_written",
+  "api": "http",
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": "{\"message\":\"Unauthorized\"}"
+  }
+}

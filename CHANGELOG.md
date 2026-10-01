@@ -38,6 +38,10 @@ All notable changes to this project are documented here. The format follows
   canary, caching). `/routes` lists every imported feature that is not enforced yet.
 - Refresh calls `GetStage` first and re-downloads the export only when the deployment changed;
   failed refreshes back off exponentially with jitter.
+- `crates/apigw-parity`, a dev tool with `record` (capture the reference APIs' behavior as
+  normalized, redacted fixtures) and `replay` (serve the recorded export with `apigw` and diff
+  its answers). Seed cases and hand-written fixtures live in `parity/`; CI runs `replay`, and
+  `.github/workflows/parity.yml` re-records nightly and opens an issue on drift.
 
 ### Fixed
 
