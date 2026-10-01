@@ -108,6 +108,11 @@ All notable changes to this project are documented here. The format follows
   including `overwrite:statuscode`, with `$request.*`, `$response.*`, `$context.*`,
   `$stageVariables.*`, and static sources.
 
+- `--vpc-link CONNECTION_ID=URL` (`APIGW_VPC_LINKS`, repeatable) serves `HTTP_PROXY`
+  integrations that use a VPC link from an in-cluster URL; REST routes send the integration
+  URI's host as the `Host` header, HTTP API routes send the request path (with the stage prefix
+  API Gateway adds). Routes whose link has no mapping still answer `501`, now naming the flag.
+
 ### Changed
 
 - HTTP API route selection takes the method into account: a route that matches the path but
