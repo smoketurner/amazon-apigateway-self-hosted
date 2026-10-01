@@ -86,6 +86,8 @@ Every flag has an environment variable (`apigw --help` lists them). The main one
 | `--metrics-namespace` | `APIGW_METRICS_NAMESPACE` | `ApiGatewaySelfHosted` | CloudWatch namespace for the metrics (`AWS/` is reserved) |
 | `--tracing` | `APIGW_TRACING` | `aws` | `aws` sends X-Ray segments for stages with tracing enabled and propagates trace headers; `off` does neither |
 | `--xray-sampling-percent` | `APIGW_XRAY_SAMPLING_PERCENT` | `5` | Percentage of requests traced after the first request each second, when the caller made no sampling decision |
+| `--domain-name NAME` | `APIGW_DOMAIN_NAMES` | none | Serve every API mapped to this custom domain (repeatable or comma-separated; `*.example.com` allowed) instead of one API ([Custom domains](#custom-domains)) |
+| `--domain-cert-dir DIR` | `APIGW_DOMAIN_CERT_DIR` | none | `DIR/{domain}/tls.crt` and `tls.key` per domain, served by SNI and reloaded on change; without it `--tls-cert` serves every domain |
 | `--canary-export-stage` | `APIGW_CANARY_EXPORT_STAGE` | none | REST stage that holds the canary deployment of `--stage`, exported to build the canary release ([Canary releases](#canary-releases)) |
 | `--log-stream` | `APIGW_LOG_STREAM` | `{HOSTNAME}/{start time}/{suffix}` | Log stream this process writes to in every log group |
 
@@ -118,6 +120,33 @@ HTTP route:
 
 The file is re-read on every refresh. A key that names no route rejects the whole update (the
 previous routes keep serving), so a typo never goes unnoticed.
+
+## Custom domains
+
+`--domain-name api.example.com` replaces `--rest-api-id`/`--http-api-id`: the process serves every
+API stage mapped to that custom domain in API Gateway, reading the domain's API mappings (and, for
+domains in a routing rule mode, its routing rules) and keeping them current every
+`--refresh-seconds`. The request's `Host` selects the domain; unknown hosts and requests no mapping
+matches answer `403 {"message":"Forbidden"}`.
+
+- **API mappings** are matched as API Gateway documents: with only single-level keys a request
+  goes to the mapping named by its first path segment, else the `(none)` mapping; when any key has
+  several levels, the longest matching prefix wins (`/ordersandmore` goes to `orders`). The matched
+  key is removed from the path, so `/orders/shop/5/hats` reaches the API as `/hats`.
+- **Routing rules** (`ROUTING_RULE_ONLY`, `ROUTING_RULE_THEN_API_MAPPING`) are evaluated by
+  ascending priority: header conditions (name case-insensitive, value case-sensitive, a `*`
+  wildcard at the start and/or end), a base path condition, and `stripBasePath`. A rule or mapping
+  whose API fails to load answers 503 until it loads.
+- **`/ping` and `/sping`** are reserved on every domain and answer `200` with `healthy`.
+- **REST and HTTP APIs** can be mapped to the same domain. Mappings do not say which kind an API
+  is, so each API ID is looked up as a REST API first.
+- **Certificates:** a client that asks for a domain name (SNI) gets that domain's certificate from
+  `--domain-cert-dir`, exact names before wildcards; everything else gets `--tls-cert`.
+- **Not supported with `--domain-name`:** `--stage`, `--base-path`, `--integration-overrides`,
+  `--config-cache`, and `--canary-export-stage` (each API serves its stage's deployment; a
+  stage with a canary serves both releases as in single-API mode).
+
+`/routes` lists each domain's mode, mappings, and loaded APIs.
 
 ## Canary releases
 
@@ -210,6 +239,7 @@ are flushed every 5 seconds, when a batch is full, and at shutdown.
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/restapis/<id>/stages/<stage>/exports/oas30`, `.../restapis/<id>/stages/<stage>` | REST APIs |
 | `apigateway:GET` | the same two resources for the stage named by `--canary-export-stage` | canary releases from a shadow stage |
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/apis/<id>/exports/OAS30`, `.../apis/<id>/stages/<stage>` | HTTP APIs |
+| `apigateway:GET` | `arn:aws:apigateway:<region>::/v2/domainnames/<domain>`, `.../apimappings`, `.../routingrules`, `arn:aws:apigateway:<region>::/restapis/<id>` | `--domain-name` |
 | `lambda:InvokeFunction` | each integrated function (and its aliases) and each Lambda authorizer function | `AWS_PROXY` routes and Lambda authorizers; the same action covers `InvokeWithResponseStream` for streaming routes |
 | `sts:AssumeRole` | each integration `credentials` and each `authorizerCredentials` role | integrations and authorizers with a role, unless `--integration-credentials=gateway` |
 | `logs:CreateLogStream`, `logs:PutLogEvents` | each access log group, the metrics log group, and `arn:aws:logs:<region>:<account>:log-group:API-Gateway-Execution-Logs_<id>/<stage>:*` | access logs, metrics, execution logs |

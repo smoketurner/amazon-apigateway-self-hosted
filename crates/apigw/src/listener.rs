@@ -45,6 +45,7 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 
+use crate::domain::DomainName;
 use crate::header_case::{HeaderCaseQueue, HeaderCaseTap};
 use crate::identity::TrustedProxies;
 
@@ -90,7 +91,15 @@ impl ConnLimits {
 #[derive(Clone)]
 pub(crate) struct Tls {
     acceptor: TlsAcceptor,
-    certs: Arc<CertStore>,
+    certs: Arc<CertSet>,
+}
+
+/// The PEM files of a custom domain's certificate.
+#[derive(Debug, Clone)]
+pub(crate) struct DomainCert {
+    pub(crate) name: DomainName,
+    pub(crate) cert: PathBuf,
+    pub(crate) key: PathBuf,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -160,6 +169,21 @@ fn load_certified_key(
 }
 
 impl CertStore {
+    fn open(
+        cert_path: &Path,
+        key_path: &Path,
+        provider: &Arc<rustls::crypto::CryptoProvider>,
+    ) -> Result<Self, TlsError> {
+        let stamp = FileStamp::read(cert_path, key_path);
+        let key = load_certified_key(cert_path, key_path, provider)?;
+        Ok(Self {
+            cert_path: cert_path.to_owned(),
+            key_path: key_path.to_owned(),
+            provider: Arc::clone(provider),
+            current: RwLock::new((stamp, Arc::new(key))),
+        })
+    }
+
     fn load(&self) -> Result<CertifiedKey, TlsError> {
         load_certified_key(&self.cert_path, &self.key_path, &self.provider)
     }
@@ -167,27 +191,89 @@ impl CertStore {
     fn current(&self) -> std::sync::RwLockReadGuard<'_, (FileStamp, Arc<CertifiedKey>)> {
         self.current.read().unwrap_or_else(PoisonError::into_inner)
     }
+
+    fn certified(&self) -> Arc<CertifiedKey> {
+        Arc::clone(&self.current().1)
+    }
+
+    /// Reloads the certificate if its files changed. A file that fails to load
+    /// leaves the previous certificate in place.
+    fn reload_if_changed(&self) -> Result<bool, TlsError> {
+        let stamp = FileStamp::read(&self.cert_path, &self.key_path);
+        if self.current().0 == stamp {
+            return Ok(false);
+        }
+        let key = self.load()?;
+        *self.current.write().unwrap_or_else(PoisonError::into_inner) = (stamp, Arc::new(key));
+        Ok(true)
+    }
 }
 
-impl ResolvesServerCert for CertStore {
-    fn resolve(&self, _client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        Some(Arc::clone(&self.current().1))
+/// The default certificate and one per custom domain, chosen by the client's
+/// SNI. A client that sends no SNI, or one no domain matches, gets the default.
+#[derive(Debug)]
+struct CertSet {
+    default: CertStore,
+    domains: Vec<(DomainName, CertStore)>,
+}
+
+impl CertSet {
+    fn stores(&self) -> impl Iterator<Item = &CertStore> {
+        std::iter::once(&self.default).chain(self.domains.iter().map(|(_, store)| store))
+    }
+
+    /// An exact domain name wins over a wildcard that also matches.
+    fn store_for(&self, server_name: &str) -> &CertStore {
+        let exact = self
+            .domains
+            .iter()
+            .find(|(name, _)| !name.as_str().starts_with("*.") && name.matches(server_name));
+        exact
+            .or_else(|| {
+                self.domains
+                    .iter()
+                    .find(|(name, _)| name.matches(server_name))
+            })
+            .map_or(&self.default, |(_, store)| store)
+    }
+}
+
+impl ResolvesServerCert for CertSet {
+    fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        let store = client_hello
+            .server_name()
+            .map_or(&self.default, |name| self.store_for(name));
+        Some(store.certified())
     }
 }
 
 impl Tls {
     /// Server TLS with aws-lc-rs from PEM files; HTTP/2 is offered via ALPN.
+    #[cfg(test)]
     pub(crate) fn from_pem_files(cert_path: &Path, key_path: &Path) -> Result<Self, TlsError> {
+        Self::with_domains(cert_path, key_path, &[])
+    }
+
+    /// As [`Tls::from_pem_files`], with a certificate per custom domain served
+    /// to clients whose SNI names the domain.
+    pub(crate) fn with_domains(
+        cert_path: &Path,
+        key_path: &Path,
+        domains: &[DomainCert],
+    ) -> Result<Self, TlsError> {
         let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-        let stamp = FileStamp::read(cert_path, key_path);
-        let key = load_certified_key(cert_path, key_path, &provider)?;
-        let certs = Arc::new(CertStore {
-            cert_path: cert_path.to_owned(),
-            key_path: key_path.to_owned(),
-            provider: Arc::clone(&provider),
-            current: RwLock::new((stamp, Arc::new(key))),
+        let mut stores = Vec::with_capacity(domains.len());
+        for domain in domains {
+            stores.push((
+                domain.name.clone(),
+                CertStore::open(&domain.cert, &domain.key, &provider)?,
+            ));
+        }
+        let certs = Arc::new(CertSet {
+            default: CertStore::open(cert_path, key_path, &provider)?,
+            domains: stores,
         });
-        let resolver: Arc<dyn ResolvesServerCert> = Arc::<CertStore>::clone(&certs);
+        let resolver: Arc<dyn ResolvesServerCert> = Arc::<CertSet>::clone(&certs);
         let mut config = rustls::ServerConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()?
             .with_no_client_auth()
@@ -199,20 +285,25 @@ impl Tls {
         })
     }
 
-    /// Reloads the certificate if its files changed. A file that fails to load
-    /// leaves the previous certificate in place.
+    /// Reloads every certificate whose files changed. A file that fails to load
+    /// leaves that certificate's previous version in place; the first failure is
+    /// returned after every store has been tried.
     pub(crate) fn reload_if_changed(&self) -> Result<bool, TlsError> {
-        let stamp = FileStamp::read(&self.certs.cert_path, &self.certs.key_path);
-        if self.certs.current().0 == stamp {
-            return Ok(false);
+        let mut reloaded = false;
+        let mut failure = None;
+        for store in self.certs.stores() {
+            match store.reload_if_changed() {
+                Ok(true) => {
+                    tracing::info!(cert = %store.cert_path.display(), "reloaded TLS certificate");
+                    reloaded = true;
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    failure.get_or_insert(err);
+                }
+            }
         }
-        let key = self.certs.load()?;
-        *self
-            .certs
-            .current
-            .write()
-            .unwrap_or_else(PoisonError::into_inner) = (stamp, Arc::new(key));
-        Ok(true)
+        failure.map_or(Ok(reloaded), Err)
     }
 
     /// Polls the PEM files every `interval` until `shutdown` is cancelled.
@@ -225,10 +316,7 @@ impl Tls {
                 _ = ticker.tick() => {}
             }
             match self.reload_if_changed() {
-                Ok(true) => {
-                    tracing::info!(cert = %self.certs.cert_path.display(), "reloaded TLS certificate");
-                }
-                Ok(false) => {}
+                Ok(_) => {}
                 Err(err) => {
                     tracing::warn!(%err, "TLS certificate changed but failed to load; keeping the previous one");
                 }
@@ -644,7 +732,18 @@ pub(crate) mod test_tls {
     }
 
     pub(crate) fn generate() -> TestCert {
-        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        generate_for(&["localhost"])
+    }
+
+    /// A self-signed certificate valid for `names`.
+    pub(crate) fn generate_for(names: &[&str]) -> TestCert {
+        let certified = rcgen::generate_simple_self_signed(
+            names
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
         TestCert {
             cert: certified.cert.der().clone(),
             cert_pem: certified.cert.pem(),
@@ -688,6 +787,16 @@ pub(crate) mod test_tls {
             addr: std::net::SocketAddr,
             prefix: &[u8],
         ) -> std::io::Result<TlsStream<TcpStream>> {
+            self.try_connect_as(addr, prefix, "localhost").await
+        }
+
+        /// [`Self::try_connect_after`] announcing `server_name` as the SNI.
+        pub(crate) async fn try_connect_as(
+            &self,
+            addr: std::net::SocketAddr,
+            prefix: &[u8],
+            server_name: &str,
+        ) -> std::io::Result<TlsStream<TcpStream>> {
             use tokio::io::AsyncWriteExt as _;
             let mut roots = rustls::RootCertStore::empty();
             roots.add(self.cert.clone()).unwrap();
@@ -700,7 +809,7 @@ pub(crate) mod test_tls {
             let mut tcp = TcpStream::connect(addr).await.unwrap();
             tcp.write_all(prefix).await?;
             TlsConnector::from(Arc::new(config))
-                .connect(ServerName::try_from("localhost").unwrap(), tcp)
+                .connect(ServerName::try_from(server_name.to_owned()).unwrap(), tcp)
                 .await
         }
 
@@ -750,7 +859,7 @@ mod tests {
     use crate::header_case::HeaderCase;
     use crate::identity::ClientIdentity;
 
-    use super::test_tls::{TestCert, generate};
+    use super::test_tls::{TestCert, generate, generate_for};
     use super::*;
 
     const SHORT: ConnLimits = ConnLimits {
@@ -858,6 +967,116 @@ mod tests {
         assert!(response.ends_with("127.0.0.1"), "{response}");
         shutdown.cancel();
         tokio::time::timeout(BOUND, handle).await.unwrap().unwrap();
+    }
+
+    /// Starts a listener whose default certificate is `default` and whose
+    /// custom domains have the certificates given.
+    async fn start_domains(
+        default: &TestCert,
+        domains: &[(&str, &TestCert)],
+    ) -> (SocketAddr, CancellationToken) {
+        let (cert, key) = default.write();
+        let domains: Vec<DomainCert> = domains
+            .iter()
+            .map(|(name, domain)| {
+                let (cert, key) = domain.write();
+                DomainCert {
+                    name: name.parse().unwrap(),
+                    cert,
+                    key,
+                }
+            })
+            .collect();
+        let tls = Tls::with_domains(&cert, &key, &domains).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = CancellationToken::new();
+        tokio::spawn(serve(
+            listener,
+            tls,
+            app(),
+            SHORT,
+            8,
+            Edge::direct(),
+            shutdown.clone(),
+        ));
+        (addr, shutdown)
+    }
+
+    #[tokio::test]
+    async fn each_domain_is_served_its_own_certificate_by_sni() {
+        let default = generate_for(&["localhost", "unmapped.example.test"]);
+        let api = generate_for(&["api.example.test"]);
+        let wild = generate_for(&["a.wild.example.test"]);
+        let exact = generate_for(&["b.wild.example.test"]);
+        let (addr, shutdown) = start_domains(
+            &default,
+            &[
+                ("api.example.test", &api),
+                ("*.wild.example.test", &wild),
+                ("b.wild.example.test", &exact),
+            ],
+        )
+        .await;
+        // Each client trusts only the certificate it expects, so a handshake
+        // succeeds only when the server picked that certificate.
+        assert!(
+            api.try_connect_as(addr, b"", "api.example.test")
+                .await
+                .is_ok()
+        );
+        assert!(
+            wild.try_connect_as(addr, b"", "a.wild.example.test")
+                .await
+                .is_ok()
+        );
+        assert!(
+            exact
+                .try_connect_as(addr, b"", "b.wild.example.test")
+                .await
+                .is_ok(),
+            "an exact name wins over a wildcard"
+        );
+        assert!(
+            default
+                .try_connect_as(addr, b"", "unmapped.example.test")
+                .await
+                .is_ok(),
+            "unknown names get the default certificate"
+        );
+        assert!(default.try_connect_as(addr, b"", "localhost").await.is_ok());
+        assert!(
+            default
+                .try_connect_as(addr, b"", "api.example.test")
+                .await
+                .is_err(),
+            "a mapped name does not get the default certificate"
+        );
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn domain_certificates_reload_when_their_files_change() {
+        let default = generate();
+        let first = generate_for(&["api.example.test"]);
+        let (cert_path, key_path) = first.write();
+        let (default_cert, default_key) = default.write();
+        let tls = Tls::with_domains(
+            &default_cert,
+            &default_key,
+            &[DomainCert {
+                name: "api.example.test".parse().unwrap(),
+                cert: cert_path.clone(),
+                key: key_path.clone(),
+            }],
+        )
+        .unwrap();
+        assert!(!tls.reload_if_changed().unwrap());
+        let second = generate_for(&["api.example.test"]);
+        std::fs::write(&cert_path, &second.cert_pem).unwrap();
+        std::fs::write(&key_path, &second.key_pem).unwrap();
+        assert!(tls.reload_if_changed().unwrap());
+        assert!(!tls.reload_if_changed().unwrap());
     }
 
     #[tokio::test]

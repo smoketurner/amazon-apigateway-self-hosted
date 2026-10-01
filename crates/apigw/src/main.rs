@@ -8,6 +8,7 @@ mod canary;
 mod config;
 mod cors;
 mod digest;
+mod domain;
 mod entropy;
 mod gateway;
 mod gateway_response;

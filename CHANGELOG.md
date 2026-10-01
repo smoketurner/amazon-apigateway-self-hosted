@@ -68,6 +68,14 @@ All notable changes to this project are documented here. The format follows
   `{log group}/Canary` access and execution log groups and counted under `Stage` `{stage}/Canary`.
   `--canary-export-stage` names a stage holding the canary deployment, whose export builds the
   canary's routes; `/routes` reports the canary release.
+- Custom domains: `--domain-name` (repeatable, wildcards allowed) serves every API stage mapped to
+  a custom domain from one process. The `Host` picks the domain; the domain's routing mode picks
+  how: API mappings (single- and multi-level keys, longest prefix, the `(none)` mapping) and/or
+  routing rules (header and base path conditions, priorities, `stripBasePath`). The matched
+  prefix is removed from the path. REST and HTTP APIs can share a domain, each API refreshes
+  on its own, and `/ping` and `/sping` answer 200 as on API Gateway. `--domain-cert-dir` serves
+  each domain its own certificate by SNI, reloaded when the files change. `/routes` lists each
+  domain's mappings and APIs.
 - Log delivery uses bounded queues that drop (and count) events instead of slowing requests,
   and flushes everything on shutdown.
 - REST gateway responses: every error the gateway generates (missing authentication token,
