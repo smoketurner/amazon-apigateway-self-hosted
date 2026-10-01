@@ -15,12 +15,13 @@ use tokio::sync::watch;
 use tower::ServiceExt as _;
 use uuid::Uuid;
 
-use crate::authz::Authorizers;
+use crate::authz::{Authorizers, ResourcePolicies};
 use crate::aws::{AwsClients, RoleArn, RoleStatus};
 use crate::canary::{CanaryRelease, CanarySummary};
 use crate::domain::{DomainName, DomainRegistry, DomainSummary, Resolution};
 use crate::gateway::{ApiContext, Enforcement, RequestId};
 use crate::http_routes::{HttpRoutes, PathPattern};
+use crate::identity::ClientIdentity;
 use crate::integration::Integration;
 use crate::model::{ApiKind, ApiModel, Feature, MethodMatch, Protections, RouteKey, RoutePath};
 use crate::pipeline::Pipeline;
@@ -239,6 +240,7 @@ pub(crate) fn build(
     base: &BasePath,
 ) -> (Router, Vec<RouteSummary>) {
     let authorizers = Authorizers::compile(model, &ctx.stage_variables);
+    let policies = ResourcePolicies::compile(model, &ctx.api_id);
     let throttling = ThrottleSettings::new(
         &ctx.api_id,
         ctx.stage.as_deref(),
@@ -254,6 +256,7 @@ pub(crate) fn build(
                 model.kind,
                 &ctx.stage_variables,
                 &authorizers,
+                &policies,
                 &throttling,
                 &ctx.vpc_links,
             )
@@ -443,6 +446,20 @@ pub(crate) fn domain_dispatcher(domains: DomainRegistry) -> Router {
             let Some(state) = domains.find(&host) else {
                 return CustomDomain::error(StatusCode::FORBIDDEN, "Forbidden");
             };
+            if state.requires_client_certificate()
+                && !request
+                    .extensions()
+                    .get::<ClientIdentity>()
+                    .is_some_and(ClientIdentity::has_verified_certificate)
+            {
+                // A client that asked for a different name in its TLS handshake
+                // than in `Host` was not asked for a certificate.
+                tracing::warn!(
+                    host,
+                    "refused a request to a mutual TLS domain without a verified client certificate"
+                );
+                return CustomDomain::error(StatusCode::FORBIDDEN, "Forbidden");
+            }
             match state.resolve(&path, request.headers()) {
                 Resolution::Matched(loaded, routed_path) => {
                     if CustomDomain::rewrite_path(&mut request, &routed_path).is_err() {
@@ -533,7 +550,6 @@ mod tests {
 
     const STRICT: Enforcement = Enforcement {
         authorization: AuthorizationMode::Enforce,
-        resource_policy: Unsupported::Reject,
         request_validation: Unsupported::Reject,
     };
 
@@ -1033,7 +1049,6 @@ mod tests {
         let relaxed = Enforcement {
             authorization: AuthorizationMode::Skip,
             request_validation: Unsupported::Ignore,
-            ..STRICT
         };
         let (rest, summaries) = router_with(&protected_doc(), ApiKind::Rest, relaxed, "");
         for path in ["/iam", "/key", "/validated", "/key-and-validated"] {
@@ -1065,24 +1080,19 @@ mod tests {
             ..STRICT
         };
         let (rest, summaries) = router_with(&doc, ApiKind::Rest, skip_auth, "");
-        assert_eq!(
-            call(&rest, Method::GET, "/open").await,
-            (
-                StatusCode::FORBIDDEN,
-                r#"{"message":"Forbidden"}"#.to_owned()
-            )
+        let (status, body) = call(&rest, Method::GET, "/open").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            body.contains("because no resource-based policy allows the execute-api:Invoke action"),
+            "{body}"
         );
         assert!(
             summaries
                 .iter()
-                .all(|s| s.protections.contains(Protection::ResourcePolicy))
+                .all(|s| s.protections.contains(Protection::ResourcePolicy)
+                    && s.problems.iter().all(|p| !p.contains("resource policy"))),
+            "{summaries:?}"
         );
-        let ignore = Enforcement {
-            resource_policy: Unsupported::Ignore,
-            ..skip_auth
-        };
-        let (rest, _) = router_with(&doc, ApiKind::Rest, ignore, "");
-        assert_eq!(call(&rest, Method::GET, "/open").await.0, StatusCode::OK);
     }
 
     struct Reply {

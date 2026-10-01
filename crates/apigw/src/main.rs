@@ -5,6 +5,7 @@ mod app;
 mod authz;
 mod aws;
 mod canary;
+mod client_cert;
 mod config;
 mod cors;
 mod digest;

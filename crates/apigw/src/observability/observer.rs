@@ -548,7 +548,6 @@ mod tests {
             vpc_links: VpcLinks::default(),
             enforcement: Enforcement {
                 authorization: AuthorizationMode::Enforce,
-                resource_policy: Unsupported::Reject,
                 request_validation: Unsupported::Reject,
             },
             http: reqwest::Client::new(),

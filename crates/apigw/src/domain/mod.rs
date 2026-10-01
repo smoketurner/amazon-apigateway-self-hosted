@@ -11,12 +11,15 @@
 
 mod rules;
 mod runtime;
+mod truststore;
 
 use std::fmt;
 use std::str::FromStr;
 
 pub(crate) use rules::{RoutingMode, RoutingRule};
 pub(crate) use runtime::{DomainRegistry, DomainSummary, DomainSupervisor, Resolution};
+#[cfg(test)]
+pub(crate) use truststore::Truststore;
 
 /// A custom domain name, lowercase. `*.example.com` matches any single label
 /// in front of `example.com`.

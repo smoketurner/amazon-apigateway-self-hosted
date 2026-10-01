@@ -1430,3 +1430,75 @@ fn issuer_endpoint_flags_parse() {
         assert!(bad.parse::<IssuerEndpoint>().is_err(), "{bad:?}");
     }
 }
+
+/// A request for `/pets` from `ip`, with an optional token.
+async fn call_pool(h: &Harness, ip: &str, token: Option<&str>) -> (StatusCode, Value) {
+    let headers: Vec<(&str, &str)> = token.map(|t| ("authorization", t)).into_iter().collect();
+    h.call_from(ip, Method::GET, "/pets", &headers).await
+}
+
+#[tokio::test]
+async fn a_cognito_authorizer_and_a_resource_policy_must_both_allow() {
+    let statement = |effect: &str, cidr: &str| {
+        json!({"Effect": effect, "Principal": "*", "Action": "execute-api:Invoke",
+            "Resource": "execute-api:/*",
+            "Condition": {"IpAddress": {"aws:SourceIp": cidr}}})
+    };
+    let mut doc = cognito_doc(&json!({}));
+    doc["x-amazon-apigateway-policy"] = json!({"Version": "2012-10-17", "Statement": [
+        statement("Allow", "192.0.2.0/24"),
+        statement("Deny", "198.51.100.0/24"),
+    ]});
+    let idp = Idp::start(COGNITO_ISSUER, &[key_a()]).await;
+    let h = Harness::start_with(
+        &doc,
+        ApiKind::Rest,
+        AuthorizationMode::Enforce,
+        idp.key_store(COGNITO_ISSUER),
+    )
+    .await;
+    let token = key_a().token(&id_claims(&json!({})));
+    // Table B: a valid user pool token is an allow, so the policy must allow too.
+    let (status, _) = call_pool(&h, "192.0.2.5", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = call_pool(&h, "203.0.113.1", Some(&token)).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a policy with no opinion is not enough"
+    );
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .ends_with("because no resource-based policy allows the execute-api:Invoke action"),
+        "{body}"
+    );
+    let (status, body) = call_pool(&h, "198.51.100.9", Some(&token)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .ends_with("with an explicit deny in a resource-based policy"),
+        "{body}"
+    );
+    let hits = idp.jwks_hits();
+    let (status, _) = call_pool(&h, "198.51.100.9", Some("junk")).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "the explicit deny comes before authentication"
+    );
+    assert_eq!(idp.jwks_hits(), hits);
+    // The policy never stands in for the token.
+    assert_eq!(
+        call_pool(&h, "192.0.2.5", None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call_pool(&h, "192.0.2.5", Some("junk")).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(h.backend_calls.count(), 1);
+}

@@ -63,7 +63,6 @@ impl Builder {
             base_path: BasePath::default(),
             enforcement: Enforcement {
                 authorization: AuthorizationMode::Enforce,
-                resource_policy: Unsupported::Reject,
                 request_validation: Unsupported::Reject,
             },
             stage_variable_overrides: BTreeMap::new(),
@@ -535,6 +534,7 @@ async fn serve_apis(
     builder: Builder,
     sdk_config: &aws_config::SdkConfig,
     aws: &Arc<AwsClients>,
+    tls: &Tls,
     shutdown: &CancellationToken,
     tasks: &mut JoinSet<()>,
 ) -> anyhow::Result<(Router, Router)> {
@@ -563,6 +563,7 @@ async fn serve_apis(
             sdk_config,
             config.refresh_interval(),
             shutdown,
+            tls.domain(domain),
         );
         tracing::info!(%domain, "loading custom domain");
         let (state, task) = supervisor
@@ -584,8 +585,13 @@ async fn serve_apis(
 }
 
 pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
-    let tls = Tls::with_domains(&config.tls_cert, &config.tls_key, &config.domain_certs())
-        .context("failed to load the TLS certificates")?;
+    let tls = Tls::with_domains(
+        &config.tls_cert,
+        &config.tls_key,
+        &config.domain_names,
+        &config.domain_certs(),
+    )
+    .context("failed to load the TLS certificates")?;
     let sdk_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
     let http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -624,8 +630,16 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
     builder.enforcement.warn_if_relaxed();
     let shutdown = CancellationToken::new();
     let mut tasks = JoinSet::new();
-    let (app, admin_app) =
-        serve_apis(&config, builder, &sdk_config, &aws, &shutdown, &mut tasks).await?;
+    let (app, admin_app) = serve_apis(
+        &config,
+        builder,
+        &sdk_config,
+        &aws,
+        &tls,
+        &shutdown,
+        &mut tasks,
+    )
+    .await?;
     let listener = TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("failed to bind {}", config.listen))?;
@@ -693,7 +707,6 @@ mod tests {
             base_path: BasePath::default(),
             enforcement: Enforcement {
                 authorization: AuthorizationMode::Enforce,
-                resource_policy: Unsupported::Reject,
                 request_validation: Unsupported::Reject,
             },
             stage_variable_overrides: BTreeMap::from([(

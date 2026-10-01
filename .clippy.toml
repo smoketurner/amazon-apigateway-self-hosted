@@ -31,6 +31,7 @@ absolute-paths-allowed-crates = [
     "aws_sdk_cloudwatchlogs",
     "aws_sdk_firehose",
     "aws_sdk_lambda",
+    "aws_sdk_s3",
     "aws_sdk_xray",
     "axum",
     "base64",
@@ -59,6 +60,7 @@ absolute-paths-allowed-crates = [
     "tracing",
     "tracing_subscriber",
     "uuid",
+    "x509_parser",
 ]
 
 # Product names that are not code.

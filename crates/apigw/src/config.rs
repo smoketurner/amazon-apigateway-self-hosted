@@ -133,12 +133,6 @@ pub(crate) struct Config {
     )]
     pub(crate) issuer_endpoints: Vec<IssuerEndpoint>,
 
-    /// What to do with routes under a resource policy, which this gateway does
-    /// not evaluate yet: `reject` answers 403, `ignore` serves them unrestricted.
-    /// Not affected by --insecure-skip-authorization.
-    #[arg(long, env = "APIGW_UNSUPPORTED_RESOURCE_POLICY", value_enum, default_value_t = Unsupported::Reject)]
-    pub(crate) unsupported_resource_policy: Unsupported,
-
     /// What to do with routes that have a request validator, which this gateway
     /// does not run yet: `reject` answers 501, `ignore` forwards unvalidated requests.
     #[arg(long, env = "APIGW_UNSUPPORTED_VALIDATION", value_enum, default_value_t = Unsupported::Reject)]
@@ -314,7 +308,6 @@ impl Config {
             } else {
                 AuthorizationMode::Enforce
             },
-            resource_policy: self.unsupported_resource_policy,
             request_validation: self.unsupported_validation,
         }
     }
@@ -493,7 +486,6 @@ mod tests {
             config.enforcement(),
             Enforcement {
                 authorization: AuthorizationMode::Enforce,
-                resource_policy: Unsupported::Reject,
                 request_validation: Unsupported::Reject,
             }
         );
@@ -503,8 +495,6 @@ mod tests {
             "--stage",
             "s",
             "--insecure-skip-authorization",
-            "--unsupported-resource-policy",
-            "ignore",
             "--unsupported-validation",
             "ignore",
         ])
@@ -513,7 +503,6 @@ mod tests {
             config.enforcement(),
             Enforcement {
                 authorization: AuthorizationMode::Skip,
-                resource_policy: Unsupported::Ignore,
                 request_validation: Unsupported::Ignore,
             }
         );
