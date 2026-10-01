@@ -134,7 +134,7 @@ These are properties of `apigw`, not API Gateway features, and are all supported
 ## Measuring parity
 
 `crates/apigw-parity` records the behavior of real API Gateway APIs deployed from
-[`reference/terraform`](../reference/README.md) and replays the same requests against `apigw`
+[`terraform/environments/dev`](../terraform/README.md) and replays the same requests against `apigw`
 in CI, so a status here is backed by a fixture. Cases for features `apigw` lacks carry a
 `known_gap` issue marker, which keeps this matrix and the fixtures in step: when a gap closes,
 the case must lose its marker and the row changes status. See [parity/README.md](../parity/README.md).
