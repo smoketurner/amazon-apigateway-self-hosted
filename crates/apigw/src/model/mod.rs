@@ -335,18 +335,13 @@ pub(crate) struct IntegrationSpec {
 }
 
 impl IntegrationSpec {
-    fn unenforced(&self, kind: ApiKind) -> Vec<Feature> {
+    fn unenforced(&self) -> Vec<Feature> {
         let mut features = Vec::new();
         if self.content_handling.is_some() {
             features.push(Feature::ContentHandling);
         }
         if self.tls_config.is_some() {
             features.push(Feature::IntegrationTlsConfig);
-        }
-        if !self.response_parameters.is_empty()
-            || (kind == ApiKind::Http && self.request_parameters.keys().any(|k| k.contains(':')))
-        {
-            features.push(Feature::ParameterMapping);
         }
         if !self.cache_key_parameters.is_empty() {
             features.push(Feature::ResponseCaching);
@@ -513,10 +508,10 @@ pub(crate) struct Operation {
 
 impl Operation {
     /// Imported settings on this operation that the gateway does not enforce yet.
-    pub(crate) fn unenforced(&self, kind: ApiKind) -> Vec<Feature> {
+    pub(crate) fn unenforced(&self) -> Vec<Feature> {
         self.integration
             .as_ref()
-            .map(|integration| integration.unenforced(kind))
+            .map(IntegrationSpec::unenforced)
             .unwrap_or_default()
     }
 }
@@ -543,9 +538,6 @@ impl ApiModel {
         if self.settings.minimum_compression_size.is_some() {
             features.push(Feature::Compression);
         }
-        if self.settings.cors.is_some() {
-            features.push(Feature::Cors);
-        }
         features.extend(self.stage.unenforced());
         features
     }
@@ -558,10 +550,8 @@ impl ApiModel {
 pub(crate) enum Feature {
     BinaryMediaTypes,
     Compression,
-    Cors,
     ContentHandling,
     IntegrationTlsConfig,
-    ParameterMapping,
     ResponseCaching,
     Tracing,
     Canary,
@@ -572,10 +562,8 @@ impl fmt::Display for Feature {
         let name = match self {
             Self::BinaryMediaTypes => "binary media types",
             Self::Compression => "compression",
-            Self::Cors => "CORS",
             Self::ContentHandling => "content handling",
             Self::IntegrationTlsConfig => "integration TLS config",
-            Self::ParameterMapping => "parameter mapping",
             Self::ResponseCaching => "response caching",
             Self::Tracing => "tracing",
             Self::Canary => "canary",

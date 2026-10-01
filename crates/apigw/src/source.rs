@@ -15,9 +15,20 @@ const REST_EXPORT_EXTENSIONS: &str = "apigateway,authorizers";
 
 #[derive(Debug, Clone)]
 pub(crate) enum Source {
-    RestApi { api_id: String, stage: String },
-    HttpApi { api_id: String, stage: String },
-    File { path: PathBuf, kind: ApiKind },
+    RestApi {
+        api_id: String,
+        stage: String,
+    },
+    HttpApi {
+        api_id: String,
+        stage: String,
+    },
+    /// An export on disk. `stage` names the stage for `$context.stage`.
+    File {
+        path: PathBuf,
+        kind: ApiKind,
+        stage: Option<String>,
+    },
 }
 
 /// Everything needed to rebuild the routes. The cache stores the raw export
@@ -129,10 +140,14 @@ impl Fetcher {
                 ref api_id,
                 ref stage,
             } => self.fetch_http(api_id, stage, current).await,
-            Source::File { ref path, kind } => Ok(Fetch::Changed(Box::new(Snapshot {
+            Source::File {
+                ref path,
+                kind,
+                ref stage,
+            } => Ok(Fetch::Changed(Box::new(Snapshot {
                 kind,
                 api_id: path.display().to_string(),
-                stage: None,
+                stage: stage.clone(),
                 stamp: DeploymentStamp::default(),
                 stage_settings: StageSettings::default(),
                 openapi: Export::read(path).await?,
@@ -359,6 +374,7 @@ mod tests {
             Source::File {
                 path: path.clone(),
                 kind: ApiKind::Http,
+                stage: None,
             },
             &config,
         );

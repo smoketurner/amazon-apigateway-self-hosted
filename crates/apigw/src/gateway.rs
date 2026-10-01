@@ -11,6 +11,7 @@ use axum::response::Response;
 use uuid::Uuid;
 
 use crate::aws::AwsClients;
+use crate::cors::Cors;
 use crate::gateway_response::{Failure, GatewayResponses};
 use crate::integration::StageVariables;
 use crate::model::{ApiKind, Protection, ResponseType};
@@ -146,6 +147,7 @@ pub(crate) struct ApiContext {
     pub(crate) stage_variables: Arc<StageVariables>,
     pub(crate) enforcement: Enforcement,
     pub(crate) responses: GatewayResponses,
+    pub(crate) cors: Option<Cors>,
     pub(crate) state: Arc<StateBackend>,
     pub(crate) replicas: NonZeroU32,
     pub(crate) http: reqwest::Client,
@@ -164,7 +166,15 @@ impl ApiContext {
     pub(crate) fn reject_unrouted(&self, request: Request) -> Response {
         let (parts, _) = request.into_parts();
         let context = RequestContext::new(self, None, parts, Vec::new());
-        self.respond(&context, &GatewayError::NoRoute.failure(self.kind))
+        let Some(ref cors) = self.cors else {
+            return self.respond(&context, &GatewayError::NoRoute.failure(self.kind));
+        };
+        if Cors::is_preflight(&context) {
+            return cors.preflight(&context);
+        }
+        let mut response = self.respond(&context, &GatewayError::NoRoute.failure(self.kind));
+        cors.decorate(&context, &mut response);
+        response
     }
 }
 

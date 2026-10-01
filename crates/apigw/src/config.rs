@@ -39,7 +39,8 @@ pub(crate) struct Config {
     #[arg(long, env = "APIGW_API_TYPE", value_enum, default_value_t = ApiKind::Rest)]
     pub(crate) api_type: ApiKind,
 
-    /// Stage to export, and to read stage variables from.
+    /// Stage to export, and to read stage variables from. With --openapi-file it
+    /// only names the stage for `$context.stage`.
     #[arg(long, env = "APIGW_STAGE")]
     pub(crate) stage: Option<String>,
 
@@ -207,6 +208,7 @@ impl Config {
             (None, None, path) => Source::File {
                 path: path.clone().unwrap_or_default(),
                 kind: self.api_type,
+                stage: self.stage.clone(),
             },
         }
     }

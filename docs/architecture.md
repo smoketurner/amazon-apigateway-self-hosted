@@ -17,6 +17,7 @@ Java regex syntax to `fancy-regex` and provides Java's matching, replacement, an
 | `gateway_response` | Every error the gateway answers with (`Failure`), rendered through the API's customized REST gateway responses (status, `gatewayresponse.header.*`, `$context` templates, `DEFAULT_4XX`/`DEFAULT_5XX` fallback) or HTTP APIs' fixed messages |
 | `authz` | Compiles the API's authorizers (`Authorizers`, per route `RouteAuthorizer`) and evaluates them before the integration: Lambda authorizers with identity sources, a bounded TTL cache, and IAM policy evaluation (`PolicyDocument`, `MethodArn`, wildcard `Glob`); `Denial` maps each refusal to its gateway response |
 | `state`, `throttle` | `StateBackend` (token buckets, period quota counters, TTL cache; in-memory today, shaped for a shared Valkey backend) and the stage throttle settings that become one bucket per route |
+| `cors`, `http_routes`, `mapping` | HTTP API CORS (preflight answers and response headers), route selection by path and method together for HTTP APIs, and `requestParameters`/`responseParameters` mapping for `HTTP_PROXY` |
 | `aws` | `AwsClients`: per-region Lambda clients, assumed integration-role credentials, Lambda endpoint overrides, trace header propagation |
 | `proxy` | `HTTP_PROXY` forwarding |
 | `lambda` | `AWS_PROXY` event construction (payload 1.0 and 2.0) and response mapping |

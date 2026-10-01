@@ -67,7 +67,20 @@ All notable changes to this project are documented here. The format follows
 - A `StateBackend` (in-memory, bounded, with LRU eviction) holding token buckets, calendar-aligned
   day/week/month quota counters, and a TTL cache, for usage plans and response caching to use.
 
+- HTTP API CORS: preflight requests are answered with `204` from the configured CORS rules
+  without calling the integration (after the route's own protections), and allowed origins get
+  the CORS response headers; the backend's own CORS headers are dropped.
+- HTTP API parameter mapping for `HTTP_PROXY` integrations: `append:`, `overwrite:`, and
+  `remove:` for headers, query strings, and the path, and per-status response mappings
+  including `overwrite:statuscode`, with `$request.*`, `$response.*`, `$context.*`,
+  `$stageVariables.*`, and static sources.
+
 ### Changed
+
+- HTTP API route selection takes the method into account: a route that matches the path but
+  not the method is skipped for a less specific route that serves it, as in API Gateway's
+  documented priorities. Previously such requests fell through to `$default`.
+- HTTP APIs never run request validation, even if a hand-written definition names a validator.
 
 - An `HTTP_PROXY` backend that cannot be reached now answers REST clients 504 `Network error
   communicating with endpoint` (`INTEGRATION_FAILURE`) instead of 502; an invalid integration URI

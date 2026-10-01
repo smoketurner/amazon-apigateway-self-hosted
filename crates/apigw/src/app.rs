@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::aws::AwsClients;
 use crate::config::Config;
+use crate::cors::Cors;
 use crate::gateway::{ApiContext, Enforcement};
 use crate::gateway_response::GatewayResponses;
 use crate::integration::StageVariables;
@@ -75,6 +76,7 @@ impl Builder {
             stage: snapshot.stage.clone(),
             stage_variables: Arc::new(StageVariables::new(model.stage.variables.clone())),
             responses: GatewayResponses::compile(model.kind, &model.gateway_responses),
+            cors: model.settings.cors.as_ref().map(Cors::compile),
             state: Arc::clone(&self.state),
             replicas: self.replicas,
             enforcement: self.enforcement,
@@ -497,6 +499,7 @@ mod tests {
                 Source::File {
                     path,
                     kind: ApiKind::Rest,
+                    stage: None,
                 },
                 &sdk_config(),
             ),
