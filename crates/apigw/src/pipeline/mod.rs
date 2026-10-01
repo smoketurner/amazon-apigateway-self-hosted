@@ -10,6 +10,8 @@
 
 pub(crate) mod context;
 
+use std::time::Instant;
+
 use axum::body::{Body, Bytes};
 use axum::extract::{FromRequestParts as _, RawPathParams, Request};
 use axum::http::header;
@@ -17,10 +19,12 @@ use axum::response::{IntoResponse as _, Response};
 
 pub(crate) use context::RequestContext;
 
-use crate::gateway::{ApiContext, GatewayError, MAX_BODY_BYTES};
+use crate::authz::{AuthRequest, Denial, RouteAuthorizer};
+use crate::gateway::{ApiContext, AuthorizationMode, GatewayError, MAX_BODY_BYTES};
 use crate::gateway_response::Failure;
 use crate::integration::{Integration, MockResponse};
 use crate::model::Protection;
+use crate::observability::IntegrationTiming;
 use crate::route::Route;
 
 /// One route's handling of one request.
@@ -57,14 +61,22 @@ impl<'a> Pipeline<'a> {
         if !readable {
             return self.fail(&ctx, &GatewayError::InvalidRequest.failure(self.api.kind));
         }
+        if let Err(denial) = self.authorize(&mut ctx).await {
+            return self.fail(&ctx, &denial.failure(self.api.kind));
+        }
         match self.receive(body).await {
             Ok(body) => ctx.body = body,
             Err(error) => return self.fail(&ctx, &error.failure(self.api.kind)),
         }
-        match self.integrate(&mut ctx).await {
+        let started = Instant::now();
+        let result = self.integrate(&mut ctx).await;
+        let timing = IntegrationTiming(started.elapsed());
+        let mut response = match result {
             Ok(response) => response,
             Err(error) => self.fail(&ctx, &error.failure(self.api.kind)),
-        }
+        };
+        response.extensions_mut().insert(timing);
+        response
     }
 
     fn fail(&self, ctx: &RequestContext, failure: &Failure) -> Response {
@@ -83,6 +95,25 @@ impl<'a> Pipeline<'a> {
         axum::body::to_bytes(body, MAX_BODY_BYTES)
             .await
             .map_err(|_| GatewayError::RequestTooLarge)
+    }
+
+    /// Runs the route's authorizer and records what it contributes to
+    /// `$context.authorizer`. Authorization happens before the body is read so
+    /// that a request that is turned away costs no buffering.
+    /// `--insecure-skip-authorization` skips it.
+    async fn authorize(&self, ctx: &mut RequestContext) -> Result<(), Denial> {
+        let RouteAuthorizer::Evaluated(ref authorizer) = self.route.authorizer else {
+            return Ok(());
+        };
+        if self.api.enforcement.authorization == AuthorizationMode::Skip {
+            return Ok(());
+        }
+        let request = AuthRequest {
+            aws: &self.api.aws,
+            ctx,
+        };
+        ctx.authorizer = authorizer.authorize(&request).await?;
+        Ok(())
     }
 
     async fn integrate(&self, ctx: &mut RequestContext) -> Result<Response, GatewayError> {

@@ -397,9 +397,9 @@ pub(crate) struct LambdaProxy {
 /// or `.../2021-11-15/functions/{arn}/response-streaming-invocations` for
 /// streaming; HTTP APIs may also give the function ARN directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct LambdaTarget {
-    function: String,
-    streaming: bool,
+pub(crate) struct LambdaTarget {
+    pub(crate) function: String,
+    pub(crate) streaming: bool,
 }
 
 impl FromStr for LambdaTarget {

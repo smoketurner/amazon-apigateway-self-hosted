@@ -29,10 +29,18 @@ use serde::Serialize;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct FunctionArn {
     raw: String,
-    region: Option<String>,
-    account: Option<String>,
+    scope: Option<ArnScope>,
     name: String,
     qualifier: Option<String>,
+}
+
+/// The partition, region, and account of an ARN: the part of an
+/// `execute-api` method ARN that does not depend on the request.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct ArnScope {
+    pub(crate) partition: String,
+    pub(crate) region: String,
+    pub(crate) account: String,
 }
 
 impl FunctionArn {
@@ -41,12 +49,17 @@ impl FunctionArn {
     }
 
     pub(crate) fn region(&self) -> Option<&str> {
-        self.region.as_deref()
+        self.scope.as_ref().map(|scope| scope.region.as_str())
+    }
+
+    /// Where the function lives, unless it was given as a bare name.
+    pub(crate) fn scope(&self) -> Option<ArnScope> {
+        self.scope.clone()
     }
 
     /// The account that owns the function, when the ARN says.
     pub(crate) fn account(&self) -> Option<&str> {
-        self.account.as_deref()
+        self.scope.as_ref().map(|scope| scope.account.as_str())
     }
 
     pub(crate) fn name(&self) -> &str {
@@ -79,10 +92,10 @@ impl FromStr for FunctionArn {
 
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = raw.split(':').collect();
-        let (region, account, name, qualifier) = match parts.as_slice() {
+        let (scope, name, qualifier) = match parts.as_slice() {
             [
                 "arn",
-                _partition,
+                partition,
                 "lambda",
                 region,
                 account,
@@ -90,19 +103,22 @@ impl FromStr for FunctionArn {
                 name,
                 rest @ ..,
             ] if !region.is_empty() && !name.is_empty() && rest.len() <= 1 => (
-                Some((*region).to_owned()),
-                Some((*account).to_owned()).filter(|a| !a.is_empty()),
+                Some(ArnScope {
+                    partition: (*partition).to_owned(),
+                    region: (*region).to_owned(),
+                    account: (*account).to_owned(),
+                }),
                 *name,
                 rest.first().copied(),
             ),
-            [name] if !name.is_empty() && !raw.contains('/') => (None, None, *name, None),
+            [name] if !name.is_empty() && !raw.contains('/') => (None, *name, None),
             [name, qualifier]
                 if !name.is_empty()
                     && *name != "arn"
                     && !qualifier.is_empty()
                     && !raw.contains('/') =>
             {
-                (None, None, *name, Some(*qualifier))
+                (None, *name, Some(*qualifier))
             }
             _ => return Err(format!("{raw:?} is not a Lambda function ARN")),
         };
@@ -111,8 +127,7 @@ impl FromStr for FunctionArn {
         }
         Ok(Self {
             raw: raw.to_owned(),
-            region,
-            account,
+            scope,
             name: name.to_owned(),
             qualifier: qualifier.map(str::to_owned),
         })

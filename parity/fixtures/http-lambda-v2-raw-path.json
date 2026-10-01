@@ -1,0 +1,21 @@
+{
+  "name": "http-lambda-v2-raw-path",
+  "source": "hand_written",
+  "api": "http",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    }
+  },
+  "echo": {
+    "method": "GET",
+    "path": "/ref/lambda-v2/x",
+    "query": "k=v",
+    "headers": {},
+    "resource": "ANY /lambda-v2/{proxy+}",
+    "path_parameters": {
+      "proxy": "x"
+    }
+  }
+}

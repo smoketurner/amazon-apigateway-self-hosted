@@ -15,6 +15,7 @@ use tokio::sync::watch;
 use tower::ServiceExt as _;
 use uuid::Uuid;
 
+use crate::authz::Authorizers;
 use crate::aws::{AwsClients, RoleArn, RoleStatus};
 use crate::gateway::{ApiContext, Enforcement, RequestId};
 use crate::integration::Integration;
@@ -83,7 +84,7 @@ impl RouteSummary {
     fn new(route: &Route, enforcement: Enforcement) -> Self {
         let mut problems: Vec<String> = enforcement
             .refusals(route)
-            .map(|protection| protection.refusal_reason().to_owned())
+            .map(|protection| protection.refusal_reason(route))
             .collect();
         let target = match route.integration {
             Integration::HttpProxy(ref proxy) => Some(proxy.uri.clone()),
@@ -129,11 +130,14 @@ impl PathRoutes {
     }
 
     async fn handle(&self, request: Request) -> Response {
-        match self.select(request.method()) {
+        let route = self.select(request.method());
+        let pending = self.ctx.observer.begin(&self.ctx, &request, route);
+        let response = match route {
             // The pipeline future holds whole SDK calls; box it once here.
             Some(route) => Box::pin(Pipeline::new(&self.ctx, route).run(request)).await,
             None => self.ctx.reject_unrouted(request),
-        }
+        };
+        self.ctx.observer.finish(pending, response)
     }
 }
 
@@ -166,10 +170,11 @@ pub(crate) fn build(
     ctx: &Arc<ApiContext>,
     base: &BasePath,
 ) -> (Router, Vec<RouteSummary>) {
+    let authorizers = Authorizers::compile(model, &ctx.stage_variables);
     let routes: Vec<Route> = model
         .operations
         .iter()
-        .map(|operation| Route::compile(operation, model.kind, &ctx.stage_variables))
+        .map(|operation| Route::compile(operation, model.kind, &ctx.stage_variables, &authorizers))
         .collect();
     let mut summaries = Vec::with_capacity(routes.len());
     let mut default = None;
@@ -238,7 +243,11 @@ pub(crate) fn build(
                 .nest(prefix, router)
                 .fallback(move |request: Request| {
                     let ctx = Arc::clone(&ctx);
-                    async move { ctx.reject_unrouted(request) }
+                    async move {
+                        let pending = ctx.observer.begin(&ctx, &request, None);
+                        let response = ctx.reject_unrouted(request);
+                        ctx.observer.finish(pending, response)
+                    }
                 })
         }
         None => router,
@@ -348,6 +357,7 @@ mod tests {
             enforcement,
             http: reqwest::Client::new(),
             aws: aws(),
+            observer: crate::observability::StageObserver::disabled(),
         })
     }
 
@@ -828,6 +838,7 @@ mod tests {
             enforcement: STRICT,
             http: reqwest::Client::new(),
             aws,
+            observer: crate::observability::StageObserver::disabled(),
         });
         let (router, _) = build(&model, &api, &BasePath::default());
         let request = Request::builder()

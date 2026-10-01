@@ -6,7 +6,7 @@ It also drives the `rust-agents` Claude Code plugin (conventions live in `.claud
 
 ## What this is
 
-`apigw`: a self-hosted Amazon API Gateway. A single Rust binary (one crate, `crates/apigw`)
+`apigw`: a self-hosted Amazon API Gateway. A single Rust binary (`crates/apigw`, plus pure library crates)
 that downloads an existing REST or HTTP API's OpenAPI export from API Gateway, builds an
 axum router from it, serves it over TLS, and swaps the router live as the API changes. It
 runs as a container on Kubernetes (often behind Istio) on non-AWS clouds or on-prem.
@@ -21,6 +21,8 @@ runs as a container on Kubernetes (often behind Istio) on non-AWS clouds or on-p
 ```
 Cargo.toml            # virtual workspace: pinned deps + strict lints + profiles
 crates/apigw/src/     # the binary — module map in docs/architecture.md
+crates/apigw-regex/   # java.util.regex translator (library, pure)
+tools/                # Docker-run Java oracles that generate test fixtures
 docs/                 # architecture, deployment (k8s/Istio), crypto, CI
 Dockerfile            # static musl build → distroless
 .claude/rules/        # review gates, branching, commits, continuous improvement
@@ -33,7 +35,8 @@ Dockerfile            # static musl build → distroless
   narrowly with `#[expect(clippy::unwrap_used, reason = "...")]`.
 - **Dependencies are pinned** `=x.y.z` with `default-features = false` in
   `[workspace.dependencies]`; look up the current version when adding one.
-- The crate is binary-only: items are `pub(crate)`.
+- The `apigw` binary crate keeps items `pub(crate)`; library crates (`apigw-regex`) expose a
+  documented `pub` API.
 - **Errors:** `thiserror` for module error types, `anyhow` in `app.rs`/`main.rs`.
 - **Logging:** `tracing`, never `println!`. **Time:** `jiff`. **Request IDs:** UUID v7.
 - **Commits:** Conventional Commits (`.claude/rules/commits-and-issues.md`). Never push to

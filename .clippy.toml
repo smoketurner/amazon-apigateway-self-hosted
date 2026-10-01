@@ -11,4 +11,7 @@ too-many-lines-threshold       = 100
 # Short names that are acceptable below the min-chars threshold.
 allowed-idents-below-min-chars = ["x", "y", "z", "i", "j", "k", "n", "s", "e", "id", "db", "tx", "rx", "ok"]
 
+# Product names that are not code.
+doc-valid-idents = ["CloudWatch", "X-Ray", ".."]
+
 # MSRV is read automatically from the workspace `rust-version` field.

@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 #
 # Static musl build of apigw in a distroless image. cargo-chef caches
-# dependency compilation, so only the apigw crate recompiles on source changes.
+# dependency compilation, so only the workspace crates recompile on source changes.
 
 # Keep this Rust version in sync with rust-toolchain.toml.
 FROM rust:1.98.1-alpine AS chef
@@ -12,16 +12,15 @@ WORKDIR /app
 
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
-COPY crates/apigw/Cargo.toml crates/apigw/
-RUN mkdir -p crates/apigw/src && touch crates/apigw/src/main.rs \
-    && cargo chef prepare --recipe-path recipe.json
+COPY crates crates
+RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 ARG SOURCE_DATE_EPOCH=0
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --locked --package apigw --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock ./
-COPY crates/apigw crates/apigw
+COPY crates crates
 RUN touch -d "@${SOURCE_DATE_EPOCH}" crates/apigw/src/main.rs \
     && cargo build --release --locked --package apigw \
     && mkdir -p /var/cache/apigw

@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::body::Bytes;
+use axum::extract::Request;
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, Version, header};
 use base64::Engine as _;
@@ -17,7 +18,7 @@ use crate::gateway::{ApiContext, RequestId};
 use crate::header_case::HeaderCase;
 use crate::identity::ClientIdentity;
 use crate::integration::StageVariables;
-use crate::model::{ApiKind, ResponseTransferMode, RouteKey};
+use crate::model::{ApiKind, PayloadVersion, ResponseTransferMode, RouteKey};
 use crate::route::Route;
 
 /// The API and stage a request was received on.
@@ -99,6 +100,52 @@ impl FormEncoded<'_> {
     }
 }
 
+/// What produced `$context.authorizer`, which decides how Lambda proxy events
+/// of HTTP API payload format 2.0 nest it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum AuthorizerSource {
+    #[default]
+    None,
+    Lambda,
+}
+
+/// `$context.authorizer.*`: what the request's authorizer produced.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct AuthorizerContext {
+    values: Map<String, Value>,
+    source: AuthorizerSource,
+}
+
+impl AuthorizerContext {
+    /// A Lambda authorizer's `principalId` and `context` map.
+    pub(crate) fn lambda(values: Map<String, Value>) -> Self {
+        Self {
+            values,
+            source: AuthorizerSource::Lambda,
+        }
+    }
+
+    pub(crate) fn values(&self) -> &Map<String, Value> {
+        &self.values
+    }
+
+    /// The value of `requestContext.authorizer` in a Lambda proxy event of this
+    /// payload version, if an authorizer ran.
+    pub(crate) fn event_value(&self, version: PayloadVersion) -> Option<Value> {
+        match (self.source, version) {
+            (AuthorizerSource::None, _) => None,
+            (AuthorizerSource::Lambda, PayloadVersion::V1) => {
+                Some(Value::Object(self.values.clone()))
+            }
+            (AuthorizerSource::Lambda, PayloadVersion::V2) => {
+                let mut context = self.values.clone();
+                context.remove("principalId");
+                Some(json!({ "lambda": context }))
+            }
+        }
+    }
+}
+
 /// Outcome of the integration call, for `$context.integration.*`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct IntegrationOutcome {
@@ -141,8 +188,7 @@ pub(crate) struct RequestContext {
     pub(crate) path_params: Vec<(String, String)>,
     pub(crate) identity: ClientIdentity,
     pub(crate) body: Bytes,
-    /// `$context.authorizer.*`, filled by authorizers.
-    pub(crate) authorizer: Map<String, Value>,
+    pub(crate) authorizer: AuthorizerContext,
     pub(crate) stage_variables: Arc<StageVariables>,
     pub(crate) integration: IntegrationOutcome,
 }
@@ -181,6 +227,23 @@ impl ContextVariables {
 }
 
 impl RequestContext {
+    /// A copy of `request`'s metadata for logging, taken before the request
+    /// moves into its route: no body and no path parameters.
+    pub(crate) fn observed(api: &ApiContext, route: Option<&Route>, request: &Request) -> Self {
+        let mut snapshot = axum::http::Request::new(());
+        *snapshot.method_mut() = request.method().clone();
+        *snapshot.uri_mut() = request.uri().clone();
+        *snapshot.headers_mut() = request.headers().clone();
+        if let Some(id) = request.extensions().get::<RequestId>() {
+            snapshot.extensions_mut().insert(*id);
+        }
+        if let Some(identity) = request.extensions().get::<ClientIdentity>() {
+            snapshot.extensions_mut().insert(identity.clone());
+        }
+        let (parts, ()) = snapshot.into_parts();
+        Self::new(api, route, parts, Vec::new())
+    }
+
     /// Captures a request before its body is read. `route` is `None` for
     /// requests that matched no route.
     pub(crate) fn new(
@@ -234,7 +297,7 @@ impl RequestContext {
             path_params,
             identity,
             body: Bytes::new(),
-            authorizer: Map::new(),
+            authorizer: AuthorizerContext::default(),
             stage_variables: Arc::clone(&api.stage_variables),
             integration: IntegrationOutcome::default(),
         }
@@ -328,7 +391,7 @@ impl RequestContext {
             "resourcePath": self.resource_path,
             "routeKey": self.route_key.as_str(),
             "stage": self.api.stage_name(),
-            "authorizer": Value::Object(self.authorizer.clone()),
+            "authorizer": Value::Object(self.authorizer.values().clone()),
         });
         let mut integration = BTreeMap::new();
         if let Some(status) = self.integration.status {
@@ -390,7 +453,7 @@ pub(crate) mod tests {
             path_params: vec![("petId".to_owned(), "7".to_owned())],
             identity,
             body: Bytes::new(),
-            authorizer: Map::new(),
+            authorizer: AuthorizerContext::default(),
             stage_variables: Arc::default(),
             integration: IntegrationOutcome::default(),
         }
@@ -431,9 +494,10 @@ pub(crate) mod tests {
             transfer_mode: Some(ResponseTransferMode::Stream),
             time_to_all_headers_ms: Some(5),
         };
-        request
-            .authorizer
-            .insert("principalId".to_owned(), json!("user-1"));
+        request.authorizer = AuthorizerContext::lambda(Map::from_iter([
+            ("principalId".to_owned(), json!("user-1")),
+            ("tenant".to_owned(), json!("acme")),
+        ]));
         let vars = request.variables();
         assert_eq!(vars["apiId"], "abc123");
         assert_eq!(vars["stage"], "prod");
@@ -469,6 +533,30 @@ pub(crate) mod tests {
                 "REST reports HTTP/1.1 for every client"
             );
         }
+    }
+
+    #[test]
+    fn lambda_authorizer_context_nests_by_payload_version() {
+        let context = AuthorizerContext::lambda(Map::from_iter([
+            ("principalId".to_owned(), json!("user-1")),
+            ("tenant".to_owned(), json!("acme")),
+        ]));
+        assert_eq!(
+            context.event_value(PayloadVersion::V1),
+            Some(json!({"principalId": "user-1", "tenant": "acme"}))
+        );
+        assert_eq!(
+            context.event_value(PayloadVersion::V2),
+            Some(json!({"lambda": {"tenant": "acme"}}))
+        );
+        assert_eq!(
+            AuthorizerContext::default().event_value(PayloadVersion::V1),
+            None
+        );
+        assert_eq!(
+            AuthorizerContext::default().event_value(PayloadVersion::V2),
+            None
+        );
     }
 
     #[test]

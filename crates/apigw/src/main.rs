@@ -2,6 +2,7 @@
 //! definition and serves its routes from a single binary.
 
 mod app;
+mod authz;
 mod aws;
 mod config;
 mod gateway;
@@ -13,6 +14,7 @@ mod lambda;
 mod lambda_response;
 mod listener;
 mod model;
+mod observability;
 mod pipeline;
 mod proxy;
 mod route;

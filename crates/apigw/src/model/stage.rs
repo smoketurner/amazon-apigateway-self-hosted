@@ -6,7 +6,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::Feature;
+use super::{Feature, MethodMatch, RoutePath};
 
 /// Identifies one deployed version of a stage. A refresh re-exports only when
 /// this changes.
@@ -139,12 +139,72 @@ impl MethodSettings {
             || self.throttling_rate_limit.is_some_and(|r| r >= 0.0)
     }
 
-    fn logs_executions(&self) -> bool {
-        self.logging_level
-            .as_deref()
-            .is_some_and(|level| !level.eq_ignore_ascii_case("OFF"))
-            || self.data_trace_enabled == Some(true)
+    /// These settings with every field they leave unset taken from `base`.
+    fn overlaid_on(&self, base: &Self) -> Self {
+        Self {
+            throttling_burst_limit: self.throttling_burst_limit.or(base.throttling_burst_limit),
+            throttling_rate_limit: self.throttling_rate_limit.or(base.throttling_rate_limit),
+            metrics_enabled: self.metrics_enabled.or(base.metrics_enabled),
+            logging_level: self
+                .logging_level
+                .clone()
+                .or_else(|| base.logging_level.clone()),
+            data_trace_enabled: self.data_trace_enabled.or(base.data_trace_enabled),
+            caching_enabled: self.caching_enabled.or(base.caching_enabled),
+            cache_ttl_seconds: self.cache_ttl_seconds.or(base.cache_ttl_seconds),
+            cache_data_encrypted: self.cache_data_encrypted.or(base.cache_data_encrypted),
+            require_authorization_for_cache_control: self
+                .require_authorization_for_cache_control
+                .or(base.require_authorization_for_cache_control),
+            unauthorized_cache_control_header_strategy: self
+                .unauthorized_cache_control_header_strategy
+                .clone()
+                .or_else(|| base.unauthorized_cache_control_header_strategy.clone()),
+        }
     }
+
+    /// Whether detailed (per method or route) metrics are on.
+    pub(crate) fn detailed_metrics(&self) -> bool {
+        self.metrics_enabled == Some(true)
+    }
+
+    /// The execution logging these settings ask for, if any. Data tracing only
+    /// applies while a logging level is set, as in API Gateway.
+    pub(crate) fn execution_logging(&self) -> Option<ExecutionLogging> {
+        let level = self.logging_level.as_deref()?.parse().ok()?;
+        Some(ExecutionLogging {
+            level,
+            data_trace: self.data_trace_enabled == Some(true),
+        })
+    }
+}
+
+/// A stage's execution logging level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum LoggingLevel {
+    /// Only errors.
+    Error,
+    /// Errors and informational events.
+    Info,
+}
+
+impl std::str::FromStr for LoggingLevel {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.to_ascii_uppercase().as_str() {
+            "ERROR" => Ok(Self::Error),
+            "INFO" => Ok(Self::Info),
+            _ => Err(format!("{raw:?} is not an execution logging level")),
+        }
+    }
+}
+
+/// Execution logging in effect for a route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExecutionLogging {
+    pub(crate) level: LoggingLevel,
+    pub(crate) data_trace: bool,
 }
 
 impl From<&aws_sdk_apigateway::types::MethodSetting> for MethodSettings {
@@ -225,19 +285,6 @@ impl StageSettings {
         if self.cache_cluster_enabled {
             features.push(Feature::ResponseCaching);
         }
-        if self
-            .access_log
-            .as_ref()
-            .is_some_and(|l| l.destination_arn.is_some())
-        {
-            features.push(Feature::AccessLogs);
-        }
-        if settings().any(MethodSettings::logs_executions) {
-            features.push(Feature::ExecutionLogs);
-        }
-        if settings().any(|s| s.metrics_enabled == Some(true)) {
-            features.push(Feature::DetailedMetrics);
-        }
         if self.tracing_enabled {
             features.push(Feature::Tracing);
         }
@@ -253,6 +300,33 @@ impl StageSettings {
 }
 
 impl StageSettings {
+    /// The settings in effect for one route: the stage-wide entry, overridden
+    /// field by field by the entry for the method on any path, the path with any
+    /// method, and the exact path and method, in that order.
+    pub(crate) fn settings_for(&self, method: &MethodMatch, path: &RoutePath) -> MethodSettings {
+        let path = path.to_string();
+        let methods = match method {
+            MethodMatch::Any => vec!["ANY".to_owned(), "*".to_owned()],
+            MethodMatch::Exact(method) => vec![method.to_string()],
+        };
+        let lookup = |path: &str, method: &str| {
+            self.method_settings.get(&SettingsScope::Method {
+                path: path.to_owned(),
+                method: method.to_owned(),
+            })
+        };
+        let mut layers = vec![self.method_settings.get(&SettingsScope::All)];
+        layers.extend(methods.iter().map(|m| lookup("*", m)));
+        layers.push(lookup(&path, "*"));
+        layers.extend(methods.iter().map(|m| lookup(&path, m)));
+        layers
+            .into_iter()
+            .flatten()
+            .fold(MethodSettings::default(), |base, layer| {
+                layer.overlaid_on(&base)
+            })
+    }
+
     /// SDK maps are unordered; settings are kept sorted so snapshots compare
     /// and serialize deterministically.
     fn sorted(map: Option<&HashMap<String, String>>) -> BTreeMap<String, String> {
@@ -445,9 +519,6 @@ mod tests {
             vec![
                 Feature::Throttling,
                 Feature::ResponseCaching,
-                Feature::AccessLogs,
-                Feature::ExecutionLogs,
-                Feature::DetailedMetrics,
                 Feature::Tracing,
                 Feature::Canary
             ]
@@ -481,9 +552,109 @@ mod tests {
         let settings = StageSettings::from(&stage);
         assert_eq!(settings.method_settings.len(), 2);
         assert!(settings.method_settings.contains_key(&SettingsScope::All));
+        assert_eq!(settings.unenforced(), vec![Feature::Throttling]);
+    }
+
+    fn scope(path: &str, method: &str) -> SettingsScope {
+        SettingsScope::Method {
+            path: path.to_owned(),
+            method: method.to_owned(),
+        }
+    }
+
+    #[test]
+    fn route_settings_layer_from_stage_wide_to_exact() {
+        let mut settings = StageSettings::default();
+        settings.method_settings.insert(
+            SettingsScope::All,
+            MethodSettings {
+                logging_level: Some("ERROR".to_owned()),
+                metrics_enabled: Some(false),
+                ..MethodSettings::default()
+            },
+        );
+        settings.method_settings.insert(
+            scope("/pets", "*"),
+            MethodSettings {
+                logging_level: Some("INFO".to_owned()),
+                ..MethodSettings::default()
+            },
+        );
+        settings.method_settings.insert(
+            scope("/pets", "GET"),
+            MethodSettings {
+                metrics_enabled: Some(true),
+                ..MethodSettings::default()
+            },
+        );
+        let pets = RoutePath::Resource("/pets".to_owned());
+        let get = settings.settings_for(&MethodMatch::Exact(axum::http::Method::GET), &pets);
+        assert_eq!(get.logging_level.as_deref(), Some("INFO"));
+        assert!(get.detailed_metrics());
+        let post = settings.settings_for(&MethodMatch::Exact(axum::http::Method::POST), &pets);
+        assert_eq!(post.logging_level.as_deref(), Some("INFO"));
+        assert!(!post.detailed_metrics());
+        let other = settings.settings_for(
+            &MethodMatch::Exact(axum::http::Method::GET),
+            &RoutePath::Resource("/other".to_owned()),
+        );
+        assert_eq!(other.logging_level.as_deref(), Some("ERROR"));
+        assert!(!other.detailed_metrics());
+    }
+
+    #[test]
+    fn any_routes_and_the_default_route_find_their_settings() {
+        let mut settings = StageSettings::default();
+        settings.method_settings.insert(
+            scope("/any", "ANY"),
+            MethodSettings {
+                metrics_enabled: Some(true),
+                ..MethodSettings::default()
+            },
+        );
+        settings.method_settings.insert(
+            scope("$default", "*"),
+            MethodSettings {
+                logging_level: Some("INFO".to_owned()),
+                ..MethodSettings::default()
+            },
+        );
+        let any = settings.settings_for(&MethodMatch::Any, &RoutePath::Resource("/any".to_owned()));
+        assert!(any.detailed_metrics());
+        let default = settings.settings_for(&MethodMatch::Any, &RoutePath::Default);
+        assert!(default.execution_logging().is_some());
         assert_eq!(
-            settings.unenforced(),
-            vec![Feature::Throttling, Feature::ExecutionLogs]
+            StageSettings::default().settings_for(&MethodMatch::Any, &RoutePath::Default),
+            MethodSettings::default()
+        );
+    }
+
+    #[test]
+    fn execution_logging_needs_a_known_level_and_data_trace_rides_on_it() {
+        let logging = |level: Option<&str>, trace: bool| {
+            MethodSettings {
+                logging_level: level.map(str::to_owned),
+                data_trace_enabled: Some(trace),
+                ..MethodSettings::default()
+            }
+            .execution_logging()
+        };
+        assert_eq!(logging(Some("OFF"), true), None);
+        assert_eq!(logging(None, true), None);
+        assert_eq!(logging(Some("bogus"), true), None);
+        assert_eq!(
+            logging(Some("info"), true),
+            Some(ExecutionLogging {
+                level: crate::model::LoggingLevel::Info,
+                data_trace: true
+            })
+        );
+        assert_eq!(
+            logging(Some("ERROR"), false),
+            Some(ExecutionLogging {
+                level: crate::model::LoggingLevel::Error,
+                data_trace: false
+            })
         );
     }
 
