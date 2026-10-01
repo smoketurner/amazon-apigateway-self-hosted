@@ -1,0 +1,591 @@
+openapi: "3.0.1"
+info:
+  title: "${name}"
+  version: "1.0"
+x-amazon-apigateway-binary-media-types:
+  - "application/octet-stream"
+  - "image/png"
+x-amazon-apigateway-request-validators:
+  all:
+    validateRequestBody: true
+    validateRequestParameters: true
+  params-only:
+    validateRequestBody: false
+    validateRequestParameters: true
+x-amazon-apigateway-gateway-responses:
+  BAD_REQUEST_BODY:
+    statusCode: "422"
+    responseParameters:
+      gatewayresponse.header.x-reference-gateway-response: "'bad-request-body'"
+    responseTemplates:
+      application/json: '{"message":$context.error.validationErrorString,"type":"$context.error.responseType"}'
+  BAD_REQUEST_PARAMETERS:
+    responseParameters:
+      gatewayresponse.header.x-reference-gateway-response: "'bad-request-parameters'"
+    responseTemplates:
+      application/json: '{"message":$context.error.messageString,"type":"$context.error.responseType"}'
+  THROTTLED:
+    responseParameters:
+      gatewayresponse.header.Retry-After: "'1'"
+    responseTemplates:
+      application/json: '{"message":"slow down","type":"$context.error.responseType"}'
+  DEFAULT_5XX:
+    responseParameters:
+      gatewayresponse.header.x-reference-gateway-response: "'default-5xx'"
+    responseTemplates:
+      application/json: '{"message":$context.error.messageString,"type":"$context.error.responseType"}'
+paths:
+  /mock:
+    get:
+      responses:
+        "200":
+          description: "mock response"
+          headers:
+            X-Mock:
+              schema:
+                type: string
+      x-amazon-apigateway-integration:
+        type: mock
+        passthroughBehavior: when_no_match
+        requestTemplates:
+          application/json: '{"statusCode": 200}'
+        responses:
+          default:
+            statusCode: "200"
+            responseParameters:
+              method.response.header.X-Mock: "'yes'"
+            responseTemplates:
+              application/json: '{"message":"mock"}'
+  /mock/teapot:
+    get:
+      responses:
+        "418":
+          description: "mock response with a non-default status"
+      x-amazon-apigateway-integration:
+        type: mock
+        passthroughBehavior: when_no_match
+        requestTemplates:
+          application/json: '{"statusCode": 418}'
+        responses:
+          default:
+            statusCode: "418"
+            responseTemplates:
+              application/json: '{"message":"teapot"}'
+  /mock/vtl:
+    get:
+      parameters:
+        - name: name
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "mock response rendered through a mapping template"
+      x-amazon-apigateway-integration:
+        type: mock
+        passthroughBehavior: when_no_match
+        requestTemplates:
+          application/json: '{"statusCode": 200}'
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                #set($name = $input.params('name'))
+                {"hello":"$name","stage":"$context.stage","method":"$context.httpMethod"}
+  /lambda-proxy:
+    x-amazon-apigateway-any-method:
+      responses: {}
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_match
+  /lambda-proxy/{proxy+}:
+    x-amazon-apigateway-any-method:
+      parameters:
+        - name: proxy
+          in: path
+          required: true
+          schema:
+            type: string
+      responses: {}
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_match
+  /http-proxy:
+    x-amazon-apigateway-any-method:
+      responses: {}
+      x-amazon-apigateway-integration:
+        type: http_proxy
+        httpMethod: ANY
+        uri: "https://$${stageVariables.echo_host}/http-proxy"
+        passthroughBehavior: when_no_match
+        timeoutInMillis: 5000
+        requestParameters:
+          integration.request.header.x-echo-secret: "stageVariables.echo_secret"
+  /http-proxy/{proxy+}:
+    x-amazon-apigateway-any-method:
+      parameters:
+        - name: proxy
+          in: path
+          required: true
+          schema:
+            type: string
+      responses: {}
+      x-amazon-apigateway-integration:
+        type: http_proxy
+        httpMethod: ANY
+        uri: "https://$${stageVariables.echo_host}/http-proxy/{proxy}"
+        passthroughBehavior: when_no_match
+        timeoutInMillis: 5000
+        requestParameters:
+          integration.request.path.proxy: "method.request.path.proxy"
+          integration.request.header.x-echo-secret: "stageVariables.echo_secret"
+  /http-mapped/{id}:
+    get:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: q
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: x-from-client
+          in: header
+          required: false
+          schema:
+            type: string
+      responses: {}
+      x-amazon-apigateway-integration:
+        type: http_proxy
+        httpMethod: GET
+        uri: "https://$${stageVariables.echo_host}/http-mapped/{backendId}"
+        passthroughBehavior: when_no_match
+        timeoutInMillis: 5000
+        requestParameters:
+          integration.request.path.backendId: "method.request.path.id"
+          integration.request.querystring.mappedQuery: "method.request.querystring.q"
+          integration.request.querystring.fixed: "'literal'"
+          integration.request.header.x-mapped-header: "method.request.header.x-from-client"
+          integration.request.header.x-echo-secret: "stageVariables.echo_secret"
+  /http-nonproxy/{id}:
+    get:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: q
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "templated response"
+        "400":
+          description: "backend returned a 4xx"
+      x-amazon-apigateway-integration:
+        type: http
+        httpMethod: POST
+        uri: "https://$${stageVariables.echo_host}/http-nonproxy/{backendId}"
+        passthroughBehavior: when_no_templates
+        timeoutInMillis: 5000
+        requestParameters:
+          integration.request.path.backendId: "method.request.path.id"
+          integration.request.header.x-echo-secret: "stageVariables.echo_secret"
+          integration.request.header.Content-Type: "'application/json'"
+        requestTemplates:
+          application/json: |-
+            {"id":"$input.params('id')","q":"$input.params('q')","stage":"$context.stage"}
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                {"upstreamStatus":"ok","path":$input.json('$.rawPath')}
+          "4\\d{2}":
+            statusCode: "400"
+            responseTemplates:
+              application/json: '{"upstreamStatus":"client-error"}'
+  /lambda-nonproxy:
+    post:
+      responses:
+        "200":
+          description: "function result"
+        "400":
+          description: "function raised an error"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_templates
+        requestTemplates:
+          application/json: |-
+            {"body":$input.json('$'),"method":"$context.httpMethod","stage":"$context.stage"}
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: "$input.json('$')"
+          ".*Error.*":
+            statusCode: "400"
+            responseTemplates:
+              application/json: |-
+                {"error":"$util.escapeJavaScript($input.path('$.errorMessage'))"}
+  /aws/sqs:
+    post:
+      responses:
+        "200":
+          description: "SendMessage result"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "arn:${partition}:apigateway:${region}:sqs:path/${account_id}/${queue_name}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: never
+        requestParameters:
+          integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
+        requestTemplates:
+          application/json: "Action=SendMessage&MessageBody=$util.urlEncode($input.body)"
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: '{"queued":true}'
+  /aws/dynamodb:
+    post:
+      responses:
+        "200":
+          description: "PutItem result"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "arn:${partition}:apigateway:${region}:dynamodb:action/PutItem"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: never
+        requestTemplates:
+          application/json: |-
+            {"TableName":"${table_name}","Item":{"id":{"S":"$input.path('$.id')"},"payload":{"S":"$util.escapeJavaScript($input.body)"}}}
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: '{"stored":true}'
+  /aws/dynamodb/{id}:
+    get:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "GetItem result"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "arn:${partition}:apigateway:${region}:dynamodb:action/GetItem"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: never
+        requestTemplates:
+          application/json: |-
+            {"TableName":"${table_name}","Key":{"id":{"S":"$input.params('id')"}}}
+        responses:
+          default:
+            statusCode: "200"
+  /aws/stepfunctions:
+    post:
+      responses:
+        "200":
+          description: "StartSyncExecution result"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "arn:${partition}:apigateway:${region}:states:action/StartSyncExecution"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: never
+        requestTemplates:
+          application/json: |-
+            {"input":"$util.escapeJavaScript($input.json('$'))","stateMachineArn":"${state_machine_arn}"}
+        responses:
+          default:
+            statusCode: "200"
+  /aws/eventbridge:
+    post:
+      responses:
+        "200":
+          description: "PutEvents result"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "arn:${partition}:apigateway:${region}:events:action/PutEvents"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: never
+        requestParameters:
+          integration.request.header.X-Amz-Target: "'AWSEvents.PutEvents'"
+          integration.request.header.Content-Type: "'application/x-amz-json-1.1'"
+        requestTemplates:
+          application/json: |-
+            {"Entries":[{"Source":"apigw.reference","DetailType":"parity","Detail":"$util.escapeJavaScript($input.body)","EventBusName":"${event_bus_name}"}]}
+        responses:
+          default:
+            statusCode: "200"
+  /validated/{id}:
+    post:
+      x-amazon-apigateway-request-validator: all
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: page
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: x-required
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Item"
+      responses: {}
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_match
+  /validated-params:
+    get:
+      x-amazon-apigateway-request-validator: params-only
+      parameters:
+        - name: page
+          in: query
+          required: true
+          schema:
+            type: string
+      responses: {}
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_match
+  /authz/token:
+    get:
+      security:
+        - token_authorizer: []
+      responses: {}
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_match
+  /authz/request:
+    get:
+      security:
+        - request_authorizer: []
+      responses: {}
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_match
+  /authz/cognito:
+    get:
+      security:
+        - cognito: []
+      responses: {}
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_match
+  /authz/cognito-scoped:
+    get:
+      security:
+        - cognito:
+            - aws.cognito.signin.user.admin
+      responses: {}
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_match
+  /keyed:
+    get:
+      security:
+        - api_key: []
+      responses: {}
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_match
+  /cors:
+    get:
+      responses:
+        "200":
+          description: "echo with CORS headers added by the integration"
+          headers:
+            Access-Control-Allow-Origin:
+              schema:
+                type: string
+      x-amazon-apigateway-integration:
+        type: mock
+        passthroughBehavior: when_no_match
+        requestTemplates:
+          application/json: '{"statusCode": 200}'
+        responses:
+          default:
+            statusCode: "200"
+            responseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'${cors_origin}'"
+            responseTemplates:
+              application/json: '{"cors":true}'
+    options:
+      responses:
+        "200":
+          description: "CORS preflight"
+          headers:
+            Access-Control-Allow-Origin:
+              schema:
+                type: string
+            Access-Control-Allow-Methods:
+              schema:
+                type: string
+            Access-Control-Allow-Headers:
+              schema:
+                type: string
+      x-amazon-apigateway-integration:
+        type: mock
+        passthroughBehavior: when_no_match
+        requestTemplates:
+          application/json: '{"statusCode": 200}'
+        responses:
+          default:
+            statusCode: "200"
+            responseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'${cors_origin}'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Headers: "'content-type,x-api-key'"
+  /throttled:
+    get:
+      responses:
+        "200":
+          description: "route with a 1 rps method throttle"
+      x-amazon-apigateway-integration:
+        type: mock
+        passthroughBehavior: when_no_match
+        requestTemplates:
+          application/json: '{"statusCode": 200}'
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: '{"throttled":false}'
+  /cached:
+    get:
+      parameters:
+        - name: key
+          in: query
+          required: false
+          schema:
+            type: string
+      responses: {}
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_match
+        cacheKeyParameters:
+          - method.request.querystring.key
+%{ if enable_vpc_link ~}
+  /vpc-link:
+    get:
+      responses: {}
+      x-amazon-apigateway-integration:
+        type: http_proxy
+        httpMethod: GET
+        uri: "http://${vpc_link_dns_name}/"
+        connectionType: VPC_LINK
+        connectionId: "${vpc_link_id}"
+        passthroughBehavior: when_no_match
+%{ endif ~}
+components:
+  schemas:
+    Item:
+      type: object
+      required:
+        - name
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+        count:
+          type: integer
+          minimum: 0
+  securitySchemes:
+    api_key:
+      type: apiKey
+      name: x-api-key
+      in: header
+    token_authorizer:
+      type: apiKey
+      name: Authorization
+      in: header
+      x-amazon-apigateway-authtype: custom
+      x-amazon-apigateway-authorizer:
+        type: token
+        authorizerUri: "${authorizer_invocation_uri}"
+        authorizerCredentials: "${invoke_role_arn}"
+        authorizerResultTtlInSeconds: 0
+        identityValidationExpression: "^[a-z]+$"
+    request_authorizer:
+      type: apiKey
+      name: x-auth
+      in: header
+      x-amazon-apigateway-authtype: custom
+      x-amazon-apigateway-authorizer:
+        type: request
+        identitySource: "method.request.header.x-auth"
+        authorizerUri: "${authorizer_invocation_uri}"
+        authorizerCredentials: "${invoke_role_arn}"
+        authorizerResultTtlInSeconds: 30
+    cognito:
+      type: apiKey
+      name: Authorization
+      in: header
+      x-amazon-apigateway-authtype: cognito_user_pools
+      x-amazon-apigateway-authorizer:
+        type: cognito_user_pools
+        providerARNs:
+          - "${user_pool_arn}"

@@ -1,0 +1,17 @@
+{
+  "name": "http-http-proxy-greedy",
+  "source": "hand_written",
+  "api": "http",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    }
+  },
+  "echo": {
+    "method": "GET",
+    "path": "/http-proxy/x/y",
+    "query": "k=v",
+    "headers": {}
+  }
+}

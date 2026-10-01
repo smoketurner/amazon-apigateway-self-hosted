@@ -1,0 +1,31 @@
+[package]
+name                   = "apigw-parity"
+description            = "Dev tool that records Amazon API Gateway responses and replays them against apigw"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+publish                = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow             = { workspace = true, features = ["std"] }
+axum               = { workspace = true, features = ["http1", "tokio"] }
+base64             = { workspace = true, features = ["std"] }
+clap               = { workspace = true, features = ["std", "derive", "env", "help", "usage", "error-context"] }
+rcgen              = { workspace = true, features = ["aws_lc_rs", "pem"] }
+reqwest            = { workspace = true, features = ["rustls"] }
+rustls             = { workspace = true, features = ["aws-lc-rs", "std", "tls12"] }
+serde              = { workspace = true, features = ["std", "derive"] }
+serde-saphyr       = { workspace = true, features = ["deserialize"] }
+serde_json         = { workspace = true, features = ["std"] }
+thiserror          = { workspace = true, features = ["std"] }
+tokio              = { workspace = true, features = ["rt-multi-thread", "macros", "net", "process", "sync", "time", "fs"] }
+tracing            = { workspace = true, features = ["std", "attributes"] }
+tracing-subscriber = { workspace = true, features = ["std", "fmt", "env-filter", "ansi"] }
+uuid               = { workspace = true, features = ["std", "v7"] }
+
+[dev-dependencies]
+proptest = { workspace = true, features = ["std"] }

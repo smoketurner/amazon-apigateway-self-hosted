@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::aws::AwsClients;
 use crate::config::Config;
 use crate::gateway::{ApiContext, Enforcement};
+use crate::gateway_response::GatewayResponses;
 use crate::integration::StageVariables;
 use crate::listener::{self, ConnLimits, Edge, Tls};
 use crate::model::{ApiModel, DeploymentStamp, IntegrationOverrides};
@@ -66,7 +67,8 @@ impl Builder {
             kind: snapshot.kind,
             api_id: snapshot.api_id.clone(),
             stage: snapshot.stage.clone(),
-            stage_variables: StageVariables::new(model.stage.variables.clone()),
+            stage_variables: Arc::new(StageVariables::new(model.stage.variables.clone())),
+            responses: GatewayResponses::compile(model.kind, &model.gateway_responses),
             enforcement: self.enforcement,
             http: self.http.clone(),
             aws: Arc::clone(&self.aws),

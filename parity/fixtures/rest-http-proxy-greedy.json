@@ -1,0 +1,17 @@
+{
+  "name": "rest-http-proxy-greedy",
+  "source": "hand_written",
+  "api": "rest",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    }
+  },
+  "echo": {
+    "method": "GET",
+    "path": "/http-proxy/a/b",
+    "query": "x=1&y=2",
+    "headers": {}
+  }
+}
