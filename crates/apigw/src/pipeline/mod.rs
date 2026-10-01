@@ -10,6 +10,8 @@
 
 pub(crate) mod context;
 
+use std::time::Instant;
+
 use axum::body::Body;
 use axum::extract::{FromRequestParts as _, RawPathParams, Request};
 use axum::http::header;
@@ -22,6 +24,7 @@ use crate::gateway::{ApiContext, GatewayError, MAX_BODY_BYTES, RequestId};
 use crate::identity::ClientIdentity;
 use crate::integration::{Integration, MockResponse};
 use crate::model::Protection;
+use crate::observability::IntegrationTiming;
 use crate::route::Route;
 
 /// One route's handling of one request.
@@ -43,7 +46,7 @@ impl<'a> Pipeline<'a> {
             Ok(ctx) => ctx,
             Err(error) => return error.response(self.api.kind),
         };
-        self.integrate(ctx).await
+        self.integrate_timed(ctx).await
     }
 
     /// The protection that refuses this request, if any: routes whose
@@ -97,6 +100,17 @@ impl<'a> Pipeline<'a> {
             authorizer: serde_json::Map::new(),
             integration: IntegrationOutcome::default(),
         })
+    }
+
+    /// Runs the integration and records how long it took, for
+    /// `$context.integrationLatency` and the `IntegrationLatency` metric.
+    async fn integrate_timed(&self, ctx: RequestContext) -> Response {
+        let started = Instant::now();
+        let mut response = self.integrate(ctx).await;
+        response
+            .extensions_mut()
+            .insert(IntegrationTiming(started.elapsed()));
+        response
     }
 
     async fn integrate(&self, ctx: RequestContext) -> Response {

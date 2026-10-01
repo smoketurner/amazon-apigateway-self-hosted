@@ -129,11 +129,14 @@ impl PathRoutes {
     }
 
     async fn handle(&self, request: Request) -> Response {
-        match self.select(request.method()) {
+        let route = self.select(request.method());
+        let pending = self.ctx.observer.begin(&request, route);
+        let response = match route {
             // The pipeline future holds whole SDK calls; box it once here.
             Some(route) => Box::pin(Pipeline::new(&self.ctx, route).run(request)).await,
             None => GatewayError::NoRoute.response(self.ctx.kind),
-        }
+        };
+        self.ctx.observer.finish(pending, response)
     }
 }
 
@@ -232,11 +235,18 @@ pub(crate) fn build(
     });
     let router = match base.0 {
         Some(ref prefix) => {
-            let kind = ctx.kind;
+            let outside = Arc::clone(ctx);
             Router::new()
                 .without_v07_checks()
                 .nest(prefix, router)
-                .fallback(move || async move { GatewayError::NoRoute.response(kind) })
+                .fallback(move |request: Request| {
+                    let ctx = Arc::clone(&outside);
+                    async move {
+                        let pending = ctx.observer.begin(&request, None);
+                        let response = GatewayError::NoRoute.response(ctx.kind);
+                        ctx.observer.finish(pending, response)
+                    }
+                })
         }
         None => router,
     };
@@ -340,6 +350,7 @@ mod tests {
             enforcement,
             http: reqwest::Client::new(),
             aws: aws(),
+            observer: crate::observability::StageObserver::disabled(),
         })
     }
 
@@ -767,6 +778,7 @@ mod tests {
             enforcement: STRICT,
             http: reqwest::Client::new(),
             aws,
+            observer: crate::observability::StageObserver::disabled(),
         });
         let (router, _) = build(&model, &api, &BasePath::default());
         let request = Request::builder()

@@ -17,6 +17,7 @@ use crate::gateway::{ApiContext, Enforcement};
 use crate::integration::StageVariables;
 use crate::listener::{self, ConnLimits, Edge, Tls};
 use crate::model::{ApiModel, DeploymentStamp, IntegrationOverrides};
+use crate::observability::{Observability, StageObserver};
 use crate::router::{self, BasePath, LoadSummary, Loaded};
 use crate::source::{Fetch, Fetcher, Snapshot, SourceError};
 
@@ -30,6 +31,7 @@ struct Builder {
     overrides_path: Option<PathBuf>,
     http: reqwest::Client,
     aws: Arc<AwsClients>,
+    observability: Arc<Observability>,
 }
 
 /// The inputs a router was built from; a refresh rebuilds only when they change.
@@ -70,6 +72,12 @@ impl Builder {
             enforcement: self.enforcement,
             http: self.http.clone(),
             aws: Arc::clone(&self.aws),
+            observer: StageObserver::new(
+                &self.observability,
+                &model,
+                &snapshot.api_id,
+                snapshot.stage.as_deref(),
+            ),
         });
         let (router, routes) = router::build(&model, &ctx, &self.base_path);
         for route in &routes {
@@ -320,7 +328,12 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         config.lambda_endpoints(),
         http.clone(),
     ));
+    let observability = Observability::start(
+        sdk_config.clone(),
+        config.observability(std::env::var("HOSTNAME").ok().as_deref()),
+    );
     let builder = Builder {
+        observability: Arc::clone(&observability),
         base_path: config.base_path.clone(),
         enforcement: config.enforcement(),
         stage_variable_overrides: config.stage_variable_overrides(std::env::vars()),
@@ -389,6 +402,7 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
     tracing::info!("shutting down; draining connections");
     shutdown.cancel();
     while tasks.join_next().await.is_some() {}
+    observability.close().await;
     Ok(())
 }
 
@@ -417,6 +431,7 @@ mod tests {
 
     fn builder(overrides_path: Option<PathBuf>) -> Builder {
         Builder {
+            observability: Observability::off(),
             base_path: BasePath::default(),
             enforcement: Enforcement {
                 authorization: AuthorizationMode::Enforce,

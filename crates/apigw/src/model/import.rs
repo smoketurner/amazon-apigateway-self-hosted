@@ -57,7 +57,13 @@ impl References<'_> {
 }
 
 #[derive(Deserialize)]
+struct Info {
+    title: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct Document {
+    info: Option<Info>,
     #[serde(default)]
     paths: BTreeMap<String, BTreeMap<String, Value>>,
     #[serde(default)]
@@ -292,6 +298,7 @@ impl Document {
 
     fn settings(&self) -> ApiSettings {
         ApiSettings {
+            title: self.info.as_ref().and_then(|info| info.title.clone()),
             binary_media_types: self.binary_media_types.clone(),
             minimum_compression_size: self.minimum_compression_size,
             api_key_source: self.api_key_source,

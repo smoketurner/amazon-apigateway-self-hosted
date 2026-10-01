@@ -5,12 +5,15 @@
 use std::collections::BTreeMap;
 
 use axum::body::Bytes;
+use axum::extract::Request;
 use axum::http::{HeaderMap, Method};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
+use crate::gateway::RequestId;
 use crate::identity::ClientIdentity;
 use crate::model::{ApiKind, RouteKey};
+use crate::route::Route;
 
 /// The API and stage a request was received on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,17 +121,39 @@ pub(crate) struct RequestContext {
     pub(crate) body: Bytes,
     /// `$context.authorizer.*`, filled by authorizers.
     pub(crate) authorizer: Map<String, Value>,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "filled and read by mapping templates (#26) and access logs (#41)"
-        )
-    )]
     pub(crate) integration: IntegrationOutcome,
 }
 
 impl RequestContext {
+    /// The request as observation sees it, before a route has run: everything
+    /// but the body and the path parameters, which logging does not need.
+    /// `route` is `None` for a request no route matched.
+    pub(crate) fn observed(api: ApiInfo, route: Option<&Route>, request: &Request) -> Self {
+        Self {
+            api,
+            route_key: route.map_or_else(|| RouteKey::from("-"), |r| r.key.clone()),
+            resource_path: route.map_or_else(|| "-".to_owned(), |r| r.path.to_string()),
+            request_id: request
+                .extensions()
+                .get::<RequestId>()
+                .map_or_else(Uuid::now_v7, |id| id.0),
+            received: jiff::Timestamp::now(),
+            method: request.method().clone(),
+            path: request.uri().path().to_owned(),
+            query: QueryString::new(request.uri().query()),
+            headers: request.headers().clone(),
+            path_params: Vec::new(),
+            identity: request
+                .extensions()
+                .get::<ClientIdentity>()
+                .cloned()
+                .unwrap_or_else(ClientIdentity::unknown),
+            body: Bytes::new(),
+            authorizer: Map::new(),
+            integration: IntegrationOutcome::default(),
+        }
+    }
+
     pub(crate) fn path_param(&self, name: &str) -> Option<&str> {
         self.path_params
             .iter()
@@ -164,13 +189,6 @@ impl RequestContext {
 
     /// API Gateway's `$context` variables as a JSON object, using API Gateway's
     /// names. Values that aren't known yet are omitted rather than invented.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "read by mapping templates (#26), gateway responses (#15), and access logs (#41)"
-        )
-    )]
     pub(crate) fn variables(&self) -> Value {
         let mut context = json!({
             "apiId": self.api.api_id,

@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::aws::AwsClients;
 use crate::integration::StageVariables;
 use crate::model::{ApiKind, Protection};
+use crate::observability::StageObserver;
 use crate::route::Route;
 
 /// API Gateway's maximum payload size.
@@ -134,6 +135,7 @@ pub(crate) struct ApiContext {
     pub(crate) enforcement: Enforcement,
     pub(crate) http: reqwest::Client,
     pub(crate) aws: Arc<AwsClients>,
+    pub(crate) observer: StageObserver,
 }
 
 /// A JSON `{"message": ...}` body, the shape of API Gateway's own errors.

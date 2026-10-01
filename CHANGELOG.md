@@ -23,8 +23,24 @@ All notable changes to this project are documented here. The format follows
 - Istio `X-Forwarded-Client-Cert` is parsed (Subject, Hash, URI/DNS SANs, `Cert`) from trusted
   proxies and kept with the client identity for upcoming mTLS support.
 
+- Access logs: the stage's `$context` format (CLF, JSON, XML, CSV, or any template) is
+  rendered for every request, including ones no route matched, and written in batches to the
+  stage's CloudWatch Logs log group (one log stream per process) or Firehose delivery stream,
+  with standard output as the fallback (`--access-logs`).
+- Metrics: `Count`, `4XXError`, `5XXError`, `Latency`, and `IntegrationLatency` (HTTP APIs:
+  `4xx`, `5xx`) are aggregated per minute and published as CloudWatch embedded metric format
+  events to `--metrics-log-group` under `--metrics-namespace` (default `ApiGatewaySelfHosted`),
+  with `ApiName`/`Stage` (HTTP: `ApiId`/`Stage`) dimensions and per-route `Method`/`Resource`
+  dimensions when the stage enables detailed metrics.
+- Execution logs: REST stages with `loggingLevel` `ERROR` or `INFO` (and `dataTraceEnabled`)
+  write a request trace to `API-Gateway-Execution-Logs_{apiId}/{stage}` (`--execution-logs`).
+- Log delivery uses bounded queues that drop (and count) events instead of slowing requests,
+  and flushes everything on shutdown.
+
 ### Changed
 
+- Access logs, execution logs, and detailed metrics are no longer listed as unenforced on
+  `/routes`.
 - `X-Forwarded-For` sent by a client that is not a trusted proxy is no longer forwarded to
   `HTTP_PROXY` integrations: it is replaced by the client's address. `X-Forwarded-Client-Cert` is
   removed from such requests. Set `--trusted-proxies` to keep forwarding a proxy's headers.

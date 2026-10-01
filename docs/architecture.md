@@ -9,6 +9,7 @@ One crate, `crates/apigw`, building one binary.
 | `model` | `ApiModel`: everything imported from the export and `GetStage` (operations, integrations, protections, authorizers, validators, models, gateway responses, API and stage settings), whether or not it is enforced yet; integration overrides apply here |
 | `integration`, `route` | Compile each model operation into a runtime `Route` with an executable `Integration`, substituting stage variables |
 | `router` | Builds an axum `Router` from the routes; the dispatcher that swaps routers live; admin routes |
+| `observability` | Access logs, per-minute EMF metrics, and execution logs: `StageObserver` records each request of a loaded stage; `Observability` owns the bounded per-destination queues and workers |
 | `pipeline` | Per-request execution in API Gateway's stage order (`Pipeline`), and `RequestContext`, the single owner of `$context` variables |
 | `gateway` | What every route of an API shares (`ApiContext`), enforcement of unevaluated protections, and API Gateway-shaped errors (`GatewayError`) |
 | `aws` | `AwsClients`: per-region Lambda clients, assumed integration-role credentials, Lambda endpoint overrides, trace header propagation |
