@@ -35,6 +35,10 @@ impl StageVariables {
         self.0.is_empty()
     }
 
+    pub(crate) fn get(&self, name: &str) -> Option<&str> {
+        self.0.get(name).map(String::as_str)
+    }
+
     pub(crate) fn substitute(&self, text: &str) -> String {
         const PREFIX: &str = "${stageVariables.";
         let mut out = String::with_capacity(text.len());
@@ -223,11 +227,14 @@ pub(crate) enum ParamSource {
     Path(String),
     Query(String),
     Header(String),
+    /// A `context.<variable>` path into `$context`.
+    Context(String),
+    StageVariable(String),
     Literal(String),
 }
 
 impl ParamSource {
-    fn parse(expr: &str) -> Option<Self> {
+    pub(crate) fn parse(expr: &str) -> Option<Self> {
         if let Some(literal) = expr.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
             return Some(Self::Literal(literal.to_owned()));
         }
@@ -239,6 +246,12 @@ impl ParamSource {
         }
         if let Some(name) = expr.strip_prefix("method.request.header.") {
             return Some(Self::Header(name.to_owned()));
+        }
+        if let Some(path) = expr.strip_prefix("context.") {
+            return Some(Self::Context(path.to_owned()));
+        }
+        if let Some(name) = expr.strip_prefix("stageVariables.") {
+            return Some(Self::StageVariable(name.to_owned()));
         }
         None
     }
@@ -378,7 +391,7 @@ mod tests {
                     "integration.request.path.id": "method.request.path.petId",
                     "integration.request.header.x-api": "'static'",
                     "integration.request.querystring.q": "method.request.querystring.search",
-                    "integration.request.header.bad": "context.requestId",
+                    "integration.request.header.bad": "method.request.body.id",
                     "integration.response.header.x": "'ignored'"
                 },
                 "timeoutInMillis": 5000

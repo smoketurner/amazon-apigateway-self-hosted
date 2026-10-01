@@ -11,6 +11,7 @@ One crate, `crates/apigw`, building one binary.
 | `router` | Builds an axum `Router` from the routes; the dispatcher that swaps routers live; admin routes |
 | `pipeline` | Per-request execution in API Gateway's stage order (`Pipeline`), and `RequestContext`, the single owner of `$context` variables |
 | `gateway` | What every route of an API shares (`ApiContext`), enforcement of unevaluated protections, and API Gateway-shaped errors (`GatewayError`) |
+| `gateway_response` | Every error the gateway answers with (`Failure`), rendered through the API's customized REST gateway responses (status, `gatewayresponse.header.*`, `$context` templates, `DEFAULT_4XX`/`DEFAULT_5XX` fallback) or HTTP APIs' fixed messages |
 | `aws` | `AwsClients`: per-region Lambda clients, assumed integration-role credentials, Lambda endpoint overrides, trace header propagation |
 | `proxy` | `HTTP_PROXY` forwarding |
 | `lambda` | `AWS_PROXY` event construction (payload 1.0 and 2.0) and response mapping |
