@@ -15,9 +15,9 @@ use tokio::sync::watch;
 use tower::ServiceExt as _;
 use uuid::Uuid;
 
-use crate::gateway::{self, ApiContext, RequestId, request_id_header};
+use crate::gateway::{self, ApiContext, Enforcement, RequestId, request_id_header};
 use crate::spec::{
-    ApiDefinition, ApiKind, Authorization, Integration, MethodMatch, Route, RoutePath,
+    ApiDefinition, ApiKind, Integration, MethodMatch, Protections, Route, RoutePath,
 };
 
 /// A stage prefix such as `/prod` that every route is served under, as on an
@@ -65,9 +65,34 @@ pub(crate) struct RouteSummary {
     pub(crate) route_key: String,
     pub(crate) integration: &'static str,
     pub(crate) target: Option<String>,
-    pub(crate) authorization_required: bool,
+    pub(crate) protections: Protections,
     /// Why the route is not being served as API Gateway would serve it.
-    pub(crate) problem: Option<String>,
+    pub(crate) problems: Vec<String>,
+}
+
+impl RouteSummary {
+    fn new(route: &Route, enforcement: Enforcement) -> Self {
+        let mut problems: Vec<String> = enforcement
+            .refusals(route)
+            .map(|protection| protection.refusal_reason().to_owned())
+            .collect();
+        let target = match route.integration {
+            Integration::HttpProxy(ref proxy) => Some(proxy.uri.clone()),
+            Integration::Lambda(ref lambda) => Some(lambda.function.clone()),
+            Integration::Mock(_) => None,
+            Integration::Unsupported { ref reason } => {
+                problems.push(reason.clone());
+                None
+            }
+        };
+        Self {
+            route_key: route.route_key(),
+            integration: route.integration.kind(),
+            target,
+            protections: route.protections.clone(),
+            problems,
+        }
+    }
 }
 
 /// Groups routes by path: one axum route per path, with method selection done
@@ -127,7 +152,7 @@ pub(crate) fn build(
     let mut default = None;
     let mut by_path: BTreeMap<String, BTreeMap<MethodMatch, Route>> = BTreeMap::new();
     for route in &definition.routes {
-        let mut summary = summarize(route, ctx.authorization);
+        let mut summary = RouteSummary::new(route, ctx.enforcement);
         match route.path {
             RoutePath::Default => default = Some(Arc::new(route.clone())),
             RoutePath::Resource(ref path) => match axum_path(path) {
@@ -137,7 +162,7 @@ pub(crate) fn build(
                         .or_default()
                         .insert(route.method.clone(), route.clone());
                 }
-                Err(reason) => summary.problem = Some(format!("not served: {reason}")),
+                Err(reason) => summary.problems.push(format!("not served: {reason}")),
             },
         }
         summaries.push(summary);
@@ -154,7 +179,7 @@ pub(crate) fn build(
             tracing::error!(path, %err, "route conflicts with another route; skipping it");
             for summary in &mut summaries {
                 if methods.values().any(|r| r.route_key() == summary.route_key) {
-                    summary.problem = Some(format!("not served: {err}"));
+                    summary.problems.push(format!("not served: {err}"));
                 }
             }
             continue;
@@ -193,29 +218,6 @@ pub(crate) fn build(
         None => router,
     };
     (router, summaries)
-}
-
-fn summarize(route: &Route, mode: gateway::AuthorizationMode) -> RouteSummary {
-    let (target, mut problem) = match route.integration {
-        Integration::HttpProxy(ref proxy) => (Some(proxy.uri.clone()), None),
-        Integration::Lambda(ref lambda) => (Some(lambda.function.clone()), None),
-        Integration::Mock(_) => (None, None),
-        Integration::Unsupported { ref reason } => (None, Some(reason.clone())),
-    };
-    let authorization_required = route.authorization == Authorization::Required;
-    if authorization_required && mode == gateway::AuthorizationMode::Enforce && problem.is_none() {
-        problem = Some(
-            "requires authorization, which this gateway does not evaluate; answering 401"
-                .to_owned(),
-        );
-    }
-    RouteSummary {
-        route_key: route.route_key(),
-        integration: route.integration.kind(),
-        target,
-        authorization_required,
-        problem,
-    }
 }
 
 /// Serves every request through whichever [`Loaded`] router is current, so a
@@ -273,10 +275,16 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::gateway::AuthorizationMode;
-    use crate::spec::IntegrationOverrides;
+    use crate::gateway::{AuthorizationMode, Unsupported};
+    use crate::spec::{IntegrationOverrides, Protection};
 
-    fn ctx(kind: ApiKind, authorization: AuthorizationMode) -> Arc<ApiContext> {
+    const STRICT: Enforcement = Enforcement {
+        authorization: AuthorizationMode::Enforce,
+        resource_policy: Unsupported::Reject,
+        request_validation: Unsupported::Reject,
+    };
+
+    fn ctx(kind: ApiKind, enforcement: Enforcement) -> Arc<ApiContext> {
         let config = aws_config::SdkConfig::builder()
             .behavior_version(aws_config::BehaviorVersion::latest())
             .build();
@@ -285,7 +293,7 @@ mod tests {
             api_id: "abc".to_owned(),
             stage: None,
             stage_variables: BTreeMap::new(),
-            authorization,
+            enforcement,
             http: reqwest::Client::new(),
             lambda: aws_sdk_lambda::Client::new(&config),
         })
@@ -304,10 +312,148 @@ mod tests {
         mode: AuthorizationMode,
         base: &str,
     ) -> (Router, Vec<RouteSummary>) {
+        router_with(
+            doc,
+            kind,
+            Enforcement {
+                authorization: mode,
+                ..STRICT
+            },
+            base,
+        )
+    }
+
+    fn router_with(
+        doc: &Value,
+        kind: ApiKind,
+        enforcement: Enforcement,
+        base: &str,
+    ) -> (Router, Vec<RouteSummary>) {
         let def =
             ApiDefinition::from_openapi(doc, kind, &BTreeMap::new(), &IntegrationOverrides::new())
                 .unwrap();
-        build(&def, &ctx(kind, mode), &base.parse().unwrap())
+        build(&def, &ctx(kind, enforcement), &base.parse().unwrap())
+    }
+
+    fn protected_doc() -> Value {
+        let op = |extra: Value| {
+            let mut op = json!({"x-amazon-apigateway-integration": mock(200)});
+            if let (Some(op), Some(extra)) = (op.as_object_mut(), extra.as_object()) {
+                op.extend(extra.clone());
+            }
+            op
+        };
+        json!({
+            "components": {"securitySchemes": {
+                "sigv4": {"type": "apiKey", "name": "Authorization", "in": "header", "x-amazon-apigateway-authtype": "awsSigv4"},
+                "api_key": {"type": "apiKey", "name": "x-api-key", "in": "header"}
+            }},
+            "x-amazon-apigateway-request-validators": {"all": {"validateRequestBody": true, "validateRequestParameters": true}},
+            "paths": {
+                "/open": {"get": op(json!({}))},
+                "/iam": {"get": op(json!({"security": [{"sigv4": []}]}))},
+                "/key": {"get": op(json!({"security": [{"api_key": []}]}))},
+                "/validated": {"get": op(json!({"x-amazon-apigateway-request-validator": "all"}))},
+                "/key-and-validated": {"get": op(json!({"security": [{"api_key": []}], "x-amazon-apigateway-request-validator": "all"}))}
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn unsupported_protections_fail_closed_with_api_gateway_responses() {
+        let (rest, summaries) = router_with(&protected_doc(), ApiKind::Rest, STRICT, "");
+        assert_eq!(call(&rest, Method::GET, "/open").await.0, StatusCode::OK);
+        assert_eq!(
+            call(&rest, Method::GET, "/iam").await,
+            (
+                StatusCode::FORBIDDEN,
+                r#"{"message":"Missing Authentication Token"}"#.to_owned()
+            )
+        );
+        assert_eq!(
+            call(&rest, Method::GET, "/key").await,
+            (
+                StatusCode::FORBIDDEN,
+                r#"{"message":"Forbidden"}"#.to_owned()
+            )
+        );
+        assert_eq!(
+            call(&rest, Method::GET, "/validated").await.0,
+            StatusCode::NOT_IMPLEMENTED
+        );
+        // API Gateway checks the API key before running the validator.
+        assert_eq!(
+            call(&rest, Method::GET, "/key-and-validated").await.0,
+            StatusCode::FORBIDDEN
+        );
+        let both = summaries
+            .iter()
+            .find(|s| s.route_key == "GET /key-and-validated")
+            .unwrap();
+        assert_eq!(both.problems.len(), 2, "{both:?}");
+
+        let (http, _) = router_with(&protected_doc(), ApiKind::Http, STRICT, "");
+        assert_eq!(
+            call(&http, Method::GET, "/iam").await,
+            (
+                StatusCode::FORBIDDEN,
+                r#"{"message":"Forbidden"}"#.to_owned()
+            )
+        );
+
+        let relaxed = Enforcement {
+            authorization: AuthorizationMode::Skip,
+            request_validation: Unsupported::Ignore,
+            ..STRICT
+        };
+        let (rest, summaries) = router_with(&protected_doc(), ApiKind::Rest, relaxed, "");
+        for path in ["/iam", "/key", "/validated", "/key-and-validated"] {
+            assert_eq!(
+                call(&rest, Method::GET, path).await.0,
+                StatusCode::OK,
+                "{path}"
+            );
+        }
+        assert!(
+            summaries.iter().all(|s| s.problems.is_empty()),
+            "{summaries:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_policies_are_not_skipped_by_skip_authorization() {
+        let mut doc = protected_doc();
+        if let Some(doc) = doc.as_object_mut() {
+            doc.insert(
+                "x-amazon-apigateway-policy".to_owned(),
+                json!({"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Principal": "*",
+                    "Action": "execute-api:Invoke", "Resource": "execute-api:/*",
+                    "Condition": {"IpAddress": {"aws:SourceIp": "203.0.113.0/24"}}}]}),
+            );
+        }
+        let skip_auth = Enforcement {
+            authorization: AuthorizationMode::Skip,
+            ..STRICT
+        };
+        let (rest, summaries) = router_with(&doc, ApiKind::Rest, skip_auth, "");
+        assert_eq!(
+            call(&rest, Method::GET, "/open").await,
+            (
+                StatusCode::FORBIDDEN,
+                r#"{"message":"Forbidden"}"#.to_owned()
+            )
+        );
+        assert!(
+            summaries
+                .iter()
+                .all(|s| s.protections.contains(Protection::ResourcePolicy))
+        );
+        let ignore = Enforcement {
+            resource_policy: Unsupported::Ignore,
+            ..skip_auth
+        };
+        let (rest, _) = router_with(&doc, ApiKind::Rest, ignore, "");
+        assert_eq!(call(&rest, Method::GET, "/open").await.0, StatusCode::OK);
     }
 
     async fn call(router: &Router, method: Method, uri: &str) -> (StatusCode, String) {
@@ -385,7 +531,7 @@ mod tests {
             .iter()
             .find(|s| s.route_key == "GET /secure")
             .unwrap();
-        assert!(secure.authorization_required && secure.problem.is_some());
+        assert!(secure.protections.contains(Protection::Authorizer) && !secure.problems.is_empty());
         let (skip, summaries) = router(&sample(), ApiKind::Rest, AuthorizationMode::Skip, "");
         assert_eq!(call(&skip, Method::GET, "/secure").await.0, StatusCode::OK);
         assert!(
@@ -393,8 +539,8 @@ mod tests {
                 .iter()
                 .find(|s| s.route_key == "GET /secure")
                 .unwrap()
-                .problem
-                .is_none()
+                .problems
+                .is_empty()
         );
     }
 
@@ -410,7 +556,7 @@ mod tests {
             .find(|s| s.route_key == "GET /legacy")
             .unwrap();
         assert_eq!(legacy.integration, "UNSUPPORTED");
-        assert!(legacy.problem.is_some());
+        assert!(!legacy.problems.is_empty());
     }
 
     #[tokio::test]
@@ -465,7 +611,7 @@ mod tests {
         let (router, summaries) = router(&doc, ApiKind::Http, AuthorizationMode::Enforce, "");
         let served: Vec<&str> = summaries
             .iter()
-            .filter(|s| s.problem.is_none())
+            .filter(|s| s.problems.is_empty())
             .map(|s| s.route_key.as_str())
             .collect();
         assert_eq!(

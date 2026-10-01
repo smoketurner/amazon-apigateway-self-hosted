@@ -26,7 +26,11 @@ Management's
 | `AWS_PROXY` (Lambda) integrations | Invoked with the API Gateway proxy event, payload format 1.0 or 2.0 |
 | `MOCK` integrations | Status, literal response headers, and response template returned (templates are not evaluated as VTL) |
 | Stage variables | Read from the stage and substituted into integration URIs; overridable locally |
-| Authorizers, IAM auth, API keys | **Not evaluated.** Protected routes answer `401` unless `--insecure-skip-authorization` is set |
+| Lambda/Cognito/JWT authorizers | **Not evaluated yet.** Answer `401` unless `--insecure-skip-authorization` is set |
+| API keys | **Not checked yet.** Answer `403 Forbidden` unless `--insecure-skip-authorization` is set |
+| IAM (`AWS_IAM`) auth | Cannot be verified outside AWS. REST answers `403 Missing Authentication Token`, HTTP `403 Forbidden`, unless `--insecure-skip-authorization` is set |
+| Resource policies | **Not evaluated yet.** Every route of an API with a policy answers `403` unless `--unsupported-resource-policy=ignore` (not affected by `--insecure-skip-authorization`) |
+| Request validators | **Not run yet.** Validated routes answer `501` unless `--unsupported-validation=ignore` |
 | `AWS`/`HTTP` (non-proxy, VTL mapping templates), VPC links | Answer `501`; listed with the reason on `/routes` |
 | Unknown route | REST: `403 {"message":"Missing Authentication Token"}`; HTTP: `404 {"message":"Not Found"}` |
 
@@ -47,7 +51,7 @@ Every flag has an environment variable (`apigw --help` lists them). The main one
 | Flag | Env | Default | Purpose |
 |---|---|---|---|
 | `--rest-api-id` + `--stage` | `APIGW_REST_API_ID`, `APIGW_STAGE` | | Mirror a REST API stage |
-| `--http-api-id` [`--stage`] | `APIGW_HTTP_API_ID` | | Mirror an HTTP API |
+| `--http-api-id` + `--stage` | `APIGW_HTTP_API_ID`, `APIGW_STAGE` | | Mirror an HTTP API stage (the deployed configuration) |
 | `--openapi-file` + `--api-type` | `APIGW_OPENAPI_FILE` | `rest` | Serve an export from disk (no AWS calls for config) |
 | `--tls-cert`, `--tls-key` | `APIGW_TLS_CERT`, `APIGW_TLS_KEY` | required | PEM files; reloaded automatically when they change |
 | `--listen` | `APIGW_LISTEN` | `0.0.0.0:8443` | API traffic |
@@ -57,6 +61,9 @@ Every flag has an environment variable (`apigw --help` lists them). The main one
 | `--config-cache` | `APIGW_CONFIG_CACHE` | none | Last-known-good definition, used when AWS is unreachable at startup |
 | `--stage-variable NAME=VALUE` | `APIGW_STAGE_VARIABLE_<NAME>` | | Override a stage variable |
 | `--integration-overrides` | `APIGW_INTEGRATION_OVERRIDES` | none | Re-point individual routes (below) |
+| `--insecure-skip-authorization` | `APIGW_INSECURE_SKIP_AUTHORIZATION` | off | Serve authorizer, API key, and IAM routes without checking credentials |
+| `--unsupported-resource-policy` | `APIGW_UNSUPPORTED_RESOURCE_POLICY` | `reject` | `ignore` serves APIs with resource policies unrestricted |
+| `--unsupported-validation` | `APIGW_UNSUPPORTED_VALIDATION` | `reject` | `ignore` forwards requests without running request validators |
 
 Logs are JSON on stdout by default (`--log-format text` for humans); filter with `RUST_LOG`.
 

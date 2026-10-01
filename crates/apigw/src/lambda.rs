@@ -326,8 +326,8 @@ mod tests {
     use axum::http::{HeaderMap, Method};
 
     use super::*;
-    use crate::gateway::AuthorizationMode;
-    use crate::spec::{ApiKind, Authorization, Integration, MethodMatch};
+    use crate::gateway::{AuthorizationMode, Enforcement, Unsupported};
+    use crate::spec::{ApiKind, Integration, MethodMatch, Protections};
 
     fn ctx(kind: ApiKind) -> ApiContext {
         let config = aws_config::SdkConfig::builder()
@@ -338,7 +338,11 @@ mod tests {
             api_id: "abc123".to_owned(),
             stage: Some("prod".to_owned()),
             stage_variables: BTreeMap::from([("env".to_owned(), "local".to_owned())]),
-            authorization: AuthorizationMode::Enforce,
+            enforcement: Enforcement {
+                authorization: AuthorizationMode::Enforce,
+                resource_policy: Unsupported::Reject,
+                request_validation: Unsupported::Reject,
+            },
             http: reqwest::Client::new(),
             lambda: aws_sdk_lambda::Client::new(&config),
         }
@@ -351,7 +355,7 @@ mod tests {
             integration: Integration::Unsupported {
                 reason: String::new(),
             },
-            authorization: Authorization::None,
+            protections: Protections::default(),
         }
     }
 

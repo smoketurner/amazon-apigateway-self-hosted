@@ -86,7 +86,7 @@ pub(crate) struct Route {
     pub(crate) method: MethodMatch,
     pub(crate) path: RoutePath,
     pub(crate) integration: Integration,
-    pub(crate) authorization: Authorization,
+    pub(crate) protections: Protections,
 }
 
 impl Route {
@@ -96,12 +96,42 @@ impl Route {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Authorization {
-    None,
-    /// The route has an authorizer, IAM auth, or an API key requirement that this
-    /// gateway does not evaluate.
-    Required,
+/// An access control API Gateway applies to a route before its integration.
+/// Variants are declared in the order API Gateway evaluates them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Protection {
+    ResourcePolicy,
+    Iam,
+    Authorizer,
+    ApiKey,
+    RequestValidation,
+}
+
+/// The protections on one route, iterated in evaluation order.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub(crate) struct Protections(BTreeSet<Protection>);
+
+impl Protections {
+    #[cfg(test)]
+    pub(crate) fn contains(&self, protection: Protection) -> bool {
+        self.0.contains(&protection)
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = Protection> + '_ {
+        self.0.iter().copied()
+    }
+
+    fn insert(&mut self, protection: Protection) {
+        self.0.insert(protection);
+    }
+}
+
+impl FromIterator<Protection> for Protections {
+    fn from_iter<I: IntoIterator<Item = Protection>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -187,7 +217,171 @@ struct Document {
     #[serde(default)]
     paths: BTreeMap<String, BTreeMap<String, Value>>,
     #[serde(default)]
-    security: Option<Vec<BTreeMap<String, Value>>>,
+    security: Option<SecurityRequirements>,
+    #[serde(default)]
+    components: Components,
+    #[serde(rename = "x-amazon-apigateway-policy")]
+    policy: Option<ResourcePolicy>,
+    #[serde(rename = "x-amazon-apigateway-request-validators", default)]
+    validators: RequestValidators,
+    #[serde(rename = "x-amazon-apigateway-request-validator")]
+    default_validator: Option<ValidatorName>,
+}
+
+impl Document {
+    /// The protections API Gateway applies to `operation`.
+    fn protections(&self, kind: ApiKind, operation: &Operation) -> Protections {
+        // HTTP APIs apply the document-level `security` to every route; REST APIs
+        // only honor per-method requirements.
+        let security = match kind {
+            ApiKind::Rest => operation.security.as_ref(),
+            ApiKind::Http => operation.security.as_ref().or(self.security.as_ref()),
+        };
+        let mut protections = security.map_or_else(Protections::default, |requirements| {
+            requirements.protections(&self.components.security_schemes)
+        });
+        if self
+            .policy
+            .as_ref()
+            .is_some_and(ResourcePolicy::has_statements)
+        {
+            protections.insert(Protection::ResourcePolicy);
+        }
+        let validator = operation
+            .validator
+            .as_ref()
+            .or(self.default_validator.as_ref());
+        if validator.is_some_and(|name| self.validators.validates(name)) {
+            protections.insert(Protection::RequestValidation);
+        }
+        protections
+    }
+}
+
+/// `x-amazon-apigateway-policy`: an IAM policy document, embedded as an object or
+/// as a JSON-encoded string.
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct ResourcePolicy(Value);
+
+impl ResourcePolicy {
+    fn has_statements(&self) -> bool {
+        let parsed;
+        let document = match self.0 {
+            Value::Null => return false,
+            Value::String(ref text) => match serde_json::from_str::<Value>(text) {
+                Ok(value) => {
+                    parsed = value;
+                    &parsed
+                }
+                Err(_) => return !text.trim().is_empty(),
+            },
+            Value::Bool(_) | Value::Number(_) | Value::Array(_) | Value::Object(_) => &self.0,
+        };
+        match document.get("Statement") {
+            Some(Value::Array(statements)) => !statements.is_empty(),
+            Some(Value::Null) | None => false,
+            Some(_) => true,
+        }
+    }
+}
+
+/// A method's (or HTTP API document's) `security` list. Alternatives are OR-ed;
+/// the schemes inside one alternative are AND-ed.
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct SecurityRequirements(Vec<BTreeMap<String, Value>>);
+
+impl SecurityRequirements {
+    /// An empty requirement object (`[{}]`) makes authentication optional, so the
+    /// route is only protected when every alternative names a scheme.
+    fn protections(&self, schemes: &SecuritySchemes) -> Protections {
+        let mut protections = Protections::default();
+        if self.0.is_empty() || self.0.iter().any(BTreeMap::is_empty) {
+            return protections;
+        }
+        for name in self.0.iter().flat_map(BTreeMap::keys) {
+            protections.insert(schemes.protection(name));
+        }
+        protections
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(transparent)]
+struct SecuritySchemes(BTreeMap<String, SecurityScheme>);
+
+impl SecuritySchemes {
+    /// Schemes the document doesn't declare count as authorizers so the route
+    /// fails closed.
+    fn protection(&self, name: &str) -> Protection {
+        self.0
+            .get(name)
+            .map_or(Protection::Authorizer, SecurityScheme::protection)
+    }
+}
+
+#[derive(Deserialize)]
+struct SecurityScheme {
+    #[serde(rename = "type")]
+    scheme_type: Option<String>,
+    #[serde(rename = "x-amazon-apigateway-authtype")]
+    auth_type: Option<String>,
+    #[serde(rename = "x-amazon-apigateway-authorizer")]
+    authorizer: Option<Value>,
+}
+
+impl SecurityScheme {
+    /// How this scheme authenticates callers.
+    fn protection(&self) -> Protection {
+        let auth_type = self.auth_type.as_deref();
+        if auth_type.is_some_and(|t| t.eq_ignore_ascii_case("awsSigv4")) {
+            Protection::Iam
+        } else if self.authorizer.is_none()
+            && auth_type.is_none()
+            && self.scheme_type.as_deref() == Some("apiKey")
+        {
+            Protection::ApiKey
+        } else {
+            Protection::Authorizer
+        }
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct Components {
+    #[serde(rename = "securitySchemes", default)]
+    security_schemes: SecuritySchemes,
+}
+
+#[derive(Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(transparent)]
+struct ValidatorName(String);
+
+#[derive(Deserialize, Default)]
+#[serde(transparent)]
+struct RequestValidators(BTreeMap<ValidatorName, RawValidator>);
+
+impl RequestValidators {
+    /// A name with no definition counts as validating so the route fails closed.
+    fn validates(&self, name: &ValidatorName) -> bool {
+        self.0.get(name).is_none_or(RawValidator::validates)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawValidator {
+    #[serde(default)]
+    validate_request_body: bool,
+    #[serde(default)]
+    validate_request_parameters: bool,
+}
+
+impl RawValidator {
+    fn validates(&self) -> bool {
+        self.validate_request_body || self.validate_request_parameters
+    }
 }
 
 #[derive(Deserialize)]
@@ -195,7 +389,9 @@ struct Operation {
     #[serde(rename = "x-amazon-apigateway-integration")]
     integration: Option<RawIntegration>,
     #[serde(default)]
-    security: Option<Vec<BTreeMap<String, Value>>>,
+    security: Option<SecurityRequirements>,
+    #[serde(rename = "x-amazon-apigateway-request-validator")]
+    validator: Option<ValidatorName>,
 }
 
 #[derive(Deserialize)]
@@ -250,7 +446,7 @@ impl ApiDefinition {
                 } else {
                     RoutePath::Resource(path.clone())
                 };
-                let security = operation.security.as_ref().or(document.security.as_ref());
+                let protections = document.protections(kind, &operation);
                 let route_key = route_key(&method, &route_path);
                 let raw = match overrides.get(&route_key) {
                     Some(value) => {
@@ -275,7 +471,7 @@ impl ApiDefinition {
                     method,
                     path: route_path,
                     integration,
-                    authorization: authorization(security),
+                    protections,
                 });
             }
         }
@@ -310,19 +506,6 @@ fn method_match(key: &str) -> Option<MethodMatch> {
         _ => return None,
     };
     Some(MethodMatch::Exact(method))
-}
-
-/// An empty requirement object (`[{}]`) makes authentication optional, so only a
-/// list whose every alternative names a scheme protects the route.
-fn authorization(security: Option<&Vec<BTreeMap<String, Value>>>) -> Authorization {
-    match security {
-        Some(requirements)
-            if !requirements.is_empty() && requirements.iter().all(|r| !r.is_empty()) =>
-        {
-            Authorization::Required
-        }
-        Some(_) | None => Authorization::None,
-    }
 }
 
 fn build_integration(
@@ -784,11 +967,25 @@ mod tests {
         }
     }
 
+    fn protections_by_path(doc: &Value, kind: ApiKind) -> BTreeMap<String, Protections> {
+        parse(doc, kind)
+            .routes
+            .iter()
+            .map(|r| (r.path.to_string(), r.protections.clone()))
+            .collect()
+    }
+
+    fn only<const N: usize>(protections: [Protection; N]) -> Protections {
+        Protections::from_iter(protections)
+    }
+
     #[test]
-    fn authorization_honours_operation_override_and_optional_auth() {
+    fn http_apis_inherit_document_security_and_honor_optional_auth() {
         let integration = json!({"type": "mock"});
         let doc = json!({
-            "security": [{"api_key": []}],
+            "security": [{"jwt": []}],
+            "components": {"securitySchemes": {"jwt": {"type": "oauth2",
+                "x-amazon-apigateway-authorizer": {"type": "jwt"}}}},
             "paths": {
                 "/global": {"get": {"x-amazon-apigateway-integration": integration}},
                 "/open": {"get": {"security": [], "x-amazon-apigateway-integration": integration}},
@@ -796,16 +993,125 @@ mod tests {
                 "/jwt": {"get": {"security": [{"jwt": ["read"]}], "x-amazon-apigateway-integration": integration}}
             }
         });
-        let def = parse(&doc, ApiKind::Http);
-        let auth: BTreeMap<String, Authorization> = def
-            .routes
-            .iter()
-            .map(|r| (r.path.to_string(), r.authorization))
-            .collect();
-        assert_eq!(auth["/global"], Authorization::Required);
-        assert_eq!(auth["/open"], Authorization::None);
-        assert_eq!(auth["/optional"], Authorization::None);
-        assert_eq!(auth["/jwt"], Authorization::Required);
+        let auth = protections_by_path(&doc, ApiKind::Http);
+        let jwt = only([Protection::Authorizer]);
+        assert_eq!(auth["/global"], jwt);
+        assert_eq!(auth["/open"], Protections::default());
+        assert_eq!(auth["/optional"], Protections::default());
+        assert_eq!(auth["/jwt"], jwt);
+    }
+
+    #[test]
+    fn rest_apis_ignore_document_security() {
+        let doc = json!({
+            "security": [{"api_key": []}],
+            "components": {"securitySchemes": {"api_key": {"type": "apiKey", "name": "x-api-key", "in": "header"}}},
+            "paths": {"/a": {"get": {"x-amazon-apigateway-integration": {"type": "mock"}}}}
+        });
+        assert_eq!(
+            protections_by_path(&doc, ApiKind::Rest)["/a"],
+            Protections::default()
+        );
+        assert!(protections_by_path(&doc, ApiKind::Http)["/a"].contains(Protection::ApiKey));
+    }
+
+    #[test]
+    fn security_schemes_are_classified() {
+        let integration = json!({"type": "mock"});
+        let op = |schemes: Value| json!({"security": [schemes], "x-amazon-apigateway-integration": integration});
+        let doc = json!({
+            "components": {"securitySchemes": {
+                "sigv4": {"type": "apiKey", "name": "Authorization", "in": "header", "x-amazon-apigateway-authtype": "awsSigv4"},
+                "api_key": {"type": "apiKey", "name": "x-api-key", "in": "header"},
+                "lambda": {"type": "apiKey", "name": "Authorization", "in": "header",
+                    "x-amazon-apigateway-authtype": "custom", "x-amazon-apigateway-authorizer": {"type": "token"}},
+                "cognito": {"type": "apiKey", "name": "Authorization", "in": "header",
+                    "x-amazon-apigateway-authtype": "cognito_user_pools", "x-amazon-apigateway-authorizer": {"type": "cognito_user_pools"}}
+            }},
+            "paths": {
+                "/iam": {"get": op(json!({"sigv4": []}))},
+                "/key": {"get": op(json!({"api_key": []}))},
+                "/lambda-and-key": {"get": op(json!({"lambda": [], "api_key": []}))},
+                "/cognito": {"get": op(json!({"cognito": ["email"]}))},
+                "/undeclared": {"get": op(json!({"mystery": []}))}
+            }
+        });
+        let auth = protections_by_path(&doc, ApiKind::Rest);
+        assert_eq!(auth["/iam"], only([Protection::Iam]));
+        assert_eq!(auth["/key"], only([Protection::ApiKey]));
+        assert_eq!(
+            auth["/lambda-and-key"],
+            only([Protection::Authorizer, Protection::ApiKey])
+        );
+        assert_eq!(auth["/cognito"], only([Protection::Authorizer]));
+        assert_eq!(auth["/undeclared"], only([Protection::Authorizer]));
+    }
+
+    #[test]
+    fn resource_policies_with_statements_protect_every_route() {
+        let paths = json!({"/a": {"get": {"x-amazon-apigateway-integration": {"type": "mock"}}}});
+        let statement = json!({"Effect": "Allow", "Principal": "*", "Action": "execute-api:Invoke", "Resource": "*"});
+        let cases = [
+            (
+                json!({"Version": "2012-10-17", "Statement": [statement]}),
+                true,
+            ),
+            (
+                json!({"Version": "2012-10-17", "Statement": statement}),
+                true,
+            ),
+            (
+                Value::String(json!({"Statement": [statement]}).to_string()),
+                true,
+            ),
+            (Value::String("not json".to_owned()), true),
+            (json!({"Version": "2012-10-17", "Statement": []}), false),
+            (json!({"Version": "2012-10-17"}), false),
+            (Value::String("  ".to_owned()), false),
+            (Value::Null, false),
+        ];
+        for (policy, expected) in cases {
+            let doc = json!({"x-amazon-apigateway-policy": policy, "paths": paths});
+            assert_eq!(
+                protections_by_path(&doc, ApiKind::Rest)["/a"].contains(Protection::ResourcePolicy),
+                expected,
+                "{policy}"
+            );
+        }
+        assert!(
+            !protections_by_path(&json!({"paths": paths}), ApiKind::Rest)["/a"]
+                .contains(Protection::ResourcePolicy)
+        );
+    }
+
+    #[test]
+    fn request_validators_resolve_default_override_and_unknown_names() {
+        let integration = json!({"type": "mock"});
+        let doc = json!({
+            "x-amazon-apigateway-request-validators": {
+                "all": {"validateRequestBody": true, "validateRequestParameters": true},
+                "params": {"validateRequestParameters": true},
+                "none": {"validateRequestBody": false, "validateRequestParameters": false}
+            },
+            "x-amazon-apigateway-request-validator": "params",
+            "paths": {
+                "/default": {"get": {"x-amazon-apigateway-integration": integration}},
+                "/off": {"get": {"x-amazon-apigateway-request-validator": "none", "x-amazon-apigateway-integration": integration}},
+                "/all": {"get": {"x-amazon-apigateway-request-validator": "all", "x-amazon-apigateway-integration": integration}},
+                "/unknown": {"get": {"x-amazon-apigateway-request-validator": "missing", "x-amazon-apigateway-integration": integration}}
+            }
+        });
+        let auth = protections_by_path(&doc, ApiKind::Rest);
+        assert!(auth["/default"].contains(Protection::RequestValidation));
+        assert!(!auth["/off"].contains(Protection::RequestValidation));
+        assert!(auth["/all"].contains(Protection::RequestValidation));
+        assert!(auth["/unknown"].contains(Protection::RequestValidation));
+        let no_validators =
+            json!({"paths": {"/a": {"get": {"x-amazon-apigateway-integration": integration}}}});
+        assert!(
+            !protections_by_path(&no_validators, ApiKind::Rest)["/a"]
+                .contains(Protection::RequestValidation)
+        );
     }
 
     #[test]
