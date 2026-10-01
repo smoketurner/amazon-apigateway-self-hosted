@@ -309,6 +309,7 @@ impl<'a> Pipeline<'a> {
                     .await
             }
             Integration::Mapped(ref mapped) => mapped.run(self.api, self.route, ctx).await,
+            Integration::AwsSubtype(ref subtype) => subtype.call(self.api, ctx).await,
             Integration::Unsupported { ref reason } => {
                 tracing::warn!(route = %self.route.key, reason, "unsupported integration invoked");
                 Err(GatewayError::UnsupportedIntegration)

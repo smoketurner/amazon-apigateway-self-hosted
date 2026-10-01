@@ -13,7 +13,7 @@ use std::str::FromStr;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use aws_sdk_lambda::config::Region;
+use aws_sdk_lambda::config::{Credentials, ProvideCredentials as _, Region};
 use aws_sdk_lambda::error::DisplayErrorContext;
 use aws_sdk_lambda::primitives::Blob;
 use aws_sdk_lambda::primitives::event_stream::EventReceiver;
@@ -236,6 +236,92 @@ impl FromStr for LambdaEndpoint {
     }
 }
 
+/// How Lambda runs an invocation: `X-Amz-Invocation-Type` of a non-proxy Lambda
+/// integration, set with an `integration.request.header` mapping.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum InvocationType {
+    /// Wait for the function's result.
+    #[default]
+    RequestResponse,
+    /// Queue the event and answer `202` at once.
+    Event,
+    /// Validate the request and permissions without running the function.
+    DryRun,
+}
+
+impl InvocationType {
+    pub(crate) const fn header_value(self) -> &'static str {
+        match self {
+            Self::RequestResponse => "RequestResponse",
+            Self::Event => "Event",
+            Self::DryRun => "DryRun",
+        }
+    }
+
+    fn sdk(self) -> aws_sdk_lambda::types::InvocationType {
+        match self {
+            Self::RequestResponse => aws_sdk_lambda::types::InvocationType::RequestResponse,
+            Self::Event => aws_sdk_lambda::types::InvocationType::Event,
+            Self::DryRun => aws_sdk_lambda::types::InvocationType::DryRun,
+        }
+    }
+}
+
+impl FromStr for InvocationType {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim() {
+            "RequestResponse" => Ok(Self::RequestResponse),
+            "Event" => Ok(Self::Event),
+            "DryRun" => Ok(Self::DryRun),
+            other => Err(format!(
+                "{other:?} is not a Lambda invocation type (RequestResponse, Event, or DryRun)"
+            )),
+        }
+    }
+}
+
+/// AWS services served from a URL instead of the service's own endpoint, for
+/// local emulators and in-cluster mocks, keyed by the service name in the
+/// integration URI (`sqs`, `dynamodb`, `states`, ...).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ServiceEndpoints(BTreeMap<String, reqwest::Url>);
+
+impl ServiceEndpoints {
+    pub(crate) fn get(&self, service: &str) -> Option<&reqwest::Url> {
+        self.0.get(service)
+    }
+}
+
+impl FromIterator<(String, reqwest::Url)> for ServiceEndpoints {
+    fn from_iter<I: IntoIterator<Item = (String, reqwest::Url)>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+/// Parses one `--aws-endpoint SERVICE=URL` value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ServiceEndpoint(pub(crate) String, pub(crate) reqwest::Url);
+
+impl FromStr for ServiceEndpoint {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        let (service, url) = raw
+            .split_once('=')
+            .ok_or_else(|| format!("expected SERVICE=URL, got {raw:?}"))?;
+        if service.is_empty() {
+            return Err(format!("expected SERVICE=URL, got {raw:?}"));
+        }
+        let url = reqwest::Url::parse(url).map_err(|e| format!("invalid URL in {raw:?}: {e}"))?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(format!("{url} must be an http or https URL"));
+        }
+        Ok(Self(service.to_owned(), url))
+    }
+}
+
 /// How the last attempt to assume a role went, for `/routes`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", content = "error", rename_all = "snake_case")]
@@ -254,11 +340,15 @@ pub(crate) enum InvokeError {
     AssumeRole { role: String, reason: String },
     #[error("Lambda function failed mid-stream: {0}")]
     FunctionStream(String),
+    #[error("could not load AWS credentials: {0}")]
+    Credentials(String),
 }
 
 /// What a Lambda invocation returned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Invocation {
+    /// `200` when the function ran, `202` for an `Event` invocation.
+    pub(crate) status: u16,
     pub(crate) payload: Vec<u8>,
     /// `Unhandled`/`Handled` when the function raised an error.
     pub(crate) function_error: Option<String>,
@@ -341,14 +431,44 @@ struct ClientKey {
     role: Option<RoleArn>,
 }
 
+/// How long credentials with no expiry are reused, and how long before their
+/// expiry credentials are replaced.
+const CREDENTIALS_REFRESH: Duration = Duration::from_secs(300);
+
+/// Credentials and when they were loaded.
+#[derive(Debug, Clone)]
+struct CachedCredentials {
+    credentials: Credentials,
+    loaded: jiff::Timestamp,
+}
+
+impl CachedCredentials {
+    fn is_fresh(&self, now: jiff::Timestamp) -> bool {
+        let refresh = jiff::SignedDuration::try_from(CREDENTIALS_REFRESH).unwrap_or_default();
+        let expiry = self
+            .credentials
+            .expiry()
+            .and_then(|expiry| jiff::Timestamp::try_from(expiry).ok());
+        match expiry {
+            Some(expiry) => now.checked_add(refresh).is_ok_and(|later| later < expiry),
+            None => self
+                .loaded
+                .checked_add(refresh)
+                .is_ok_and(|reload| now < reload),
+        }
+    }
+}
+
 /// Shared AWS clients, created lazily per region and role.
 pub(crate) struct AwsClients {
     sdk_config: aws_config::SdkConfig,
     credentials_mode: CredentialsMode,
     lambda_endpoints: LambdaEndpoints,
+    service_endpoints: ServiceEndpoints,
     http: reqwest::Client,
     lambda: Mutex<HashMap<ClientKey, aws_sdk_lambda::Client>>,
     roles: Mutex<BTreeMap<RoleArn, RoleStatus>>,
+    credentials: tokio::sync::Mutex<HashMap<Option<RoleArn>, CachedCredentials>>,
 }
 
 impl AwsClients {
@@ -362,10 +482,73 @@ impl AwsClients {
             sdk_config,
             credentials_mode,
             lambda_endpoints,
+            service_endpoints: ServiceEndpoints::default(),
             http,
             lambda: Mutex::new(HashMap::new()),
             roles: Mutex::new(BTreeMap::new()),
+            credentials: tokio::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Sends AWS service integrations for the named services to `endpoints`
+    /// instead of the services' own endpoints.
+    #[must_use]
+    pub(crate) fn with_service_endpoints(mut self, endpoints: ServiceEndpoints) -> Self {
+        self.service_endpoints = endpoints;
+        self
+    }
+
+    /// The region the gateway's own configuration names, for calls that do not
+    /// say which region they are for.
+    pub(crate) fn default_region(&self) -> Option<String> {
+        self.sdk_config.region().map(ToString::to_string)
+    }
+
+    pub(crate) fn service_endpoint(&self, service: &str) -> Option<&reqwest::Url> {
+        self.service_endpoints.get(service)
+    }
+
+    /// Credentials to sign a request to an AWS service with: the integration's
+    /// role when one applies, else the gateway's own. They are reused until
+    /// shortly before they expire.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the role cannot be assumed or the gateway has no credentials.
+    pub(crate) async fn credentials(
+        &self,
+        role: Option<&RoleArn>,
+    ) -> Result<Credentials, InvokeError> {
+        let role = role.filter(|_| self.credentials_mode == CredentialsMode::Assume);
+        let mut cache = self.credentials.lock().await;
+        let now = jiff::Timestamp::now();
+        let key = role.cloned();
+        if let Some(cached) = cache.get(&key).filter(|cached| cached.is_fresh(now)) {
+            return Ok(cached.credentials.clone());
+        }
+        let credentials = match role {
+            Some(role) => Box::pin(self.assume(role)).await?.1,
+            None => self.gateway_credentials().await?,
+        };
+        cache.insert(
+            key,
+            CachedCredentials {
+                credentials: credentials.clone(),
+                loaded: now,
+            },
+        );
+        Ok(credentials)
+    }
+
+    async fn gateway_credentials(&self) -> Result<Credentials, InvokeError> {
+        let provider = self
+            .sdk_config
+            .credentials_provider()
+            .ok_or_else(|| InvokeError::Credentials("none are configured".to_owned()))?;
+        provider
+            .provide_credentials()
+            .await
+            .map_err(|err| InvokeError::Credentials(DisplayErrorContext(err).to_string()))
     }
 
     /// The outcome of the most recent attempt to assume each role.
@@ -385,13 +568,35 @@ impl AwsClients {
         payload: Vec<u8>,
         trace_header: Option<String>,
     ) -> Result<Invocation, InvokeError> {
+        self.invoke_lambda_as(
+            function,
+            role,
+            payload,
+            trace_header,
+            InvocationType::RequestResponse,
+        )
+        .await
+    }
+
+    /// Invokes `function` the way `invocation_type` says.
+    pub(crate) async fn invoke_lambda_as(
+        &self,
+        function: &FunctionArn,
+        role: Option<&RoleArn>,
+        payload: Vec<u8>,
+        trace_header: Option<String>,
+        invocation_type: InvocationType,
+    ) -> Result<Invocation, InvokeError> {
         if let Some(url) = self.lambda_endpoints.get(function) {
-            return self.invoke_endpoint(url, payload, trace_header).await;
+            return self
+                .invoke_endpoint(url, payload, trace_header, invocation_type)
+                .await;
         }
         let client = self.lambda_client(function.region(), role).await?;
         let mut call = client
             .invoke()
             .function_name(function.as_str())
+            .invocation_type(invocation_type.sdk())
             .payload(Blob::new(payload))
             .customize();
         if let Some(trace) = trace_header {
@@ -406,6 +611,7 @@ impl AwsClients {
             .await
             .map_err(|err| InvokeError::Aws(DisplayErrorContext(err).to_string()))?;
         Ok(Invocation {
+            status: u16::try_from(output.status_code).unwrap_or(200),
             payload: output.payload.map(Blob::into_inner).unwrap_or_default(),
             function_error: output.function_error,
         })
@@ -453,8 +659,16 @@ impl AwsClients {
         url: &reqwest::Url,
         payload: Vec<u8>,
         trace_header: Option<String>,
+        invocation_type: InvocationType,
     ) -> Result<Invocation, InvokeError> {
-        let response = self.endpoint_response(url, payload, trace_header).await?;
+        let request = self
+            .http
+            .post(url.clone())
+            .header("X-Amz-Invocation-Type", invocation_type.header_value());
+        let response = self
+            .send_endpoint_request(request, url, payload, trace_header)
+            .await?;
+        let status = response.status().as_u16();
         let function_error = response
             .headers()
             .get("X-Amz-Function-Error")
@@ -465,6 +679,7 @@ impl AwsClients {
             .await
             .map_err(|e| InvokeError::Endpoint(e.to_string()))?;
         Ok(Invocation {
+            status,
             payload: payload.to_vec(),
             function_error,
         })
@@ -476,7 +691,19 @@ impl AwsClients {
         payload: Vec<u8>,
         trace_header: Option<String>,
     ) -> Result<reqwest::Response, InvokeError> {
-        let mut request = self.http.post(url.clone()).body(payload);
+        let request = self.http.post(url.clone());
+        self.send_endpoint_request(request, url, payload, trace_header)
+            .await
+    }
+
+    async fn send_endpoint_request(
+        &self,
+        request: reqwest::RequestBuilder,
+        url: &reqwest::Url,
+        payload: Vec<u8>,
+        trace_header: Option<String>,
+    ) -> Result<reqwest::Response, InvokeError> {
+        let mut request = request.body(payload);
         if let Some(trace) = trace_header {
             request = request.header("X-Amzn-Trace-Id", trace);
         }
@@ -516,7 +743,7 @@ impl AwsClients {
             config = config.region(Region::new(region.to_owned()));
         }
         if let Some(role) = role {
-            config = config.credentials_provider(self.assume(role).await?);
+            config = config.credentials_provider(Box::pin(self.assume(role)).await?.0);
         }
         let client = aws_sdk_lambda::Client::from_conf(config.build());
         self.lambda
@@ -528,11 +755,11 @@ impl AwsClients {
 
     /// Builds a provider for `role` and checks it can fetch credentials, so a
     /// trust-policy problem surfaces on `/routes` instead of as opaque 500s.
+    /// Returns the provider and the credentials the check fetched.
     async fn assume(
         &self,
         role: &RoleArn,
-    ) -> Result<aws_config::sts::AssumeRoleProvider, InvokeError> {
-        use aws_sdk_lambda::config::ProvideCredentials as _;
+    ) -> Result<(aws_config::sts::AssumeRoleProvider, Credentials), InvokeError> {
         const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
         let provider = aws_config::sts::AssumeRoleProvider::builder(role.as_str())
             .session_name("apigw")
@@ -540,18 +767,24 @@ impl AwsClients {
             .build()
             .await;
         let check = tokio::time::timeout(CHECK_TIMEOUT, provider.provide_credentials()).await;
-        let status = match check {
-            Ok(Ok(_)) => RoleStatus::Assumed,
-            Ok(Err(err)) => RoleStatus::Failed(DisplayErrorContext(err).to_string()),
-            Err(_) => RoleStatus::Failed("timed out".to_owned()),
+        let (status, credentials) = match check {
+            Ok(Ok(credentials)) => (RoleStatus::Assumed, Ok(credentials)),
+            Ok(Err(err)) => {
+                let reason = DisplayErrorContext(err).to_string();
+                (RoleStatus::Failed(reason.clone()), Err(reason))
+            }
+            Err(_) => (
+                RoleStatus::Failed("timed out".to_owned()),
+                Err("timed out".to_owned()),
+            ),
         };
         self.roles
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(role.clone(), status.clone());
-        match status {
-            RoleStatus::Assumed => Ok(provider),
-            RoleStatus::Failed(reason) => Err(InvokeError::AssumeRole {
+            .insert(role.clone(), status);
+        match credentials {
+            Ok(credentials) => Ok((provider, credentials)),
+            Err(reason) => Err(InvokeError::AssumeRole {
                 role: role.as_str().to_owned(),
                 reason,
             }),
@@ -563,6 +796,8 @@ impl AwsClients {
 #[expect(clippy::unwrap_used, reason = "tests assert on known-good fixtures")]
 #[expect(clippy::indexing_slicing, reason = "tests index known fixtures")]
 mod tests {
+    use std::time::SystemTime;
+
     use axum::http::{HeaderMap, StatusCode};
     use axum::routing::post;
 
@@ -833,7 +1068,7 @@ mod tests {
             .region(Region::new("us-east-1"))
             .endpoint_url(format!("http://{addr}"))
             .credentials_provider(aws_sdk_lambda::config::SharedCredentialsProvider::new(
-                aws_sdk_lambda::config::Credentials::new("id", "secret", None, None, "test"),
+                Credentials::new("id", "secret", None, None, "test"),
             ))
             .build();
         let aws = AwsClients::new(
@@ -882,5 +1117,83 @@ mod tests {
         aws.lambda_client(Some("us-east-1"), None).await.unwrap();
         aws.lambda_client(Some("eu-west-1"), None).await.unwrap();
         assert_eq!(aws.lambda.lock().unwrap().len(), 2);
+    }
+
+    fn credentials_expiring(expiry: Option<jiff::Timestamp>) -> Credentials {
+        Credentials::new("id", "secret", None, expiry.map(SystemTime::from), "test")
+    }
+
+    fn after(now: jiff::Timestamp, seconds: i64) -> jiff::Timestamp {
+        now.checked_add(jiff::SignedDuration::from_secs(seconds))
+            .unwrap()
+    }
+
+    #[test]
+    fn credentials_are_reused_until_shortly_before_they_expire() {
+        let now = jiff::Timestamp::from_second(1_700_000_000).unwrap();
+        let cached = |expiry| CachedCredentials {
+            credentials: credentials_expiring(expiry),
+            loaded: now,
+        };
+        assert!(cached(Some(after(now, 600))).is_fresh(now));
+        assert!(!cached(Some(after(now, 240))).is_fresh(now));
+        assert!(!cached(Some(after(now, -1))).is_fresh(now));
+        assert!(cached(None).is_fresh(after(now, 299)));
+        assert!(!cached(None).is_fresh(after(now, 301)));
+    }
+
+    #[tokio::test]
+    async fn gateway_credentials_come_from_the_sdk_config_and_are_cached() {
+        let config = aws_config::SdkConfig::builder()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .credentials_provider(aws_sdk_lambda::config::SharedCredentialsProvider::new(
+                Credentials::new("id", "secret", None, None, "test"),
+            ))
+            .build();
+        let aws = AwsClients::new(
+            config,
+            CredentialsMode::Gateway,
+            LambdaEndpoints::default(),
+            reqwest::Client::new(),
+        );
+        let role = RoleArn("arn:aws:iam::1:role/r".to_owned());
+        let first = aws.credentials(Some(&role)).await.unwrap();
+        assert_eq!(first.access_key_id(), "id");
+        let second = aws.credentials(None).await.unwrap();
+        assert_eq!(second.secret_access_key(), "secret");
+        assert_eq!(aws.credentials.lock().await.len(), 1);
+        assert!(aws.role_status().is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_gateway_credentials_are_an_error() {
+        let aws = clients(LambdaEndpoints::default());
+        let credentials = aws.credentials(None).await;
+        assert!(matches!(credentials, Err(InvokeError::Credentials(_))));
+    }
+
+    #[test]
+    fn invocation_types_parse_exactly() {
+        assert_eq!("Event".parse(), Ok(InvocationType::Event));
+        assert_eq!(
+            " RequestResponse ".parse(),
+            Ok(InvocationType::RequestResponse)
+        );
+        assert_eq!("DryRun".parse(), Ok(InvocationType::DryRun));
+        assert!("event".parse::<InvocationType>().is_err());
+        assert_eq!(InvocationType::default().header_value(), "RequestResponse");
+    }
+
+    #[test]
+    fn service_endpoints_parse_a_service_and_an_http_url() {
+        let endpoint: ServiceEndpoint = "sqs=http://localstack:4566".parse().unwrap();
+        assert_eq!(endpoint.0, "sqs");
+        assert_eq!(endpoint.1.as_str(), "http://localstack:4566/");
+        let endpoints: ServiceEndpoints = std::iter::once((endpoint.0, endpoint.1)).collect();
+        assert!(endpoints.get("sqs").is_some());
+        assert!(endpoints.get("sns").is_none());
+        for bad in ["sqs", "=http://x", "sqs=not a url", "sqs=ftp://x"] {
+            assert!(bad.parse::<ServiceEndpoint>().is_err(), "{bad}");
+        }
     }
 }

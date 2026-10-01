@@ -7,7 +7,9 @@ use std::time::Duration;
 use clap::{ArgGroup, Parser, ValueEnum};
 
 use crate::authz::IssuerEndpoint;
-use crate::aws::{CredentialsMode, LambdaEndpoint, LambdaEndpoints};
+use crate::aws::{
+    CredentialsMode, LambdaEndpoint, LambdaEndpoints, ServiceEndpoint, ServiceEndpoints,
+};
 use crate::domain::DomainName;
 use crate::gateway::{AuthorizationMode, Enforcement};
 use crate::identity::{TrustedProxies, TrustedProxy};
@@ -127,6 +129,19 @@ pub(crate) struct Config {
         value_delimiter = ','
     )]
     pub(crate) lambda_endpoints: Vec<LambdaEndpoint>,
+
+    /// Send the calls of REST `AWS` integrations and HTTP API integration
+    /// subtypes to a URL instead of the AWS service's own endpoint, such as
+    /// `LocalStack` or a mock in a pod (repeatable; `SERVICE` is `sqs`, `sns`,
+    /// `dynamodb`, `states`, `kinesis`, `events`, `s3`, or `appconfig`). Requests
+    /// are still signed.
+    #[arg(
+        long = "aws-endpoint",
+        value_name = "SERVICE=URL",
+        env = "APIGW_AWS_ENDPOINTS",
+        value_delimiter = ','
+    )]
+    pub(crate) aws_endpoints: Vec<ServiceEndpoint>,
 
     /// Fetch the signing keys of a token issuer from URL instead of from the
     /// issuer (repeatable; `ISSUER` is the issuer string tokens carry as `iss`).
@@ -311,6 +326,13 @@ impl Config {
 
     pub(crate) fn vpc_links(&self) -> VpcLinks {
         VpcLinks::new(self.vpc_links.clone())
+    }
+
+    pub(crate) fn service_endpoints(&self) -> ServiceEndpoints {
+        self.aws_endpoints
+            .iter()
+            .map(|ServiceEndpoint(service, url)| (service.clone(), url.clone()))
+            .collect()
     }
 
     pub(crate) fn lambda_endpoints(&self) -> LambdaEndpoints {

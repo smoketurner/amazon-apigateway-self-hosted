@@ -31,7 +31,7 @@ use crate::gateway_response::GatewayResponses;
 use crate::integration::StageVariables;
 use crate::integration_tls;
 use crate::listener::{self, ConnLimits, Edge, Tls};
-use crate::model::{ApiModel, Feature, IntegrationOverrides, StageSettings};
+use crate::model::{ApiModel, IntegrationOverrides, StageSettings};
 use crate::observability::{Observability, StageObserver};
 use crate::payload::PayloadSettings;
 use crate::router::{self, BasePath, LoadSummary, Loaded, RouteSummary};
@@ -98,7 +98,6 @@ impl Builder {
 struct BuiltRelease {
     router: Router,
     routes: Vec<RouteSummary>,
-    unenforced: Vec<Feature>,
 }
 
 /// The inputs a router was built from; a refresh rebuilds only when they change.
@@ -234,11 +233,7 @@ impl Builder {
             ),
         });
         let (router, routes) = router::build(&model, &ctx, &self.base_path);
-        Ok(BuiltRelease {
-            router,
-            routes,
-            unenforced: model.unenforced(),
-        })
+        Ok(BuiltRelease { router, routes })
     }
 
     /// The canary release, when the stage has one that receives traffic: the
@@ -295,11 +290,7 @@ impl Builder {
             .canary
             .as_ref()
             .map(|_| Release::Production);
-        let BuiltRelease {
-            router,
-            routes,
-            unenforced,
-        } = self.build_release(
+        let BuiltRelease { router, routes } = self.build_release(
             inputs,
             &snapshot.openapi,
             snapshot.stage_settings.clone(),
@@ -323,16 +314,6 @@ impl Builder {
                 );
             }
         }
-        if !unenforced.is_empty() {
-            tracing::warn!(
-                features = unenforced
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                "API uses features this gateway does not enforce yet"
-            );
-        }
         tracing::info!(
             api_id = snapshot.api_id,
             stage = snapshot.stage,
@@ -354,7 +335,6 @@ impl Builder {
                 stage: snapshot.stage.clone(),
                 deployment_id: snapshot.stamp.deployment_id.clone(),
                 loaded_at: jiff::Timestamp::now().to_string(),
-                unenforced,
                 routes,
             },
         })
@@ -665,12 +645,15 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
     let http = integration_tls::client_builder()
         .build()
         .context("failed to build the HTTP client")?;
-    let aws = Arc::new(AwsClients::new(
-        sdk_config.clone(),
-        config.integration_credentials,
-        config.lambda_endpoints(),
-        http.clone(),
-    ));
+    let aws = Arc::new(
+        AwsClients::new(
+            sdk_config.clone(),
+            config.integration_credentials,
+            config.lambda_endpoints(),
+            http.clone(),
+        )
+        .with_service_endpoints(config.service_endpoints()),
+    );
     for endpoint in config.issuer_endpoints.iter().filter(|e| e.is_plaintext()) {
         tracing::warn!(?endpoint, "token signing keys are fetched over plain HTTP");
     }
@@ -849,20 +832,6 @@ mod tests {
             Some("https://local.internal/pets")
         );
         assert_eq!(loaded.summary.deployment_id.as_deref(), Some("d1"));
-    }
-
-    #[tokio::test]
-    async fn unenforced_features_are_summarized() {
-        let mut snapshot = snapshot();
-        snapshot.openapi = json!({"paths": {"/x": {"get": {"x-amazon-apigateway-integration": {
-            "type": "aws", "contentHandling": "CONVERT_TO_TEXT"}}}}});
-        let inputs = Inputs {
-            snapshot,
-            overrides: IntegrationOverrides::default(),
-        };
-        let loaded = builder(None).build(&inputs).unwrap();
-        let rendered = serde_json::to_value(&loaded.summary).unwrap();
-        assert_eq!(rendered["unenforced"], json!(["content_handling"]));
     }
 
     #[tokio::test]

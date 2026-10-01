@@ -4,6 +4,8 @@
 mod app;
 mod authz;
 mod aws;
+mod aws_service;
+mod aws_subtype;
 mod backoff;
 mod cache;
 mod canary;
@@ -32,6 +34,7 @@ mod observability;
 mod payload;
 mod pipeline;
 mod proxy;
+mod request_parameters;
 mod route;
 mod router;
 mod source;

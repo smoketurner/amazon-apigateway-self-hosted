@@ -26,7 +26,7 @@ use crate::route::Route;
 
 /// Lambda's payload limit for synchronous invocations, which applies to the
 /// event sent and, for buffered integrations, the response returned.
-const LAMBDA_PAYLOAD_LIMIT: usize = 6_291_556;
+pub(crate) const LAMBDA_PAYLOAD_LIMIT: usize = 6_291_556;
 
 impl LambdaProxy {
     pub(crate) async fn invoke(
@@ -837,7 +837,6 @@ mod tests {
             validation: RouteValidation::None,
             throttle: None,
             cache: None,
-            unenforced: Vec::new(),
         }
     }
 

@@ -24,7 +24,7 @@ use crate::gateway::{ApiContext, Enforcement, GatewayError, RequestId};
 use crate::http_routes::{HttpRoutes, PathPattern};
 use crate::identity::ClientIdentity;
 use crate::integration::Integration;
-use crate::model::{ApiKind, ApiModel, Feature, MethodMatch, Protections, RouteKey, RoutePath};
+use crate::model::{ApiKind, ApiModel, MethodMatch, Protections, RouteKey, RoutePath};
 use crate::pipeline::Pipeline;
 use crate::route::{AccessRules, Route};
 use crate::throttle::ThrottleSettings;
@@ -104,8 +104,6 @@ pub(crate) struct LoadSummary {
     pub(crate) stage: Option<String>,
     pub(crate) deployment_id: Option<String>,
     pub(crate) loaded_at: String,
-    /// API- and stage-level features imported but not enforced yet.
-    pub(crate) unenforced: Vec<Feature>,
     pub(crate) routes: Vec<RouteSummary>,
     /// The canary release, when the stage has one that receives traffic.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -122,8 +120,6 @@ pub(crate) struct RouteSummary {
     pub(crate) protections: Protections,
     /// Why the route is not being served as API Gateway would serve it.
     pub(crate) problems: Vec<String>,
-    /// Settings on this route that are imported but not enforced yet.
-    pub(crate) unenforced: Vec<Feature>,
 }
 
 impl RouteSummary {
@@ -139,6 +135,7 @@ impl RouteSummary {
                 problems.extend(mapped.problems());
                 mapped.target()
             }
+            Integration::AwsSubtype(ref subtype) => Some(subtype.subtype.name().to_owned()),
             Integration::Unsupported { ref reason } => {
                 problems.push(reason.clone());
                 None
@@ -146,9 +143,9 @@ impl RouteSummary {
         };
         let credentials = match route.integration {
             Integration::Lambda(ref lambda) => lambda.credentials.clone(),
-            Integration::HttpProxy(_)
-            | Integration::Mapped(_)
-            | Integration::Unsupported { .. } => None,
+            Integration::Mapped(ref mapped) => mapped.role().cloned(),
+            Integration::AwsSubtype(ref subtype) => subtype.role.clone(),
+            Integration::HttpProxy(_) | Integration::Unsupported { .. } => None,
         };
         Self {
             route_key: route.key.clone(),
@@ -157,7 +154,6 @@ impl RouteSummary {
             target,
             protections: route.protections.clone(),
             problems,
-            unenforced: route.unenforced.clone(),
         }
     }
 }
@@ -1715,7 +1711,6 @@ pub(crate) mod tests {
                     stage: None,
                     deployment_id: None,
                     loaded_at: String::new(),
-                    unenforced: Vec::new(),
                     routes: summary,
                     canary: None,
                 },

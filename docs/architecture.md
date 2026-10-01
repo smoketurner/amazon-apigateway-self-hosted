@@ -31,8 +31,10 @@ gateway supplies the request through `TemplateInput` and reads `requestOverride`
 | `usage` | API keys and usage plans of a REST API stage: paced, paginated reads from the control plane (`UsageReader`), kept as SHA-256 hashes (`UsageData`, `UsageStore`), and the plan throttle and quota counted per key in the state backend (`UsageChecker`) |
 | `backoff` | Exponential backoff with jitter shared by the definition refresh and the usage reads |
 | `aws` | `AwsClients`: per-region Lambda clients, assumed integration-role credentials, Lambda endpoint overrides, trace header propagation |
+| `aws_service`, `aws_subtype` | Calls to AWS services other than Lambda: the services REST `AWS` integrations name (`ServiceUri`), how each shapes its request (query, JSON, or REST protocol), SigV4 signing with the integration role's cached credentials, and the HTTP API integration subtypes that map request parameters onto those calls |
+| `request_parameters` | `integration.request.*` mappings (path placeholders, query string, headers) shared by `HTTP_PROXY`, `HTTP`, and `AWS` integrations |
 | `proxy` | `HTTP_PROXY` forwarding, and the HTTP exchange non-proxy `HTTP` integrations use |
-| `mapped` | Non-proxy REST integrations (`HTTP`, `MOCK`): request templates and `passthroughBehavior` (`request`), `selectionPattern` selection and response mapping (`response`), `contentHandling` and `binaryMediaTypes` (`content`), and rendering with `apigw-vtl` (`vtl`) |
+| `mapped` | Non-proxy REST integrations (`HTTP`, `MOCK`, and `AWS` services and Lambda): request templates and `passthroughBehavior` (`request`), `selectionPattern` selection and response mapping (`response`), `contentHandling` and `binaryMediaTypes` (`content`), and rendering with `apigw-vtl` (`vtl`) |
 | `lambda`, `lambda_response` | `AWS_PROXY` event construction (payload 1.0 and 2.0), invocation (buffered `Invoke` or streamed `InvokeWithResponseStream`), and response mapping |
 | `header_case` | Recovers the client's HTTP/1 header name spelling (hyper keeps it private) by watching request heads on the connection |
 | `listener` | TLS accept loop, PROXY protocol v2, certificate reload |
@@ -54,9 +56,6 @@ Each refresh calls `GetStage` and re-exports only when the deployment ID or last
 changed, because control-plane calls share a 10 req/s per-account limit. Failures back off
 exponentially (up to 15 minutes, with jitter). The loop rebuilds only when the snapshot or the
 override file changed; a build failure keeps the current `Loaded` in place and is logged once.
-
-Anything imported but not enforced yet is listed as a `Feature` on `/routes`, per API and per
-route, so the gap to API Gateway is visible and each change that closes one removes it.
 
 ## Routing
 
