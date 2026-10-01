@@ -18,6 +18,7 @@ use crate::authz::KeyStore;
 use crate::aws::AwsClients;
 #[cfg(test)]
 use crate::aws::{CredentialsMode, LambdaEndpoints};
+use crate::backoff::Backoff;
 use crate::cache::CacheScope;
 use crate::canary::{CanaryRelease, CanaryStructure, CanarySummary, Release, TrafficShare};
 use crate::config::Config;
@@ -35,7 +36,8 @@ use crate::observability::{Observability, StageObserver};
 use crate::payload::PayloadSettings;
 use crate::router::{self, BasePath, LoadSummary, Loaded, RouteSummary};
 use crate::source::{Fetch, Fetcher, Snapshot, Source, SourceError};
-use crate::state::StateBackend;
+use crate::state::{StateBackend, Valkey};
+use crate::usage::{AwsUsageSource, Pacing, UsageChecker, UsageReader, UsageStore};
 use crate::vpc_link::VpcLinks;
 
 const CERT_POLL_INTERVAL: Duration = Duration::from_secs(30);
@@ -54,6 +56,12 @@ pub(crate) struct Builder {
     replicas: NonZeroU32,
     vpc_links: VpcLinks,
     observability: Arc<Observability>,
+    /// The API keys and usage plans of the stage being built; set per API by
+    /// [`ApiRuntime::start`].
+    usage: Option<Arc<UsageStore>>,
+    /// How often API keys and usage plans are read again; `None` reads them
+    /// once.
+    usage_interval: Option<Duration>,
 }
 
 #[cfg(test)]
@@ -81,6 +89,8 @@ impl Builder {
             )),
             keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
             vpc_links: VpcLinks::default(),
+            usage: None,
+            usage_interval: None,
         }
     }
 }
@@ -100,6 +110,67 @@ struct Inputs {
 }
 
 impl Builder {
+    /// How long the first read of a stage's API keys may take.
+    const INITIAL_USAGE_READ: Duration = Duration::from_mins(2);
+
+    /// How many gateways divide each limit between them: all replicas when
+    /// each keeps its own state, one when the state is shared.
+    fn limit_sharers(&self) -> NonZeroU32 {
+        if self.state.is_shared() {
+            NonZeroU32::MIN
+        } else {
+            self.replicas
+        }
+    }
+
+    /// Reads the API keys and usage plans of `source`, when it is a REST API
+    /// stage in API Gateway, and keeps them fresh until `stop`. A failed first
+    /// read is logged and retried: until one succeeds no key is valid.
+    async fn with_usage(
+        mut self,
+        source: &Source,
+        sdk_config: &aws_config::SdkConfig,
+        stop: &CancellationToken,
+    ) -> (Self, Option<tokio::task::JoinHandle<()>>) {
+        let Source::RestApi {
+            ref api_id,
+            ref stage,
+            ..
+        } = *source
+        else {
+            return (self, None);
+        };
+        let store = Arc::new(UsageStore::new(UsageChecker::new(
+            api_id,
+            stage,
+            self.limit_sharers(),
+        )));
+        let reader = UsageReader::new(
+            AwsUsageSource::new(aws_sdk_apigateway::Client::new(sdk_config)),
+            api_id,
+            stage,
+            Pacing::for_replicas(self.replicas),
+        );
+        match tokio::time::timeout(Self::INITIAL_USAGE_READ, store.refresh(&reader)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "could not read API keys and usage plans; routes that need a key refuse requests until they are read");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "reading API keys and usage plans timed out; routes that need a key refuse requests until they are read"
+                );
+            }
+        }
+        let task = self.usage_interval.map(|interval| {
+            let store = Arc::clone(&store);
+            let stop = stop.clone();
+            tokio::spawn(async move { store.keep_fresh(&reader, interval, &stop).await })
+        });
+        self.usage = Some(store);
+        (self, task)
+    }
+
     async fn overrides(&self) -> anyhow::Result<IntegrationOverrides> {
         let Some(ref path) = self.overrides_path else {
             return Ok(IntegrationOverrides::default());
@@ -137,12 +208,13 @@ impl Builder {
             responses: GatewayResponses::compile(model.kind, &model.gateway_responses),
             cors: model.settings.cors.as_ref().map(Cors::compile),
             state: Arc::clone(&self.state),
-            replicas: self.replicas,
+            replicas: self.limit_sharers(),
             vpc_links: self.vpc_links.clone(),
             enforcement: self.enforcement,
             http: self.http.clone(),
             aws: Arc::clone(&self.aws),
             keys: Arc::clone(&self.keys),
+            usage: self.usage.clone(),
             observer: StageObserver::new(
                 &self.observability,
                 &model,
@@ -325,51 +397,6 @@ impl Loader {
     }
 }
 
-/// Spaces out refreshes after failures: the delay doubles per consecutive
-/// failure up to [`Backoff::MAX`], with +/-20% jitter so replicas that failed
-/// together don't retry together against the shared control-plane limit.
-#[derive(Debug, Default)]
-struct Backoff {
-    failures: u32,
-}
-
-impl Backoff {
-    const MAX: Duration = Duration::from_mins(15);
-
-    fn record_failure(&mut self) {
-        self.failures = self.failures.saturating_add(1);
-    }
-
-    fn reset(&mut self) {
-        self.failures = 0;
-    }
-
-    fn delay(&self, interval: Duration) -> Duration {
-        let factor = 1_u32.checked_shl(self.failures).unwrap_or(u32::MAX);
-        let base = interval
-            .checked_mul(factor)
-            .unwrap_or(Self::MAX)
-            .min(Self::MAX);
-        Self::jitter(base, Self::random())
-    }
-
-    /// Scales `base` into [80%, 120%] using `random`.
-    fn jitter(base: Duration, random: u64) -> Duration {
-        let millis = u64::try_from(base.as_millis()).unwrap_or(u64::MAX);
-        let spread = millis.checked_div(5).unwrap_or(0);
-        let span = spread.saturating_mul(2).saturating_add(1);
-        let offset = random.checked_rem(span).unwrap_or(0);
-        Duration::from_millis(millis.saturating_sub(spread).saturating_add(offset))
-    }
-
-    fn random() -> u64 {
-        use std::hash::{BuildHasher as _, Hasher as _};
-        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-        hasher.write_u128(jiff::Timestamp::now().as_nanosecond().unsigned_abs());
-        hasher.finish()
-    }
-}
-
 /// Periodically re-checks the source and swaps in a new router when the
 /// deployment or the override file changes.
 struct Refresher {
@@ -480,6 +507,8 @@ pub(crate) struct ApiRuntime {
     loaded: watch::Receiver<Arc<Loaded>>,
     stop: CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
+    /// Keeps the stage's API keys and usage plans fresh.
+    usage_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl ApiRuntime {
@@ -498,6 +527,8 @@ impl ApiRuntime {
         sdk_config: &aws_config::SdkConfig,
         shutdown: &CancellationToken,
     ) -> anyhow::Result<Self> {
+        let stop = shutdown.child_token();
+        let (builder, usage_task) = builder.with_usage(&source, sdk_config, &stop).await;
         let loader = Loader {
             fetcher: Fetcher::new(source, sdk_config),
             cache,
@@ -510,7 +541,6 @@ impl ApiRuntime {
         };
         let loaded = builder.build(&inputs)?;
         let (current, loaded) = watch::channel(Arc::new(loaded));
-        let stop = shutdown.child_token();
         let task = interval.map(|interval| {
             let refresher = Refresher {
                 loader,
@@ -521,7 +551,12 @@ impl ApiRuntime {
             };
             tokio::spawn(refresher.run(interval, current, stop.clone()))
         });
-        Ok(Self { loaded, stop, task })
+        Ok(Self {
+            loaded,
+            stop,
+            task,
+            usage_task,
+        })
     }
 
     pub(crate) fn loaded(&self) -> watch::Receiver<Arc<Loaded>> {
@@ -531,10 +566,10 @@ impl ApiRuntime {
     /// Stops refreshing and waits for the refresh task to end.
     pub(crate) async fn stop(self) {
         self.stop.cancel();
-        if let Some(task) = self.task
-            && let Err(err) = task.await
-        {
-            tracing::error!(%err, "an API refresh task failed");
+        for task in [self.task, self.usage_task].into_iter().flatten() {
+            if let Err(err) = task.await {
+                tracing::error!(%err, "an API refresh task failed");
+            }
         }
     }
 }
@@ -597,6 +632,28 @@ async fn serve_apis(
     ))
 }
 
+async fn connect_state(config: &Config) -> anyhow::Result<Arc<StateBackend>> {
+    let Some(url) = &config.valkey_url else {
+        return Ok(StateBackend::in_memory());
+    };
+    if url.is_plaintext() {
+        tracing::warn!(%url, "the Valkey connection is not encrypted; use a rediss:// URL");
+    }
+    let ca = match &config.valkey_ca_cert {
+        Some(path) => Some(
+            tokio::fs::read(path)
+                .await
+                .with_context(|| format!("failed to read {}", path.display()))?,
+        ),
+        None => None,
+    };
+    let valkey = Valkey::connect(url, ca.as_deref())
+        .await
+        .context("failed to connect to Valkey")?;
+    tracing::info!(%url, "throttle, quota, and cache state is shared through Valkey");
+    Ok(Arc::new(StateBackend::Valkey(valkey)))
+}
+
 pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
     let tls = Tls::with_domains(
         &config.tls_cert,
@@ -626,6 +683,7 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         sdk_config.clone(),
         config.observability(std::env::var("HOSTNAME").ok().as_deref()),
     );
+    let state = connect_state(&config).await?;
     let builder = Builder {
         observability: Arc::clone(&observability),
         base_path: config.base_path.clone(),
@@ -635,9 +693,11 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         aws: Arc::clone(&aws),
         keys,
         http,
-        state: StateBackend::in_memory(),
+        state,
         replicas: config.replicas,
         vpc_links: config.vpc_links(),
+        usage: None,
+        usage_interval: config.usage_refresh_interval(),
     };
     builder.enforcement.warn_if_relaxed();
     let shutdown = CancellationToken::new();
@@ -698,7 +758,6 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
 )]
 #[expect(clippy::panic, reason = "tests fail loudly on unexpected variants")]
 mod tests {
-    use proptest::prelude::*;
     use serde_json::json;
 
     use super::*;
@@ -737,6 +796,8 @@ mod tests {
                 reqwest::Client::new(),
             )),
             keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
+            usage: None,
+            usage_interval: None,
         }
     }
 
@@ -865,36 +926,6 @@ mod tests {
         assert!(!known.is_same_deployment(&moved));
         let unknown = DeploymentStamp::default();
         assert!(!unknown.is_same_deployment(&unknown.clone()));
-    }
-
-    #[test]
-    fn backoff_grows_per_failure_and_is_capped() {
-        let interval = Duration::from_secs(60);
-        let mut backoff = Backoff::default();
-        let within = |delay: Duration, base: Duration| {
-            delay >= base.mul_f64(0.8)
-                && delay <= base.mul_f64(1.2).saturating_add(Duration::from_millis(1))
-        };
-        assert!(within(backoff.delay(interval), interval));
-        backoff.record_failure();
-        assert!(within(backoff.delay(interval), Duration::from_secs(120)));
-        for _ in 0..100 {
-            backoff.record_failure();
-        }
-        assert!(within(backoff.delay(interval), Backoff::MAX));
-        backoff.reset();
-        assert!(within(backoff.delay(interval), interval));
-    }
-
-    proptest! {
-        #[test]
-        fn jitter_stays_within_twenty_percent(millis in 0_u64..10_000_000, random: u64) {
-            let base = Duration::from_millis(millis);
-            let jittered = Backoff::jitter(base, random).as_millis();
-            let millis = u128::from(millis);
-            prop_assert!(jittered.saturating_mul(5) >= millis.saturating_mul(4), "{jittered} < 80% of {millis}");
-            prop_assert!(jittered.saturating_mul(5) <= millis.saturating_mul(6), "{jittered} > 120% of {millis}");
-        }
     }
 
     #[tokio::test]

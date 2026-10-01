@@ -38,6 +38,7 @@ matchit              = { version = "=0.8.4", default-features = false }
 proxy-header         = { version = "=0.1.3", default-features = false }
 proptest             = { version = "=1.11.0", default-features = false }
 rcgen                = { version = "=0.14.10", default-features = false }
+redis                = { version = "=1.7.1", default-features = false }
 reqwest              = { version = "=0.13.5", default-features = false }
 rustls               = { version = "=0.23.45", default-features = false }
 serde                = { version = "=1.0.229", default-features = false }

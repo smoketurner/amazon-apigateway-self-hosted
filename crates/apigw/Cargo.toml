@@ -33,6 +33,7 @@ jiff                 = { workspace = true, features = ["std"] }
 jsonwebtoken         = { workspace = true, features = ["aws_lc_rs"] }
 matchit              = { workspace = true }
 proxy-header         = { workspace = true, features = ["tokio"] }
+redis                = { workspace = true, features = ["aio", "tokio-rustls-comp", "tls-rustls", "connection-manager", "script"] }
 reqwest              = { workspace = true, features = ["rustls", "http2", "stream"] }
 rustls               = { workspace = true, features = ["aws-lc-rs", "std", "tls12", "prefer-post-quantum"] }
 serde                = { workspace = true, features = ["std", "derive"] }

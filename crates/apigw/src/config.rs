@@ -18,6 +18,7 @@ use crate::observability::{
 };
 use crate::router::BasePath;
 use crate::source::Source;
+use crate::state::ValkeyUrl;
 use crate::vpc_link::{VpcLinkTarget, VpcLinks};
 
 const STAGE_VARIABLE_ENV_PREFIX: &str = "APIGW_STAGE_VARIABLE_";
@@ -91,6 +92,13 @@ pub(crate) struct Config {
     /// Seconds between configuration refreshes; 0 disables refreshing.
     #[arg(long, env = "APIGW_REFRESH_SECONDS", default_value_t = 60)]
     pub(crate) refresh_seconds: u64,
+
+    /// Seconds between reads of a REST API's API keys, usage plans, and their
+    /// associations, which change independently of deployments; 0 reads them
+    /// once at startup. Keys disabled in API Gateway keep working until the
+    /// next read. Reads are paced for the account's control-plane limit.
+    #[arg(long, env = "APIGW_USAGE_REFRESH_SECONDS", default_value_t = 60)]
+    pub(crate) usage_refresh_seconds: u64,
 
     /// Last-known-good configuration, written after every successful download
     /// and used at startup when API Gateway cannot be reached.
@@ -178,12 +186,28 @@ pub(crate) struct Config {
     pub(crate) vpc_links: Vec<VpcLinkTarget>,
 
     /// How many gateway replicas serve this API. Throttle limits are divided by
-    /// this count because each replica keeps its own buckets, so the API-wide rate
+    /// this count because each replica keeps its own buckets (unless
+    /// `--valkey-url` shares them, when it has no effect), so the API-wide rate
     /// is approximately the configured one. A replica's bucket always holds at
     /// least one token, so with more replicas than burst tokens the API-wide burst
     /// is larger than configured.
     #[arg(long, env = "APIGW_REPLICAS", default_value_t = NonZeroU32::MIN)]
     pub(crate) replicas: NonZeroU32,
+
+    /// Valkey (or Redis-compatible) server that holds throttle, quota, and
+    /// authorizer-cache state, so every replica counts against the same limits
+    /// and `--replicas` no longer divides them. Use `rediss://` (TLS): the
+    /// connection carries caller identities, and a `redis://` URL is accepted
+    /// with a warning. The URL may carry credentials; it is never logged whole.
+    /// Without it each replica keeps its own state in memory. When the server is
+    /// unreachable, requests are admitted and cached results are recomputed.
+    #[arg(long, env = "APIGW_VALKEY_URL")]
+    pub(crate) valkey_url: Option<ValkeyUrl>,
+
+    /// PEM root certificate to trust for a `rediss://` server whose certificate
+    /// the system roots do not cover.
+    #[arg(long, env = "APIGW_VALKEY_CA_CERT", requires = "valkey_url")]
+    pub(crate) valkey_ca_cert: Option<PathBuf>,
 
     /// Address for `/healthz` and `/routes`. Disabled when unset.
     #[arg(long, env = "APIGW_ADMIN_LISTEN")]
@@ -355,6 +379,10 @@ impl Config {
         }
     }
 
+    pub(crate) fn usage_refresh_interval(&self) -> Option<Duration> {
+        (self.usage_refresh_seconds > 0).then(|| Duration::from_secs(self.usage_refresh_seconds))
+    }
+
     pub(crate) fn refresh_interval(&self) -> Option<Duration> {
         (self.refresh_seconds > 0).then(|| Duration::from_secs(self.refresh_seconds))
     }
@@ -517,6 +545,44 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn usage_plans_are_read_every_minute_unless_told_otherwise() {
+        let read = |extra: &[&str]| {
+            let mut args = vec!["--rest-api-id", "a", "--stage", "s"];
+            args.extend_from_slice(extra);
+            parse(&args).unwrap().usage_refresh_interval()
+        };
+        assert_eq!(read(&[]), Some(Duration::from_secs(60)));
+        assert_eq!(
+            read(&["--usage-refresh-seconds", "5"]),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(read(&["--usage-refresh-seconds", "0"]), None);
+    }
+
+    #[test]
+    fn the_valkey_url_is_validated_and_never_printed_whole() {
+        let base = ["--http-api-id", "a", "--stage", "s"];
+        assert!(parse(&base).unwrap().valkey_url.is_none());
+        let mut args = base.to_vec();
+        args.extend(["--valkey-url", "rediss://u:hunter2@cache:6380"]);
+        let config = parse(&args).unwrap();
+        assert!(!format!("{config:?}").contains("hunter2"));
+        let mut args = base.to_vec();
+        args.extend(["--valkey-url", "http://cache"]);
+        assert!(parse(&args).is_err());
+    }
+
+    #[test]
+    fn the_valkey_ca_certificate_needs_a_valkey_url() {
+        let base = ["--http-api-id", "a", "--stage", "s"];
+        let mut args = base.to_vec();
+        args.extend(["--valkey-ca-cert", "/ca.pem"]);
+        assert!(parse(&args).is_err());
+        args.extend(["--valkey-url", "rediss://cache"]);
+        assert!(parse(&args).is_ok());
     }
 
     #[test]

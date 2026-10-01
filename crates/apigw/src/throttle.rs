@@ -98,7 +98,7 @@ mod tests {
 
     use super::*;
     use crate::model::{MethodSettings, SettingsScope};
-    use crate::state::{InMemory, InMemoryLimits};
+    use crate::state::InMemoryLimits;
 
     fn settings(rate: f64, burst: i32) -> MethodSettings {
         MethodSettings {
@@ -258,7 +258,7 @@ mod tests {
 
     #[tokio::test]
     async fn admit_throttles_after_the_burst() {
-        let backend = StateBackend::InMemory(InMemory::new(InMemoryLimits::default()));
+        let backend = StateBackend::with_limits(InMemoryLimits::default());
         let settings = throttle([(SettingsScope::All, settings(0.0, 2))], 1);
         let (method, path) = get("/pets");
         let route = settings.for_route(&method, &path).unwrap();
@@ -269,7 +269,7 @@ mod tests {
 
     #[tokio::test]
     async fn zero_limits_block_every_request() {
-        let backend = StateBackend::InMemory(InMemory::new(InMemoryLimits::default()));
+        let backend = StateBackend::with_limits(InMemoryLimits::default());
         let settings = throttle([(SettingsScope::All, settings(0.0, 0))], 1);
         let (method, path) = get("/pets");
         let route = settings.for_route(&method, &path).unwrap();

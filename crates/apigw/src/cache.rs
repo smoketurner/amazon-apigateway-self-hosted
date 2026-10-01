@@ -1050,6 +1050,7 @@ mod tests {
                 reqwest::Client::new(),
             )),
             keys: Arc::new(KeyStore::new(reqwest::Client::new(), [])),
+            usage: None,
         });
         build(&model, &ctx, &BasePath::default()).0
     }

@@ -17,19 +17,21 @@ use axum::extract::{FromRequestParts as _, RawPathParams, Request};
 use axum::http::header;
 use axum::response::{IntoResponse as _, Response};
 
-pub(crate) use context::RequestContext;
+pub(crate) use context::{ApiKeyIdentity, RequestContext};
 
 use crate::authz::{AuthRequest, Denial};
 use crate::cache::CacheOutcome;
 use crate::cors::Cors;
-use crate::gateway::{ApiContext, GatewayError, MAX_BODY_BYTES};
+use crate::digest::Sha256Digest;
+use crate::gateway::{ApiContext, AuthorizationMode, GatewayError, MAX_BODY_BYTES};
 use crate::gateway_response::Failure;
 use crate::integration::{Integration, MockResponse};
-use crate::model::{ApiKind, Protection, ResponseTransferMode, ResponseType};
+use crate::model::{ApiKeySource, ApiKind, Protection, ResponseTransferMode, ResponseType};
 use crate::observability::IntegrationTiming;
 use crate::payload::PayloadSettings;
 use crate::route::Route;
 use crate::state::Admission;
+use crate::usage::{KeyValue, RouteApiKey, UsageOutcome};
 
 /// One route's handling of one request.
 pub(crate) struct Pipeline<'a> {
@@ -92,8 +94,12 @@ impl<'a> Pipeline<'a> {
         if !readable {
             return self.fail(ctx, &GatewayError::InvalidRequest.failure(self.api.kind));
         }
-        if let Err(denial) = self.authorize(ctx).await {
-            return self.fail(ctx, &denial.failure(self.api.kind));
+        let authorizer_key = match self.authorize(ctx).await {
+            Ok(key) => key,
+            Err(denial) => return self.fail(ctx, &denial.failure(self.api.kind)),
+        };
+        if let Err(failure) = self.api_key(ctx, authorizer_key).await {
+            return self.fail(ctx, &failure);
         }
         if let Some(ref cors) = self.api.cors
             && Cors::is_preflight(ctx)
@@ -221,18 +227,72 @@ impl<'a> Pipeline<'a> {
     /// the authorizer contributes to `$context.authorizer`. Authorization
     /// happens before the body is read so that a request that is turned away
     /// costs no buffering. `--insecure-skip-authorization` skips authorizers
-    /// but never the resource policy.
-    async fn authorize(&self, ctx: &mut RequestContext) -> Result<(), Denial> {
+    /// but never the resource policy. Returns the API key the authorizer named
+    /// for usage plans, if any.
+    async fn authorize(&self, ctx: &mut RequestContext) -> Result<Option<Sha256Digest>, Denial> {
         let request = AuthRequest {
             aws: &self.api.aws,
             keys: &self.api.keys,
             state: &self.api.state,
             ctx,
         };
-        let context = request
+        let admitted = request
             .authorize(self.route, self.api.enforcement.authorization)
             .await?;
-        ctx.authorizer = context;
+        ctx.authorizer = admitted.context;
+        Ok(admitted.usage_key)
+    }
+
+    /// Checks the API key on a method that requires one: it must exist, be
+    /// enabled, and belong to a usage plan of the stage, whose throttle and
+    /// quota then count the request. `--insecure-skip-authorization` skips it.
+    async fn api_key(
+        &self,
+        ctx: &mut RequestContext,
+        authorizer_key: Option<Sha256Digest>,
+    ) -> Result<(), Failure> {
+        let RouteApiKey::Required(source) = self.route.api_key else {
+            return Ok(());
+        };
+        if self.api.enforcement.authorization == AuthorizationMode::Skip {
+            return Ok(());
+        }
+        let invalid = || Failure::new(ResponseType::InvalidApiKey);
+        let Some(ref usage) = self.api.usage else {
+            return Err(invalid());
+        };
+        let (digest, value) = match source {
+            ApiKeySource::Header => {
+                let presented = ctx
+                    .header_str("x-api-key")
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(invalid)?;
+                (KeyValue::digest(presented), Some(presented.to_owned()))
+            }
+            ApiKeySource::Authorizer => (authorizer_key.ok_or_else(invalid)?, None),
+        };
+        let Some(data) = usage.current() else {
+            tracing::warn!(
+                "API keys have not been read recently enough to be trusted; refusing the request"
+            );
+            return Err(invalid());
+        };
+        let access = data.lookup_digest(&digest).ok_or_else(invalid)?;
+        let method = self.route.plan_throttle_key();
+        for plan in &access.plans {
+            let outcome = usage
+                .checker()
+                .admit(&self.api.state, &plan.limits, &plan.id, access.key, &method)
+                .await;
+            match outcome {
+                UsageOutcome::Admitted => {}
+                UsageOutcome::Throttled => return Err(Failure::new(ResponseType::Throttled)),
+                UsageOutcome::QuotaExceeded => {
+                    return Err(Failure::new(ResponseType::QuotaExceeded));
+                }
+            }
+        }
+        ctx.api_key = Some(ApiKeyIdentity::new(access.key.0.clone(), value));
         Ok(())
     }
 

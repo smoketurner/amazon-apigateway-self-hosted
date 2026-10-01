@@ -134,3 +134,99 @@ fn cache_keys_separate_apis_stages_authorizers_and_identities() {
     other_api.api.api_id = "zzz".to_owned();
     assert_ne!(base, authorizer("auth").cache_key(&other_api, &identity));
 }
+
+fn usage_key_of(payload: &Value) -> Option<Sha256Digest> {
+    let parsed =
+        AuthorizerResponse::parse(payload.to_string().as_bytes(), &Flavor::RestRequest).unwrap();
+    match parsed {
+        AuthorizerResponse::Policy { usage_key, .. } => usage_key,
+        AuthorizerResponse::Simple { .. } => None,
+    }
+}
+
+fn policy_payload(extra: &Value) -> Value {
+    let mut payload = json!({"principalId": "u", "policyDocument": {"Statement": []}});
+    payload
+        .as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().cloned().unwrap_or_default());
+    payload
+}
+
+#[test]
+fn the_usage_identifier_key_is_read_as_a_digest() {
+    let named = usage_key_of(&policy_payload(
+        &json!({"usageIdentifierKey": "my-api-key"}),
+    ));
+    assert_eq!(named, Some(KeyValue::digest("my-api-key")));
+    assert_eq!(usage_key_of(&policy_payload(&json!({}))), None);
+    assert_eq!(
+        usage_key_of(&policy_payload(&json!({"usageIdentifierKey": null}))),
+        None
+    );
+}
+
+#[test]
+fn a_usage_identifier_key_that_is_not_a_string_is_a_configuration_error() {
+    for bad in [json!(7), json!(true), json!(["k"]), json!({"k": 1})] {
+        let payload = policy_payload(&json!({"usageIdentifierKey": bad}));
+        assert_eq!(
+            AuthorizerResponse::parse(payload.to_string().as_bytes(), &Flavor::RestRequest)
+                .unwrap_err(),
+            Denial::AuthorizerConfiguration,
+            "{payload}"
+        );
+    }
+}
+
+#[test]
+#[expect(clippy::panic, reason = "fails loudly on an unexpected response shape")]
+fn a_cached_response_holds_the_digest_and_never_the_key() {
+    let original =
+        policy_payload(&json!({"usageIdentifierKey": "my-api-key", "context": {"a": "b"}}));
+    let cached = AuthorizerResponse::without_secrets(original.to_string().into_bytes());
+    let text = String::from_utf8(cached.clone()).unwrap();
+    assert!(!text.contains("my-api-key"), "{text}");
+    assert!(
+        text.contains(&KeyValue::digest("my-api-key").to_string()),
+        "{text}"
+    );
+    // It reads back to the same key, and keeps everything else.
+    let parsed = AuthorizerResponse::parse(&cached, &Flavor::RestRequest).unwrap();
+    match parsed {
+        AuthorizerResponse::Policy {
+            usage_key,
+            principal_id,
+            context,
+            ..
+        } => {
+            assert_eq!(usage_key, Some(KeyValue::digest("my-api-key")));
+            assert_eq!(principal_id, "u");
+            assert_eq!(Value::Object(context), json!({"a": "b"}));
+        }
+        AuthorizerResponse::Simple { .. } => panic!("a policy was cached"),
+    }
+}
+
+#[test]
+fn payloads_without_a_key_are_cached_as_they_are() {
+    let plain = policy_payload(&json!({})).to_string().into_bytes();
+    assert_eq!(AuthorizerResponse::without_secrets(plain.clone()), plain);
+    assert_eq!(
+        AuthorizerResponse::without_secrets(b"not json".to_vec()),
+        b"not json"
+    );
+}
+
+#[test]
+fn a_malformed_cached_digest_is_a_configuration_error() {
+    for bad in [json!("not hex"), json!(7), json!("ab")] {
+        let payload = policy_payload(&json!({"usageIdentifierKeyDigest": bad}));
+        assert_eq!(
+            AuthorizerResponse::parse(payload.to_string().as_bytes(), &Flavor::RestRequest)
+                .unwrap_err(),
+            Denial::AuthorizerConfiguration,
+            "{payload}"
+        );
+    }
+}

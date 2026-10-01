@@ -39,8 +39,12 @@ impl BucketLimits {
         }
     }
 
+    pub(crate) fn rate_per_second(self) -> f64 {
+        self.rate_per_second
+    }
+
     /// Tokens the bucket can hold.
-    fn capacity(self) -> f64 {
+    pub(crate) fn capacity(self) -> f64 {
         if self.burst == 0.0 {
             0.0
         } else {

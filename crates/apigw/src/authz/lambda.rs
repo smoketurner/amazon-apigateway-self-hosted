@@ -23,7 +23,10 @@ use crate::model::{ApiKind, AuthorizerSpec, PayloadVersion};
 use crate::pipeline::RequestContext;
 use crate::pipeline::context::AuthorizerContext;
 use crate::state::{StateBackend, StateKey};
+use crate::usage::KeyValue;
 
+/// Where a cached response keeps the digest of the API key it named.
+const CACHED_USAGE_KEY: &str = "usageIdentifierKeyDigest";
 /// How long API Gateway waits for an authorizer function.
 const INVOKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest an authorizer result may be cached.
@@ -64,6 +67,7 @@ enum AuthorizerResponse {
         principal_id: String,
         policy: PolicyDocument,
         context: Map<String, Value>,
+        usage_key: Option<Sha256Digest>,
     },
     Simple {
         authorized: bool,
@@ -236,7 +240,12 @@ impl LambdaAuthorizer {
         let answer = self.invoke(request, &identity, &arn).await?;
         let authorized = answer.response.authorize(&arn);
         if let Some(key) = cache_key {
-            self.remember(request.state, key, answer.payload).await;
+            self.remember(
+                request.state,
+                key,
+                AuthorizerResponse::without_secrets(answer.payload),
+            )
+            .await;
         }
         Ok(authorized)
     }
@@ -386,7 +395,43 @@ impl AuthorizerResponse {
             principal_id,
             policy,
             context,
+            usage_key: Self::usage_key(&mut fields)?,
         })
+    }
+
+    /// The API key the authorizer names for usage plans, hashed. A key the
+    /// gateway cached earlier is already a digest (see
+    /// [`AuthorizerResponse::without_secrets`]).
+    fn usage_key(fields: &mut Map<String, Value>) -> Result<Option<Sha256Digest>, Denial> {
+        match fields.remove("usageIdentifierKey") {
+            Some(Value::String(key)) => return Ok(Some(KeyValue::digest(&key))),
+            None | Some(Value::Null) => {}
+            Some(_) => return Err(Denial::AuthorizerConfiguration),
+        }
+        match fields.remove(CACHED_USAGE_KEY) {
+            Some(Value::String(hex)) => Sha256Digest::from_hex(&hex)
+                .map(Some)
+                .ok_or(Denial::AuthorizerConfiguration),
+            None | Some(Value::Null) => Ok(None),
+            Some(_) => Err(Denial::AuthorizerConfiguration),
+        }
+    }
+
+    /// The payload as it is cached: an API key named in `usageIdentifierKey` is
+    /// replaced by its digest, so the cache, which may be shared, never holds
+    /// the key.
+    fn without_secrets(payload: Vec<u8>) -> Vec<u8> {
+        let Ok(Value::Object(mut fields)) = serde_json::from_slice::<Value>(&payload) else {
+            return payload;
+        };
+        let Some(Value::String(key)) = fields.remove("usageIdentifierKey") else {
+            return payload;
+        };
+        fields.insert(
+            CACHED_USAGE_KEY.to_owned(),
+            Value::String(KeyValue::digest(&key).to_string()),
+        );
+        serde_json::to_vec(&Value::Object(fields)).unwrap_or(payload)
     }
 
     /// REST authorizer context values must be strings, numbers, or booleans,
@@ -412,6 +457,7 @@ impl AuthorizerResponse {
                 ref principal_id,
                 ref policy,
                 ref context,
+                ref usage_key,
             } => {
                 let mut values = context.clone();
                 values.insert(
@@ -421,6 +467,7 @@ impl AuthorizerResponse {
                 Authorized {
                     context: AuthorizerContext::lambda(values),
                     decision: policy.evaluate(&AccessRequest::invoke(arn)),
+                    usage_key: usage_key.clone(),
                 }
             }
             Self::Simple {
@@ -433,6 +480,7 @@ impl AuthorizerResponse {
                 } else {
                     Decision::ExplicitDeny
                 },
+                usage_key: None,
             },
         }
     }

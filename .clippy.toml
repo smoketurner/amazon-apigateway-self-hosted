@@ -21,6 +21,7 @@ absolute-paths-allowed-crates = [
     "std",
     "core",
     "alloc",
+    "redis",
     "proc_macro",
     "anyhow",
     "apigw_regex",

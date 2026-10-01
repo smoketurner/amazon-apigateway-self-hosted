@@ -7,6 +7,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `--valkey-url` (and `--valkey-ca-cert`) keep throttle buckets, usage-plan quotas, and cached
+  authorizer results in a Valkey or Redis-compatible server shared by every replica, so limits are
+  exact across the fleet and `--replicas` no longer divides them. TLS (`rediss://`) is recommended and
+  `redis://` warns. Every call has a 500 ms timeout; when the server is unreachable requests are
+  admitted and cached results are recomputed.
+- API keys and usage plans are enforced for REST APIs. A method that requires a key admits an enabled
+  key that belongs to a usage plan of the stage (`403 Forbidden` otherwise), with the key taken from
+  `x-api-key` or, for key source `AUTHORIZER`, from the Lambda authorizer's `usageIdentifierKey`. The
+  plan's throttles (plan-wide and per method) and day/week/month quotas count each key and answer
+  `429`. Keys are read with their values, held only as SHA-256 hashes, and refreshed every
+  `--usage-refresh-seconds` with paged reads paced for the control plane's rate limit. Authorizer
+  results no longer hold the `usageIdentifierKey` in the cache.
 - REST binary media types: Lambda proxy events carry a request body as base64 when its
   `Content-Type` matches `binaryMediaTypes` (exact, `type/*`, `*/*`) and as text otherwise, and a
   function's base64 response is decoded only when the client's first `Accept` media type matches
