@@ -16,12 +16,11 @@ cases:
       body: ignore
       echo: {fields: [method, query, resource, path_parameters]}
 
-  # API Gateway puts the stage name in rawPath; apigw reports the path without it
+  # API Gateway puts the stage name in rawPath
   - name: http-lambda-v2-raw-path
     api: http
     path: /lambda-v2/x
     query: {k: v}
-    known_gap: "#13"
     compare:
       body: ignore
       echo: {fields: [path]}

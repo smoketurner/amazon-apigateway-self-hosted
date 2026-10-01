@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::num::NonZeroU32;
 
 use axum::extract::Request;
-use axum::http::{HeaderName, StatusCode};
+use axum::http::{HeaderName, Method, StatusCode};
 use axum::response::Response;
 use uuid::Uuid;
 
@@ -17,6 +17,7 @@ use crate::canary::Release;
 use crate::cors::Cors;
 use crate::gateway_response::{Failure, GatewayResponses};
 use crate::integration::StageVariables;
+use crate::limits::LimitExceeded;
 use crate::model::{ApiKind, Protection, ResponseType};
 use crate::observability::StageObserver;
 use crate::pipeline::RequestContext;
@@ -171,17 +172,17 @@ impl ApiContext {
         self.responses.render(failure, request)
     }
 
-    /// Answers a request that matched no route.
-    pub(crate) fn reject_unrouted(&self, request: Request) -> Response {
+    /// Answers a request that never reached a route's pipeline.
+    pub(crate) fn reject(&self, request: Request, error: GatewayError) -> Response {
         let (parts, _) = request.into_parts();
         let context = RequestContext::new(self, None, parts, Vec::new());
         let Some(ref cors) = self.cors else {
-            return self.respond(&context, &GatewayError::NoRoute.failure(self.kind));
+            return self.respond(&context, &error.failure(self.kind));
         };
         if Cors::is_preflight(&context) {
             return cors.preflight(&context);
         }
-        let mut response = self.respond(&context, &GatewayError::NoRoute.failure(self.kind));
+        let mut response = self.respond(&context, &error.failure(self.kind));
         cors.decorate(&context, &mut response);
         response
     }
@@ -210,6 +211,20 @@ pub(crate) enum GatewayError {
     /// A streaming integration's output doesn't follow the response streaming
     /// format; API Gateway answers `500`.
     MalformedStreamingResponse,
+    /// The URL is longer than the API type allows.
+    UrlTooLong,
+    /// The headers (and request line, for HTTP APIs) are larger than the API
+    /// type allows.
+    HeadersTooLarge,
+}
+
+impl From<LimitExceeded> for GatewayError {
+    fn from(exceeded: LimitExceeded) -> Self {
+        match exceeded {
+            LimitExceeded::UrlTooLong => Self::UrlTooLong,
+            LimitExceeded::HeadersTooLarge => Self::HeadersTooLarge,
+        }
+    }
 }
 
 impl GatewayError {
@@ -240,6 +255,13 @@ impl GatewayError {
                 Failure::new(ResponseType::RequestTooLarge).with_message("Request Entity Too Large")
             }
             (Self::MalformedStreamingResponse, _) => Failure::new(ResponseType::Default5xx),
+            (Self::UrlTooLong, _) => {
+                Failure::gateway(StatusCode::URI_TOO_LONG, "Request-URI Too Large")
+            }
+            (Self::HeadersTooLarge, _) => Failure::gateway(
+                StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+                "Request Header Fields Too Large",
+            ),
             (Self::UnsupportedIntegration, _) => Failure::gateway(
                 StatusCode::NOT_IMPLEMENTED,
                 "Integration not supported by this gateway",
@@ -249,6 +271,25 @@ impl GatewayError {
 }
 
 impl ApiKind {
+    /// REST APIs honor `X-HTTP-Method-Override`: the header's value replaces the
+    /// request's method before routing, and a header that is not a valid method
+    /// is ignored. HTTP APIs ignore the header.
+    ///
+    /// <https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-known-issues.html>
+    pub(crate) fn override_method(self, request: &mut Request) {
+        if self != Self::Rest {
+            return;
+        }
+        let Some(method) = request
+            .headers()
+            .get("x-http-method-override")
+            .and_then(|value| Method::from_bytes(value.as_bytes()).ok())
+        else {
+            return;
+        };
+        *request.method_mut() = method;
+    }
+
     /// The header carrying the request ID on every response.
     pub(crate) fn request_id_header(self) -> HeaderName {
         match self {
@@ -281,6 +322,7 @@ impl HeaderNameExt for HeaderName {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "tests assert on known-good fixtures")]
 mod tests {
     use super::*;
 
@@ -289,6 +331,31 @@ mod tests {
         assert!(HeaderName::from_static("connection").is_hop_by_hop());
         assert!(HeaderName::from_static("transfer-encoding").is_hop_by_hop());
         assert!(!HeaderName::from_static("x-forwarded-for").is_hop_by_hop());
+    }
+
+    #[test]
+    fn method_override_applies_to_rest_apis_only() {
+        use axum::body::Body;
+        let request = |method: Method, value: &str| {
+            Request::builder()
+                .method(method)
+                .uri("/")
+                .header("x-http-method-override", value)
+                .body(Body::empty())
+                .unwrap()
+        };
+        let mut rest = request(Method::POST, "PUT");
+        ApiKind::Rest.override_method(&mut rest);
+        assert_eq!(rest.method(), Method::PUT);
+        let mut http = request(Method::POST, "PUT");
+        ApiKind::Http.override_method(&mut http);
+        assert_eq!(http.method(), Method::POST);
+        let mut invalid = request(Method::POST, "NOT A METHOD");
+        ApiKind::Rest.override_method(&mut invalid);
+        assert_eq!(invalid.method(), Method::POST);
+        let mut absent = Request::builder().uri("/").body(Body::empty()).unwrap();
+        ApiKind::Rest.override_method(&mut absent);
+        assert_eq!(absent.method(), Method::GET);
     }
 
     #[test]

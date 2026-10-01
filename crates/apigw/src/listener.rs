@@ -684,6 +684,11 @@ async fn handle_accept_error(err: io::Error) {
     tokio::time::sleep(Duration::from_secs(1)).await;
 }
 
+/// Largest HTTP/2 header list hyper accepts. hyper's default (16 KiB) is below
+/// REST APIs' 20,480 byte header quota; requests between the quota and this
+/// ceiling reach [`crate::limits`], which answers as API Gateway does.
+const H2_MAX_HEADER_LIST_BYTES: u32 = 64 * 1024;
+
 /// Drive one connection from handshake to close. `_slot` holds the connection's
 /// place under the connection cap until it closes.
 async fn serve_connection(
@@ -764,7 +769,8 @@ async fn serve_connection(
         .http2()
         .timer(TokioTimer::new())
         .keep_alive_interval(limits.h2_keep_alive_interval)
-        .keep_alive_timeout(limits.h2_keep_alive_timeout);
+        .keep_alive_timeout(limits.h2_keep_alive_timeout)
+        .max_header_list_size(H2_MAX_HEADER_LIST_BYTES);
     let conn = builder.serve_connection_with_upgrades(TokioIo::new(io), service);
     tokio::pin!(conn);
     let result = tokio::select! {
