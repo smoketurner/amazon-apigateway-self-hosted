@@ -33,14 +33,15 @@ Management's
 | IAM (`AWS_IAM`) auth | Cannot be verified outside AWS. REST answers `403 Missing Authentication Token`, HTTP `403 Forbidden`, unless `--insecure-skip-authorization` is set |
 | Resource policies | Evaluated in two phases as API Gateway evaluates them: an explicit `Deny` ends the request before authentication, then the policy is combined with the authorizer's decision per AWS's outcome tables. `aws:SourceIp` uses the trusted client address (see `--trusted-proxies`). Never skipped by `--insecure-skip-authorization`; a policy that cannot be read refuses every route with `403` |
 | Request validators and models | REST APIs: required query string and header parameters (present and not blank) answer `400` `BAD_REQUEST_PARAMETERS`, and request bodies are checked against the method's JSON Schema draft 4 model, with `$ref`s resolved against the API's own models, answering `400` `BAD_REQUEST_BODY`. Customized gateway responses apply, and `$context.error.validationErrorString` lists what the body violated. Never skipped by `--insecure-skip-authorization`; a route whose model cannot be compiled answers `501` ([differences](docs/parity.md#request-validation)) |
-| `AWS` service integrations, non-proxy Lambda | Answer `501`; listed with the reason on `/routes` |
+| `AWS` service integrations | SQS, SNS, DynamoDB, Step Functions, Kinesis, EventBridge, and S3 (`action/` and `path/` URIs) and non-proxy Lambda (including `X-Amz-Invocation-Type: Event` and `selectionPattern` on the function's `errorMessage`), through the same request and response templates as `HTTP`; requests are signed with SigV4 using the integration's `credentials` role (or the gateway's own with `--integration-credentials=gateway`). `--aws-endpoint SERVICE=URL` sends a service to an emulator |
+| HTTP API integration subtypes | `SQS-SendMessage`, `SQS-ReceiveMessage`, `SQS-DeleteMessage`, `SQS-PurgeQueue`, `EventBridge-PutEvents`, `StepFunctions-StartExecution`, `StepFunctions-StartSyncExecution`, `StepFunctions-StopExecution`, `Kinesis-PutRecord`, and `AppConfig-GetConfiguration`, with parameters mapped from the request; the service's response is returned as it is |
 | VPC links (`HTTP_PROXY`) | Served from an in-cluster URL with `--vpc-link`; a link with no mapping answers `501` with the reason on `/routes` |
 | Unknown route | REST: `403 {"message":"Missing Authentication Token"}`; HTTP: `404 {"message":"Not Found"}` |
 
 The full feature matrix, with an issue link for every gap, is in [docs/parity.md](docs/parity.md).
 
-`/routes` on the admin listener lists, per route, its protections, any problems, and any
-imported settings not enforced yet, plus the API-wide settings not enforced yet.
+`/routes` on the admin listener lists, per route, its integration, the role it runs as, its
+protections, and any problems.
 
 Every response carries a request ID (`x-amzn-requestid` for REST APIs, `apigw-requestid` for
 HTTP APIs).
@@ -290,7 +291,8 @@ are flushed every 5 seconds, when a batch is full, and at shutdown.
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/apis/<id>/exports/OAS30`, `.../apis/<id>/stages/<stage>` | HTTP APIs |
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/v2/domainnames/<domain>`, `.../apimappings`, `.../routingrules`, `arn:aws:apigateway:<region>::/restapis/<id>` | `--domain-name` |
 | `s3:GetObject` | the truststore object of each mutual TLS domain (`s3:GetObjectVersion` when the domain pins a `truststoreVersion`) | mutual TLS |
-| `lambda:InvokeFunction` | each integrated function (and its aliases) and each Lambda authorizer function | `AWS_PROXY` routes and Lambda authorizers; the same action covers `InvokeWithResponseStream` for streaming routes |
+| `lambda:InvokeFunction` | each integrated function (and its aliases) and each Lambda authorizer function | `AWS_PROXY` and non-proxy `AWS` routes and Lambda authorizers; the same action covers `InvokeWithResponseStream` for streaming routes |
+| the service action the integration calls (`sqs:SendMessage`, `sqs:ReceiveMessage`, `sns:Publish`, `dynamodb:PutItem`, `dynamodb:GetItem`, `states:StartExecution`, `states:StartSyncExecution`, `kinesis:PutRecord`, `events:PutEvents`, `s3:GetObject`, `appconfig:GetConfiguration`, ...) | the queue, topic, table, state machine, stream, event bus, bucket, or configuration the route uses | REST `AWS` integrations and HTTP API integration subtypes; granted to each integration's `credentials` role, or to the gateway's own identity with `--integration-credentials=gateway` |
 | `sts:AssumeRole` | each integration `credentials` and each `authorizerCredentials` role | integrations and authorizers with a role, unless `--integration-credentials=gateway` |
 | `logs:CreateLogStream`, `logs:PutLogEvents` | each access log group, the metrics log group, and `arn:aws:logs:<region>:<account>:log-group:API-Gateway-Execution-Logs_<id>/<stage>:*` | access logs, metrics, execution logs |
 | `logs:CreateLogGroup` | `arn:aws:logs:<region>:<account>:log-group:API-Gateway-Execution-Logs_*`, and each access log group with `/Canary` appended | execution logs, and canary access logs (the only log groups the gateway creates) |

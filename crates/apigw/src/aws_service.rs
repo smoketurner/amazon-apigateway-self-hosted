@@ -1,5 +1,5 @@
 //! Calls to AWS services made on behalf of integrations: which services API
-//! Gateway can call and how their requests are shaped, SigV4 signing with the
+//! Gateway can call and how their requests are shaped, `SigV4` signing with the
 //! integration role's credentials, and sending.
 //!
 //! REST `AWS` integrations name a service and an action or path in their URI
@@ -37,7 +37,7 @@ pub(crate) enum Protocol {
         content_type: &'static str,
         target_prefix: &'static str,
     },
-    /// REST: the method, path, query string, and body say it all (S3, AppConfig).
+    /// REST: the method, path, query string, and body say it all (S3, `AppConfig`).
     Rest,
 }
 
@@ -159,15 +159,7 @@ impl FromStr for ServiceUri {
 
     fn from_str(uri: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = uri.splitn(6, ':').collect();
-        let [
-            "arn",
-            partition,
-            "apigateway",
-            region,
-            service,
-            target,
-        ] = parts.as_slice()
-        else {
+        let ["arn", partition, "apigateway", region, service, target] = parts.as_slice() else {
             return Err(format!(
                 "{uri:?} is not an AWS service integration URI (arn:aws:apigateway:REGION:SERVICE:action/NAME or path/PATH)"
             ));
@@ -249,9 +241,9 @@ impl From<&ServiceError> for GatewayError {
     fn from(error: &ServiceError) -> Self {
         match *error {
             ServiceError::Request(_)
-            | ServiceError::Credentials(InvokeError::AssumeRole { .. } | InvokeError::Credentials(_)) => {
-                Self::ApiConfiguration
-            }
+            | ServiceError::Credentials(
+                InvokeError::AssumeRole { .. } | InvokeError::Credentials(_),
+            ) => Self::ApiConfiguration,
             ServiceError::Timeout => Self::IntegrationTimeout,
             ServiceError::Unreachable(_) => Self::IntegrationUnreachable,
             ServiceError::Credentials(_) | ServiceError::Signing(_) | ServiceError::Response(_) => {
@@ -329,6 +321,7 @@ impl ServiceCall {
         credentials: &Credentials,
         now: SystemTime,
     ) -> Result<Prepared, ServiceError> {
+        self.drop_signing_headers();
         self.apply_protocol()?;
         let url = self.url(aws.service_endpoint(self.service.name))?;
         let signature = self.sign(&url, credentials, now)?;
@@ -341,6 +334,23 @@ impl ServiceCall {
             headers.insert(name, value);
         }
         Ok(Prepared { url, headers })
+    }
+
+    /// Removes headers a mapping may have set that the signature or the HTTP
+    /// client owns: the signature's own headers, `Host`, and framing.
+    fn drop_signing_headers(&mut self) {
+        for name in [
+            "authorization",
+            "host",
+            "content-length",
+            "connection",
+            "transfer-encoding",
+            "x-amz-date",
+            "x-amz-security-token",
+            "x-amz-content-sha256",
+        ] {
+            self.headers.remove(name);
+        }
     }
 
     /// Adds what the protocol needs: the `Action` of a query-protocol call, the
@@ -396,7 +406,7 @@ impl ServiceCall {
         Ok(url)
     }
 
-    /// The headers a SigV4 signature adds (`Authorization`, `X-Amz-Date`, and
+    /// The headers a `SigV4` signature adds (`Authorization`, `X-Amz-Date`, and
     /// the session token) for this request.
     fn sign(
         &self,
@@ -474,12 +484,21 @@ mod tests {
     #[test]
     fn unusable_service_uris_say_why() {
         for (uri, reason) in [
-            ("https://sqs.us-east-1.amazonaws.com/", "not an AWS service integration URI"),
-            ("arn:aws:apigateway:us-east-1:ses:action/SendEmail", "not supported"),
+            (
+                "https://sqs.us-east-1.amazonaws.com/",
+                "not an AWS service integration URI",
+            ),
+            (
+                "arn:aws:apigateway:us-east-1:ses:action/SendEmail",
+                "not supported",
+            ),
             ("arn:aws:apigateway::sqs:action/SendMessage", "no region"),
             ("arn:aws:apigateway:us-east-1:sqs:queue/q", "must end in"),
             ("arn:aws:apigateway:us-east-1:sqs:action/", "must end in"),
-            ("arn:aws:apigateway:us-east-1:dynamodb:path/x", "take an action"),
+            (
+                "arn:aws:apigateway:us-east-1:dynamodb:path/x",
+                "take an action",
+            ),
         ] {
             let err = uri.parse::<ServiceUri>().unwrap_err();
             assert!(err.contains(reason), "{uri}: {err}");

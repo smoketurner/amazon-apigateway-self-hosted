@@ -7,6 +7,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- REST `AWS` integrations: SQS, SNS, DynamoDB, Step Functions, Kinesis, EventBridge, and S3
+  (`action/` and `path/` URIs) and non-proxy Lambda run through the request and response templates,
+  with SigV4-signed requests (integration `credentials` role or the gateway's credentials), JSON
+  protocol targets, `X-Amz-Invocation-Type: Event`, and `selectionPattern` on a function error's
+  `errorMessage`. `--aws-endpoint SERVICE=URL` sends a service to an emulator.
+- HTTP API integration subtypes `SQS-SendMessage`, `SQS-ReceiveMessage`, `SQS-DeleteMessage`,
+  `SQS-PurgeQueue`, `EventBridge-PutEvents`, `StepFunctions-StartExecution`,
+  `StepFunctions-StartSyncExecution`, `StepFunctions-StopExecution`, `Kinesis-PutRecord`, and
+  `AppConfig-GetConfiguration`.
+
 - Request validators are evaluated for REST APIs. Required query string and header parameters
   (present and not blank) answer `400` `BAD_REQUEST_PARAMETERS` with `Missing required request
   parameters: [...]`, and request bodies are validated against the method's JSON Schema draft 4 model
@@ -216,6 +226,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Removed
 
+- The unenforced-feature report (`unenforced` on `/routes`): `contentHandling` was the last
+  imported setting it listed, and it is now applied.
 - `--unsupported-validation` (`APIGW_UNSUPPORTED_VALIDATION`): request validators are
   evaluated, so routes no longer answer `501` for every validator.
 - `--unsupported-resource-policy` (`APIGW_UNSUPPORTED_RESOURCE_POLICY`): resource policies are

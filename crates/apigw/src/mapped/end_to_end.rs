@@ -15,6 +15,7 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt as _;
 
+use crate::aws::AwsClients;
 use crate::cors::Cors;
 use crate::gateway_response::GatewayResponses;
 use crate::integration::StageVariables;
@@ -23,19 +24,19 @@ use crate::payload::PayloadSettings;
 use crate::router::tests::{STRICT, ctx};
 use crate::router::{RouteSummary, build};
 
-struct Reply {
-    status: StatusCode,
-    headers: HeaderMap,
-    body: String,
-    raw: Vec<u8>,
+pub(super) struct Reply {
+    pub(super) status: StatusCode,
+    pub(super) headers: HeaderMap,
+    pub(super) body: String,
+    pub(super) raw: Vec<u8>,
 }
 
 impl Reply {
-    fn json(&self) -> Value {
+    pub(super) fn json(&self) -> Value {
         serde_json::from_str(&self.body).unwrap_or(Value::Null)
     }
 
-    fn header(&self, name: &str) -> Option<&str> {
+    pub(super) fn header(&self, name: &str) -> Option<&str> {
         self.headers.get(name).and_then(|value| value.to_str().ok())
     }
 }
@@ -93,7 +94,32 @@ async fn backend() -> SocketAddr {
     addr
 }
 
-fn serve(doc: &Value, variables: &[(&str, &str)], binary: &[&str]) -> (Router, Vec<RouteSummary>) {
+pub(super) fn serve(
+    doc: &Value,
+    variables: &[(&str, &str)],
+    binary: &[&str],
+) -> (Router, Vec<RouteSummary>) {
+    serve_with(doc, variables, binary, None)
+}
+
+/// Like [`serve`], with the API's AWS clients replaced when `aws` is given.
+pub(super) fn serve_with(
+    doc: &Value,
+    variables: &[(&str, &str)],
+    binary: &[&str],
+    aws: Option<AwsClients>,
+) -> (Router, Vec<RouteSummary>) {
+    serve_kind(ApiKind::Rest, doc, variables, binary, aws)
+}
+
+/// Like [`serve_with`], for an API of either type.
+pub(super) fn serve_kind(
+    kind: ApiKind,
+    doc: &Value,
+    variables: &[(&str, &str)],
+    binary: &[&str],
+    aws: Option<AwsClients>,
+) -> (Router, Vec<RouteSummary>) {
     let variables: BTreeMap<String, String> = variables
         .iter()
         .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
@@ -102,22 +128,24 @@ fn serve(doc: &Value, variables: &[(&str, &str)], binary: &[&str]) -> (Router, V
         variables: variables.clone(),
         ..StageSettings::default()
     };
-    let model =
-        ApiModel::import(doc, ApiKind::Rest, stage, &IntegrationOverrides::default()).unwrap();
+    let model = ApiModel::import(doc, kind, stage, &IntegrationOverrides::default()).unwrap();
     let binary: Vec<String> = binary.iter().map(|t| (*t).to_owned()).collect();
     let mut api = ctx(
-        ApiKind::Rest,
+        kind,
         STRICT,
-        GatewayResponses::compile(ApiKind::Rest, &model.gateway_responses),
+        GatewayResponses::compile(kind, &model.gateway_responses),
         None::<Cors>,
     );
     let settings = Arc::get_mut(&mut api).unwrap();
     settings.payload = Arc::new(PayloadSettings::new(&binary, None));
     settings.stage_variables = Arc::new(StageVariables::new(variables));
+    if let Some(aws) = aws {
+        settings.aws = Arc::new(aws);
+    }
     build(&model, &api, &"".parse().unwrap())
 }
 
-async fn call(
+pub(super) async fn call(
     router: &Router,
     method: Method,
     uri: &str,
@@ -141,7 +169,7 @@ async fn call(
 }
 
 /// A one-route REST API with a method response for each of `statuses`.
-fn doc(path: &str, method: &str, integration: &Value, statuses: &[&str]) -> Value {
+pub(super) fn doc(path: &str, method: &str, integration: &Value, statuses: &[&str]) -> Value {
     let responses: BTreeMap<&str, Value> = statuses
         .iter()
         .map(|status| (*status, json!({"description": status})))

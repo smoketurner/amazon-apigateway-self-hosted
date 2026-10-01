@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::{Mutex, PoisonError};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use aws_sdk_lambda::config::{Credentials, ProvideCredentials as _, Region};
 use aws_sdk_lambda::error::DisplayErrorContext;
@@ -498,6 +498,12 @@ impl AwsClients {
         self
     }
 
+    /// The region the gateway's own configuration names, for calls that do not
+    /// say which region they are for.
+    pub(crate) fn default_region(&self) -> Option<String> {
+        self.sdk_config.region().map(ToString::to_string)
+    }
+
     pub(crate) fn service_endpoint(&self, service: &str) -> Option<&reqwest::Url> {
         self.service_endpoints.get(service)
     }
@@ -521,7 +527,7 @@ impl AwsClients {
             return Ok(cached.credentials.clone());
         }
         let credentials = match role {
-            Some(role) => self.assume(role).await?.1,
+            Some(role) => Box::pin(self.assume(role)).await?.1,
             None => self.gateway_credentials().await?,
         };
         cache.insert(
@@ -737,7 +743,7 @@ impl AwsClients {
             config = config.region(Region::new(region.to_owned()));
         }
         if let Some(role) = role {
-            config = config.credentials_provider(self.assume(role).await?.0);
+            config = config.credentials_provider(Box::pin(self.assume(role)).await?.0);
         }
         let client = aws_sdk_lambda::Client::from_conf(config.build());
         self.lambda
@@ -790,6 +796,8 @@ impl AwsClients {
 #[expect(clippy::unwrap_used, reason = "tests assert on known-good fixtures")]
 #[expect(clippy::indexing_slicing, reason = "tests index known fixtures")]
 mod tests {
+    use std::time::SystemTime;
+
     use axum::http::{HeaderMap, StatusCode};
     use axum::routing::post;
 
@@ -1060,7 +1068,7 @@ mod tests {
             .region(Region::new("us-east-1"))
             .endpoint_url(format!("http://{addr}"))
             .credentials_provider(aws_sdk_lambda::config::SharedCredentialsProvider::new(
-                aws_sdk_lambda::config::Credentials::new("id", "secret", None, None, "test"),
+                Credentials::new("id", "secret", None, None, "test"),
             ))
             .build();
         let aws = AwsClients::new(
@@ -1109,5 +1117,83 @@ mod tests {
         aws.lambda_client(Some("us-east-1"), None).await.unwrap();
         aws.lambda_client(Some("eu-west-1"), None).await.unwrap();
         assert_eq!(aws.lambda.lock().unwrap().len(), 2);
+    }
+
+    fn credentials_expiring(expiry: Option<jiff::Timestamp>) -> Credentials {
+        Credentials::new("id", "secret", None, expiry.map(SystemTime::from), "test")
+    }
+
+    fn after(now: jiff::Timestamp, seconds: i64) -> jiff::Timestamp {
+        now.checked_add(jiff::SignedDuration::from_secs(seconds))
+            .unwrap()
+    }
+
+    #[test]
+    fn credentials_are_reused_until_shortly_before_they_expire() {
+        let now = jiff::Timestamp::from_second(1_700_000_000).unwrap();
+        let cached = |expiry| CachedCredentials {
+            credentials: credentials_expiring(expiry),
+            loaded: now,
+        };
+        assert!(cached(Some(after(now, 600))).is_fresh(now));
+        assert!(!cached(Some(after(now, 240))).is_fresh(now));
+        assert!(!cached(Some(after(now, -1))).is_fresh(now));
+        assert!(cached(None).is_fresh(after(now, 299)));
+        assert!(!cached(None).is_fresh(after(now, 301)));
+    }
+
+    #[tokio::test]
+    async fn gateway_credentials_come_from_the_sdk_config_and_are_cached() {
+        let config = aws_config::SdkConfig::builder()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .credentials_provider(aws_sdk_lambda::config::SharedCredentialsProvider::new(
+                Credentials::new("id", "secret", None, None, "test"),
+            ))
+            .build();
+        let aws = AwsClients::new(
+            config,
+            CredentialsMode::Gateway,
+            LambdaEndpoints::default(),
+            reqwest::Client::new(),
+        );
+        let role = RoleArn("arn:aws:iam::1:role/r".to_owned());
+        let first = aws.credentials(Some(&role)).await.unwrap();
+        assert_eq!(first.access_key_id(), "id");
+        let second = aws.credentials(None).await.unwrap();
+        assert_eq!(second.secret_access_key(), "secret");
+        assert_eq!(aws.credentials.lock().await.len(), 1);
+        assert!(aws.role_status().is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_gateway_credentials_are_an_error() {
+        let aws = clients(LambdaEndpoints::default());
+        let credentials = aws.credentials(None).await;
+        assert!(matches!(credentials, Err(InvokeError::Credentials(_))));
+    }
+
+    #[test]
+    fn invocation_types_parse_exactly() {
+        assert_eq!("Event".parse(), Ok(InvocationType::Event));
+        assert_eq!(
+            " RequestResponse ".parse(),
+            Ok(InvocationType::RequestResponse)
+        );
+        assert_eq!("DryRun".parse(), Ok(InvocationType::DryRun));
+        assert!("event".parse::<InvocationType>().is_err());
+        assert_eq!(InvocationType::default().header_value(), "RequestResponse");
+    }
+
+    #[test]
+    fn service_endpoints_parse_a_service_and_an_http_url() {
+        let endpoint: ServiceEndpoint = "sqs=http://localstack:4566".parse().unwrap();
+        assert_eq!(endpoint.0, "sqs");
+        assert_eq!(endpoint.1.as_str(), "http://localstack:4566/");
+        let endpoints: ServiceEndpoints = std::iter::once((endpoint.0, endpoint.1)).collect();
+        assert!(endpoints.get("sqs").is_some());
+        assert!(endpoints.get("sns").is_none());
+        for bad in ["sqs", "=http://x", "sqs=not a url", "sqs=ftp://x"] {
+            assert!(bad.parse::<ServiceEndpoint>().is_err(), "{bad}");
+        }
     }
 }

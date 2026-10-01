@@ -183,7 +183,6 @@ mod tests {
             policy: RoutePolicy::None,
             api_key: RouteApiKey::NotRequired,
             validation: RouteValidation::None,
-            unenforced: Vec::new(),
             throttle: None,
             cache: None,
         }

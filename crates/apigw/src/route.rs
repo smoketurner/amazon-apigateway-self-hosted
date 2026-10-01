@@ -4,7 +4,7 @@
 use crate::authz::{Authorizers, ResourcePolicies, RouteAuthorizer, RoutePolicy};
 use crate::cache::RouteCache;
 use crate::integration::{Integration, StageVariables};
-use crate::model::{ApiKind, Feature, MethodMatch, Operation, Protections, RouteKey, RoutePath};
+use crate::model::{ApiKind, MethodMatch, Operation, Protections, RouteKey, RoutePath};
 use crate::throttle::{RouteThrottle, ThrottleSettings};
 use crate::usage::{ApiKeyRules, RouteApiKey};
 use crate::validation::{RequestValidators, RouteValidation};
@@ -21,7 +21,6 @@ pub(crate) struct Route {
     pub(crate) policy: RoutePolicy,
     pub(crate) api_key: RouteApiKey,
     pub(crate) validation: RouteValidation,
-    pub(crate) unenforced: Vec<Feature>,
     pub(crate) throttle: Option<RouteThrottle>,
     pub(crate) cache: Option<RouteCache>,
 }
@@ -68,7 +67,6 @@ impl Route {
             policy: access.policies.for_route(operation),
             api_key: access.api_keys.for_route(operation),
             validation: access.validators.for_route(operation),
-            unenforced: operation.unenforced(),
             throttle: throttling.for_route(&operation.method, &operation.path),
             cache: None,
         }

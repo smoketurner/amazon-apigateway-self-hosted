@@ -366,6 +366,43 @@ struct RequestOp {
     value: MappedValue,
 }
 
+/// The `requestParameters` of an AWS integration subtype: the service
+/// operation's parameter names (`QueueUrl`) and the values mapped to them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ServiceParameters(Vec<(String, MappedValue)>);
+
+impl ServiceParameters {
+    /// Mappings that read the backend response are skipped with a warning.
+    pub(crate) fn compile(parameters: &BTreeMap<String, String>) -> Self {
+        let mut compiled = Vec::new();
+        for (name, value) in parameters {
+            let value = MappedValue::parse(value);
+            if value.sources().any(Source::is_response) {
+                tracing::warn!(
+                    name,
+                    "service parameters cannot read the response; ignoring"
+                );
+                continue;
+            }
+            compiled.push((name.clone(), value));
+        }
+        Self(compiled)
+    }
+
+    /// The parameters that have a value for this request; one whose single
+    /// reference is absent is left out.
+    pub(crate) fn resolve(&self, ctx: &RequestContext) -> BTreeMap<String, String> {
+        let scope = Scope {
+            request: ctx,
+            response: None,
+        };
+        self.0
+            .iter()
+            .filter_map(|(name, value)| Some((name.clone(), value.resolve(&scope)?)))
+            .collect()
+    }
+}
+
 /// An integration's `requestParameters`, compiled.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct RequestMapping(Vec<RequestOp>);

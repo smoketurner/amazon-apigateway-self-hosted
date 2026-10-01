@@ -504,36 +504,10 @@ mod tests {
     use serde_json::json;
 
     use super::super::{
-        ConnectionType, ContentHandling, Feature, IntegrationType, ParameterLocation,
-        PassthroughBehavior, PayloadVersion, ResponseTransferMode,
+        ConnectionType, ContentHandling, IntegrationType, ParameterLocation, PassthroughBehavior,
+        PayloadVersion, ResponseTransferMode,
     };
     use super::*;
-
-    #[test]
-    fn content_handling_is_reported_only_where_it_is_not_applied() {
-        use super::super::Feature;
-
-        for (integration_type, reported) in [
-            ("http", false),
-            ("aws", true),
-            ("mock", false),
-            ("http_proxy", false),
-            ("aws_proxy", false),
-        ] {
-            let doc = json!({"paths": {"/x": {"get": {"x-amazon-apigateway-integration": {
-                "type": integration_type,
-                "uri": "http://example.com/",
-                "contentHandling": "CONVERT_TO_BINARY"
-            }}}}});
-            let model = import(&doc, ApiKind::Rest);
-            let operation = by_path(&model)["/x"];
-            assert_eq!(
-                operation.unenforced() == vec![Feature::ContentHandling],
-                reported,
-                "{integration_type}"
-            );
-        }
-    }
 
     fn import(doc: &Value, kind: ApiKind) -> ApiModel {
         ApiModel::import(
@@ -578,7 +552,6 @@ mod tests {
         );
         assert!(model.models.contains_key("Pet"));
         assert_eq!(model.authorizers.len(), 2);
-        assert_eq!(model.unenforced(), vec![Feature::ContentHandling]);
 
         let ops = by_path(&model);
         let pets = ops["/pets"];
@@ -686,7 +659,6 @@ mod tests {
         let cors = model.settings.cors.as_ref().unwrap();
         assert_eq!(cors.allow_origins, vec!["https://example.com".to_owned()]);
         assert_eq!(cors.max_age, Some(300));
-        assert!(model.unenforced().is_empty());
 
         let ops = by_path(&model);
         let orders = ops["/orders"];
@@ -699,7 +671,6 @@ mod tests {
             vec!["orders:write".to_owned()]
         );
         let items = ops["/items/{id}"];
-        assert!(items.unenforced().is_empty());
         assert!(
             items.protections.contains(Protection::Authorizer),
             "document-level security applies"

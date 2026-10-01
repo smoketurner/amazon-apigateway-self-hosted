@@ -23,6 +23,34 @@ pub(crate) struct BackendReply {
     pub(crate) status: u16,
     pub(crate) headers: HeaderMap,
     pub(crate) body: Bytes,
+    /// The text `selectionPattern`s are matched against: the status code, or a
+    /// Lambda function error's message. `None` when no pattern can match, so
+    /// that only the default integration response applies.
+    selector: Option<String>,
+}
+
+impl BackendReply {
+    /// A reply that integration responses are selected for by its status code.
+    pub(crate) fn new(status: u16, headers: HeaderMap, body: Bytes) -> Self {
+        Self {
+            status,
+            headers,
+            body,
+            selector: Some(status.to_string()),
+        }
+    }
+
+    /// A Lambda invocation's reply: integration responses are selected by the
+    /// `errorMessage` of a function error, and a successful invocation takes
+    /// the default response.
+    pub(crate) fn lambda(status: u16, body: Bytes, error_message: Option<String>) -> Self {
+        Self {
+            status,
+            headers: HeaderMap::new(),
+            body,
+            selector: error_message,
+        }
+    }
 }
 
 /// The response side of a non-proxy integration.
@@ -173,15 +201,15 @@ impl ResponseSide {
     }
 
     /// The first response whose pattern matches `text` (a status code or an
-    /// error message), else the default.
-    fn select(&self, text: &str) -> Option<&IntegrationResponse> {
-        let matched = self.patterns.iter().find(|response| match response.selection {
+    /// error message), else the default. Without text only the default applies.
+    fn select(&self, text: Option<&str>) -> Option<&IntegrationResponse> {
+        let matched = text.and_then(|text| self.patterns.iter().find(|response| match response.selection {
             Selection::Pattern(ref pattern) => pattern.matches(text).unwrap_or_else(|err| {
                 tracing::warn!(%err, pattern = pattern.as_str(), "selectionPattern could not be evaluated");
                 false
             }),
             Selection::Default | Selection::Invalid(_) => false,
-        });
+        }));
         matched.or(self.default.as_ref())
     }
 
@@ -192,7 +220,7 @@ impl ResponseSide {
         ctx: &RequestContext,
         reply: &BackendReply,
     ) -> Result<Response, GatewayError> {
-        let selected = self.select(&reply.status.to_string()).ok_or_else(|| {
+        let selected = self.select(reply.selector.as_deref()).ok_or_else(|| {
             tracing::warn!(
                 status = reply.status,
                 "no integration response matches and none is the default"

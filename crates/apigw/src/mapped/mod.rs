@@ -11,9 +11,13 @@
 //!
 //! <https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-integration-settings.html>
 
+mod aws;
+#[cfg(test)]
+mod aws_end_to_end;
 pub(crate) mod content;
 #[cfg(test)]
 mod end_to_end;
+mod lambda;
 mod request;
 mod response;
 mod vtl;
@@ -22,10 +26,13 @@ use axum::body::Bytes;
 use axum::response::Response;
 use serde_json::Value;
 
+pub(crate) use aws::AwsBackend;
+pub(crate) use lambda::LambdaBackend;
 pub(crate) use request::{BackendRequest, RequestSide};
 pub(crate) use response::{BackendReply, ResponseSide};
 pub(crate) use vtl::RequestOverrides;
 
+use crate::aws::RoleArn;
 use crate::gateway::{ApiContext, GatewayError};
 use crate::integration::HttpProxy;
 use crate::model::IntegrationSpec;
@@ -36,6 +43,10 @@ use crate::route::Route;
 #[derive(Debug, Clone)]
 pub(crate) enum Backend {
     Http(Box<HttpProxy>),
+    /// An AWS service called with `SigV4`.
+    Aws(Box<AwsBackend>),
+    /// A Lambda function invoked with the rendered template as its event.
+    Lambda(Box<LambdaBackend>),
     /// No backend: the rendered request template's `statusCode` picks the
     /// integration response.
     Mock,
@@ -61,6 +72,7 @@ impl MappedIntegration {
     pub(crate) fn kind(&self) -> &'static str {
         match self.backend {
             Backend::Http(_) => "HTTP",
+            Backend::Aws(_) | Backend::Lambda(_) => "AWS",
             Backend::Mock => "MOCK",
         }
     }
@@ -69,7 +81,18 @@ impl MappedIntegration {
     pub(crate) fn target(&self) -> Option<String> {
         match self.backend {
             Backend::Http(ref http) => Some(http.uri.clone()),
+            Backend::Aws(ref aws) => Some(aws.uri_text.clone()),
+            Backend::Lambda(ref lambda) => Some(lambda.function.to_string()),
             Backend::Mock => None,
+        }
+    }
+
+    /// The role an AWS integration runs as, for `/routes`.
+    pub(crate) fn role(&self) -> Option<&RoleArn> {
+        match self.backend {
+            Backend::Aws(ref aws) => aws.role.as_ref(),
+            Backend::Lambda(ref lambda) => lambda.role.as_ref(),
+            Backend::Http(_) | Backend::Mock => None,
         }
     }
 
@@ -89,6 +112,8 @@ impl MappedIntegration {
         let request = self.request.prepare(ctx)?;
         let reply = match self.backend {
             Backend::Http(ref http) => http.exchange(&api.http, route, ctx, request).await?,
+            Backend::Aws(ref aws) => aws.exchange(api, ctx, request).await?,
+            Backend::Lambda(ref lambda) => lambda.exchange(api, ctx, request).await?,
             Backend::Mock => mock_reply(&request),
         };
         self.response.finish(ctx, &reply)
@@ -107,11 +132,7 @@ fn mock_reply(request: &BackendRequest) -> BackendReply {
             Value::Null | Value::Bool(_) | Value::Array(_) | Value::Object(_) => None,
         })
         .unwrap_or(200);
-    BackendReply {
-        status,
-        headers: axum::http::HeaderMap::new(),
-        body: Bytes::new(),
-    }
+    BackendReply::new(status, axum::http::HeaderMap::new(), Bytes::new())
 }
 
 #[cfg(test)]

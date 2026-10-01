@@ -7,12 +7,16 @@ use std::time::Duration;
 use axum::http::{HeaderValue, Method};
 
 use crate::aws::{FunctionArn, IntegrationCredentials, RoleArn};
+use crate::aws_service::ServiceUri;
+use crate::aws_subtype::SubtypeIntegration;
 use crate::integration_tls::TlsClient;
-use crate::mapped::{Backend, MappedIntegration};
+use crate::mapped::{AwsBackend, Backend, LambdaBackend, MappedIntegration};
+use crate::mapping::ServiceParameters;
 use crate::mapping::{RequestMapping, ResponseMapping};
 use crate::model::{
     ApiKind, ConnectionType, IntegrationSpec, IntegrationType, PayloadVersion, ResponseTransferMode,
 };
+use crate::request_parameters::RequestParameters;
 use crate::vpc_link::VpcLinks;
 
 /// The longest a streamed response may take, and the default timeout of
@@ -104,6 +108,8 @@ pub(crate) enum Integration {
     HttpProxy(HttpProxy),
     /// A non-proxy `HTTP` or `MOCK` integration that runs mapping templates.
     Mapped(Box<MappedIntegration>),
+    /// An HTTP API integration subtype that calls an AWS service.
+    AwsSubtype(Box<SubtypeIntegration>),
     Lambda(LambdaProxy),
     Unsupported {
         reason: String,
@@ -115,7 +121,7 @@ impl Integration {
         match self {
             Self::HttpProxy(_) => "HTTP_PROXY",
             Self::Mapped(mapped) => mapped.kind(),
-            Self::Lambda(_) => "AWS_PROXY",
+            Self::AwsSubtype(_) | Self::Lambda(_) => "AWS_PROXY",
             Self::Unsupported { .. } => "UNSUPPORTED",
         }
     }
@@ -197,10 +203,9 @@ impl Integration {
                 spec,
                 Backend::Mock,
             )))),
-            IntegrationType::AwsProxy if spec.subtype.is_some() => Err(format!(
-                "{} integrations are not supported yet",
-                spec.subtype.as_deref().unwrap_or_default()
-            )),
+            IntegrationType::AwsProxy if spec.subtype.is_some() => {
+                Self::compile_subtype(spec, kind, timeout)
+            }
             IntegrationType::AwsProxy => {
                 let target = uri
                     .as_deref()
@@ -213,13 +218,7 @@ impl Integration {
                     });
                 }
                 let function = target.function.parse::<FunctionArn>()?;
-                let credentials = match spec.credentials.as_deref().map(str::parse).transpose()? {
-                    None => None,
-                    Some(IntegrationCredentials::Role(role)) => Some(role),
-                    Some(IntegrationCredentials::Caller) => {
-                        return Err("caller credential passthrough (arn:aws:iam::*:user/*) needs IAM-authenticated callers, which cannot be verified outside AWS".to_owned());
-                    }
-                };
+                let credentials = integration_role(spec)?;
                 let payload = spec.payload_format_version.unwrap_or(match kind {
                     ApiKind::Rest => PayloadVersion::V1,
                     ApiKind::Http => PayloadVersion::V2,
@@ -232,10 +231,51 @@ impl Integration {
                     transfer,
                 }))
             }
-            IntegrationType::Aws => {
-                Err("AWS service integrations are not supported yet".to_owned())
-            }
+            IntegrationType::Aws => Self::compile_aws(spec, uri, timeout),
         }
+    }
+
+    /// An HTTP API integration subtype, which calls an AWS service.
+    fn compile_subtype(
+        spec: &IntegrationSpec,
+        kind: ApiKind,
+        timeout: Duration,
+    ) -> Result<Self, String> {
+        if kind != ApiKind::Http {
+            return Err("integration subtypes belong to HTTP APIs".to_owned());
+        }
+        let subtype = spec.subtype.as_deref().unwrap_or_default().parse()?;
+        Ok(Self::AwsSubtype(Box::new(SubtypeIntegration::new(
+            subtype,
+            ServiceParameters::compile(&spec.request_parameters),
+            integration_role(spec)?,
+            timeout,
+        ))))
+    }
+
+    /// A REST `AWS` integration: a non-proxy Lambda function or an AWS service.
+    fn compile_aws(
+        spec: &IntegrationSpec,
+        uri: Option<String>,
+        timeout: Duration,
+    ) -> Result<Self, String> {
+        let uri = uri.ok_or("AWS integration has no uri")?;
+        let role = integration_role(spec)?;
+        let backend = if uri.contains(":lambda:") {
+            let target = uri.parse::<LambdaTarget>()?;
+            let function = target.function.parse::<FunctionArn>()?;
+            Backend::Lambda(Box::new(LambdaBackend::compile(
+                spec, function, role, timeout,
+            )))
+        } else {
+            let service = uri.parse::<ServiceUri>()?;
+            Backend::Aws(Box::new(AwsBackend::compile(
+                spec, uri, service, role, timeout,
+            )?))
+        };
+        Ok(Self::Mapped(Box::new(MappedIntegration::compile(
+            spec, backend,
+        ))))
     }
 
     fn unsupported(reason: &str) -> Self {
@@ -245,15 +285,22 @@ impl Integration {
     }
 }
 
+/// The role an integration runs as, from its `credentials`.
+fn integration_role(spec: &IntegrationSpec) -> Result<Option<RoleArn>, String> {
+    match spec.credentials.as_deref().map(str::parse).transpose()? {
+        None => Ok(None),
+        Some(IntegrationCredentials::Role(role)) => Ok(Some(role)),
+        Some(IntegrationCredentials::Caller) => Err("caller credential passthrough (arn:aws:iam::*:user/*) needs IAM-authenticated callers, which cannot be verified outside AWS".to_owned()),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct HttpProxy {
     /// `None` forwards the client's method (`ANY` in API Gateway).
     pub(crate) method: Option<Method>,
-    /// Target URI; `{name}` placeholders are filled from `path_params`.
+    /// Target URI; `{name}` placeholders are filled from the path parameters.
     pub(crate) uri: String,
-    pub(crate) path_params: BTreeMap<String, ParamSource>,
-    pub(crate) query_params: BTreeMap<String, ParamSource>,
-    pub(crate) headers: BTreeMap<String, ParamSource>,
+    pub(crate) parameters: RequestParameters,
     /// HTTP API `requestParameters` (`append:header.x`, `overwrite:path`, ...).
     pub(crate) request_mapping: RequestMapping,
     /// HTTP API `responseParameters`, by backend status code.
@@ -336,43 +383,10 @@ impl HttpProxy {
                     .map_err(|_| format!("invalid integration httpMethod {m:?}"))?,
             ),
         };
-        let mut path_params = BTreeMap::new();
-        let mut query_params = BTreeMap::new();
-        let mut headers = BTreeMap::new();
-        for (target, source) in &spec.request_parameters {
-            if kind == ApiKind::Http && target.contains(':') {
-                continue;
-            }
-            let Some(source) = ParamSource::parse(source) else {
-                tracing::warn!(
-                    target,
-                    source,
-                    "ignoring unsupported request parameter mapping"
-                );
-                continue;
-            };
-            if let Some(name) = target.strip_prefix("integration.request.path.") {
-                path_params.insert(name.to_owned(), source);
-            } else if let Some(name) = target
-                .strip_prefix("integration.request.querystring.")
-                .or_else(|| target.strip_prefix("integration.request.multivaluequerystring."))
-            {
-                query_params.insert(name.to_owned(), source);
-            } else if let Some(name) = target
-                .strip_prefix("integration.request.header.")
-                .or_else(|| target.strip_prefix("integration.request.multivalueheader."))
-            {
-                headers.insert(name.to_owned(), source);
-            } else {
-                tracing::warn!(target, "ignoring unsupported request parameter mapping");
-            }
-        }
         Ok(Self {
             method,
             uri,
-            path_params,
-            query_params,
-            headers,
+            parameters: RequestParameters::compile(&spec.request_parameters, kind),
             request_mapping: RequestMapping::compile(&spec.request_parameters),
             response_mapping: ResponseMapping::compile(&spec.response_parameters),
             timeout,
@@ -539,18 +553,18 @@ mod tests {
         assert_eq!(proxy.method, Some(Method::GET));
         assert_eq!(proxy.timeout, Duration::from_millis(5000));
         assert_eq!(
-            proxy.path_params.get("id"),
+            proxy.parameters.path.get("id"),
             Some(&ParamSource::Path("petId".to_owned()))
         );
         assert_eq!(
-            proxy.headers.get("x-api"),
+            proxy.parameters.headers.get("x-api"),
             Some(&ParamSource::Literal("static".to_owned()))
         );
         assert_eq!(
-            proxy.query_params.get("q"),
+            proxy.parameters.query.get("q"),
             Some(&ParamSource::Query("search".to_owned()))
         );
-        assert!(!proxy.headers.contains_key("bad"));
+        assert!(!proxy.parameters.headers.contains_key("bad"));
     }
 
     #[test]
@@ -616,11 +630,11 @@ mod tests {
             panic!("expected HTTP proxy");
         };
         assert_eq!(
-            proxy.query_params.get("tag"),
+            proxy.parameters.query.get("tag"),
             Some(&ParamSource::MultiQuery("tag".to_owned()))
         );
         assert_eq!(
-            proxy.headers.get("x-all"),
+            proxy.parameters.headers.get("x-all"),
             Some(&ParamSource::MultiHeader("x-all".to_owned()))
         );
     }

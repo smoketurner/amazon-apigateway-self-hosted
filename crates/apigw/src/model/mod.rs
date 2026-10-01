@@ -2,10 +2,7 @@
 //! from API Gateway, whether or not it is enforced yet.
 //!
 //! [`ApiModel::import`] builds it from an `OpenAPI` export; the runtime route
-//! table is compiled from it in [`crate::route`]. Anything imported but not yet
-//! enforced is reported through [`ApiModel::unenforced`] and
-//! [`Operation::unenforced`] so `/routes` shows exactly where behavior differs
-//! from API Gateway.
+//! table is compiled from it in [`crate::route`].
 
 mod import;
 mod stage;
@@ -339,20 +336,6 @@ pub(crate) struct IntegrationSpec {
     pub(crate) method_responses: BTreeSet<u16>,
 }
 
-impl IntegrationSpec {
-    fn unenforced(&self) -> Vec<Feature> {
-        let mut features = Vec::new();
-        // Proxy integrations never convert content, so `contentHandling` on them
-        // is as inert in API Gateway as it is here. `HTTP` and `MOCK` integrations
-        // apply it; `AWS` integrations do not yet.
-        let converts = matches!(self.integration_type, IntegrationType::Aws);
-        if self.content_handling.is_some() && converts {
-            features.push(Feature::ContentHandling);
-        }
-        features
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TlsConfig {
@@ -509,16 +492,6 @@ pub(crate) struct Operation {
     pub(crate) authorizer: Option<AuthorizerRef>,
 }
 
-impl Operation {
-    /// Imported settings on this operation that the gateway does not enforce yet.
-    pub(crate) fn unenforced(&self) -> Vec<Feature> {
-        self.integration
-            .as_ref()
-            .map(IntegrationSpec::unenforced)
-            .unwrap_or_default()
-    }
-}
-
 /// Everything the gateway knows about one deployed API stage.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct ApiModel {
@@ -529,35 +502,6 @@ pub(crate) struct ApiModel {
     pub(crate) gateway_responses: BTreeMap<String, GatewayResponseSpec>,
     pub(crate) models: BTreeMap<String, Value>,
     pub(crate) stage: StageSettings,
-}
-
-impl ApiModel {
-    /// API- and stage-level settings imported but not enforced yet.
-    pub(crate) fn unenforced(&self) -> Vec<Feature> {
-        let features: BTreeSet<Feature> = self
-            .operations
-            .iter()
-            .flat_map(Operation::unenforced)
-            .collect();
-        features.into_iter().collect()
-    }
-}
-
-/// An API Gateway feature that was imported but is not enforced yet. Each one is
-/// removed from this list by the change that implements it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum Feature {
-    ContentHandling,
-}
-
-impl fmt::Display for Feature {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
-            Self::ContentHandling => "content handling",
-        };
-        f.write_str(name)
-    }
 }
 
 /// Local replacements for integrations, keyed by route key.
