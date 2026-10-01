@@ -1,6 +1,8 @@
 # Architecture
 
-One crate, `crates/apigw`, building one binary.
+`crates/apigw` builds the binary. `crates/apigw-regex` is a pure library with no I/O: it translates
+Java regex syntax to `fancy-regex` and provides Java's matching, replacement, and split semantics
+(see its crate docs for the known differences from Java).
 
 | Module | Responsibility |
 |---|---|

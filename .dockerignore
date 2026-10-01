@@ -1,5 +1,4 @@
 *
 !Cargo.toml
 !Cargo.lock
-!crates/apigw/Cargo.toml
-!crates/apigw/src/
+!crates/
