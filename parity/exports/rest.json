@@ -223,14 +223,72 @@
       },
       "/validated/{id}": {
         "post": {
+          "x-amazon-apigateway-request-validator": "all",
+          "parameters": [
+            {
+              "name": "id",
+              "in": "path",
+              "required": true,
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "page",
+              "in": "query",
+              "required": true,
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "x-required",
+              "in": "header",
+              "required": true,
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "required": true,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Item"
+                }
+              }
+            }
+          },
           "x-amazon-apigateway-integration": {
             "type": "aws_proxy",
             "httpMethod": "POST",
             "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations",
             "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
             "passthroughBehavior": "when_no_match"
-          },
-          "x-amazon-apigateway-request-validator": "all"
+          }
+        }
+      },
+      "/validated-params": {
+        "get": {
+          "x-amazon-apigateway-request-validator": "params-only",
+          "parameters": [
+            {
+              "name": "page",
+              "in": "query",
+              "required": true,
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "x-amazon-apigateway-integration": {
+            "type": "aws_proxy",
+            "httpMethod": "POST",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations",
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "passthroughBehavior": "when_no_match"
+          }
         }
       }
     },
@@ -279,12 +337,54 @@
             ]
           }
         }
+      },
+      "schemas": {
+        "Item": {
+          "type": "object",
+          "required": [
+            "name"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "count": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
       }
     },
     "x-amazon-apigateway-request-validators": {
       "all": {
         "validateRequestBody": true,
         "validateRequestParameters": true
+      },
+      "params-only": {
+        "validateRequestBody": false,
+        "validateRequestParameters": true
+      }
+    },
+    "x-amazon-apigateway-gateway-responses": {
+      "BAD_REQUEST_BODY": {
+        "statusCode": "422",
+        "responseParameters": {
+          "gatewayresponse.header.x-reference-gateway-response": "'bad-request-body'"
+        },
+        "responseTemplates": {
+          "application/json": "{\"message\":$context.error.validationErrorString,\"type\":\"$context.error.responseType\"}"
+        }
+      },
+      "BAD_REQUEST_PARAMETERS": {
+        "responseParameters": {
+          "gatewayresponse.header.x-reference-gateway-response": "'bad-request-parameters'"
+        },
+        "responseTemplates": {
+          "application/json": "{\"message\":$context.error.messageString,\"type\":\"$context.error.responseType\"}"
+        }
       }
     }
   }

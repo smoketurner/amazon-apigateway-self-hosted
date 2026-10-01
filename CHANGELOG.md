@@ -7,6 +7,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Request validators are evaluated for REST APIs. Required query string and header parameters
+  (present and not blank) answer `400` `BAD_REQUEST_PARAMETERS` with `Missing required request
+  parameters: [...]`, and request bodies are validated against the method's JSON Schema draft 4 model
+  for the request's content type (`$default` otherwise), resolving `$ref`s against the API's models,
+  answering `400` `BAD_REQUEST_BODY`. API-customized gateway responses apply, and
+  `$context.error.validationErrorString` is available to their templates. A route whose model
+  cannot be compiled answers `501`. Adds the `jsonschema` dependency without its HTTP and file
+  reference resolvers.
 - `--valkey-url` (and `--valkey-ca-cert`) keep throttle buckets, usage-plan quotas, and cached
   authorizer results in a Valkey or Redis-compatible server shared by every replica, so limits are
   exact across the fleet and `--replicas` no longer divides them. TLS (`rediss://`) is recommended and
@@ -201,6 +209,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Removed
 
+- `--unsupported-validation` (`APIGW_UNSUPPORTED_VALIDATION`): request validators are
+  evaluated, so routes no longer answer `501` for every validator.
 - `--unsupported-resource-policy` (`APIGW_UNSUPPORTED_RESOURCE_POLICY`): resource policies are
   evaluated, so routes no longer answer `403` for every policy. A policy that cannot be read still
   refuses its routes.

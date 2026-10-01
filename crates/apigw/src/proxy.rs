@@ -434,6 +434,7 @@ mod tests {
     use crate::pipeline::context::QueryString;
     use crate::pipeline::context::tests::request;
     use crate::usage::RouteApiKey;
+    use crate::validation::RouteValidation;
 
     fn incoming(params: &[(&str, &str)], query: Option<&str>) -> RequestContext {
         let mut ctx = request(ApiKind::Rest);
@@ -475,6 +476,7 @@ mod tests {
             authorizer: RouteAuthorizer::None,
             policy: RoutePolicy::None,
             api_key: RouteApiKey::NotRequired,
+            validation: RouteValidation::None,
             unenforced: Vec::new(),
             throttle: None,
             cache: None,

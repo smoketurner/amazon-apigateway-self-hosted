@@ -24,9 +24,9 @@ use crate::canary::{CanaryRelease, CanaryStructure, CanarySummary, Release, Traf
 use crate::config::Config;
 use crate::cors::Cors;
 use crate::domain::{DomainRegistry, DomainSupervisor};
-use crate::gateway::{ApiContext, Enforcement};
 #[cfg(test)]
-use crate::gateway::{AuthorizationMode, Unsupported};
+use crate::gateway::AuthorizationMode;
+use crate::gateway::{ApiContext, Enforcement};
 use crate::gateway_response::GatewayResponses;
 use crate::integration::StageVariables;
 use crate::integration_tls;
@@ -74,7 +74,6 @@ impl Builder {
             base_path: BasePath::default(),
             enforcement: Enforcement {
                 authorization: AuthorizationMode::Enforce,
-                request_validation: Unsupported::Reject,
             },
             stage_variable_overrides: BTreeMap::new(),
             overrides_path: None,
@@ -762,7 +761,7 @@ mod tests {
 
     use super::*;
     use crate::aws::{CredentialsMode, LambdaEndpoints};
-    use crate::gateway::{AuthorizationMode, Unsupported};
+    use crate::gateway::AuthorizationMode;
     use crate::model::{ApiKind, CanarySettings, DeploymentStamp, StageSettings};
     use crate::source::CanarySnapshot;
 
@@ -778,7 +777,6 @@ mod tests {
             base_path: BasePath::default(),
             enforcement: Enforcement {
                 authorization: AuthorizationMode::Enforce,
-                request_validation: Unsupported::Reject,
             },
             stage_variable_overrides: BTreeMap::from([(
                 "host".to_owned(),

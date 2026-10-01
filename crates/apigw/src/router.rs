@@ -29,6 +29,7 @@ use crate::pipeline::Pipeline;
 use crate::route::{AccessRules, Route};
 use crate::throttle::ThrottleSettings;
 use crate::usage::ApiKeyRules;
+use crate::validation::RequestValidators;
 
 /// A stage prefix such as `/prod` that every route is served under, as on an
 /// `execute-api` endpoint. Empty serves routes at the root, as on a custom domain.
@@ -244,10 +245,12 @@ fn compile_routes(model: &ApiModel, ctx: &ApiContext) -> Vec<Route> {
     let authorizers = Authorizers::compile(model, &ctx.stage_variables);
     let policies = ResourcePolicies::compile(model, &ctx.api_id);
     let api_keys = ApiKeyRules::compile(model, ctx.usage.as_deref());
+    let validators = RequestValidators::compile(model);
     let access = AccessRules {
         authorizers: &authorizers,
         policies: &policies,
         api_keys: &api_keys,
+        validators: &validators,
     };
     let throttling = ThrottleSettings::new(
         &ctx.api_id,
@@ -563,7 +566,7 @@ mod tests {
     use crate::aws::{CredentialsMode, LambdaEndpoints};
     use crate::cache::CacheScope;
     use crate::cors::Cors;
-    use crate::gateway::{AuthorizationMode, Unsupported};
+    use crate::gateway::AuthorizationMode;
     use crate::gateway_response::GatewayResponses;
     use crate::model::{IntegrationOverrides, Protection, StageSettings};
     use crate::model::{MethodSettings, SettingsScope};
@@ -575,7 +578,6 @@ mod tests {
 
     const STRICT: Enforcement = Enforcement {
         authorization: AuthorizationMode::Enforce,
-        request_validation: Unsupported::Reject,
     };
 
     fn test_state() -> Arc<StateBackend> {
@@ -640,7 +642,6 @@ mod tests {
             kind,
             Enforcement {
                 authorization: mode,
-                ..STRICT
             },
             base,
         )
@@ -681,6 +682,7 @@ mod tests {
             }
             op
         };
+        let missing_model = json!({"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Missing"}}}});
         json!({
             "components": {"securitySchemes": {
                 "sigv4": {"type": "apiKey", "name": "Authorization", "in": "header", "x-amazon-apigateway-authtype": "awsSigv4"},
@@ -691,8 +693,8 @@ mod tests {
                 "/open": {"get": op(json!({}))},
                 "/iam": {"get": op(json!({"security": [{"sigv4": []}]}))},
                 "/key": {"get": op(json!({"security": [{"api_key": []}]}))},
-                "/validated": {"get": op(json!({"x-amazon-apigateway-request-validator": "all"}))},
-                "/key-and-validated": {"get": op(json!({"security": [{"api_key": []}], "x-amazon-apigateway-request-validator": "all"}))}
+                "/validated": {"get": op(json!({"x-amazon-apigateway-request-validator": "all", "requestBody": missing_model}))},
+                "/key-and-validated": {"get": op(json!({"security": [{"api_key": []}], "x-amazon-apigateway-request-validator": "all", "requestBody": missing_model}))}
             }
         })
     }
@@ -1032,7 +1034,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_protections_fail_closed_with_api_gateway_responses() {
+    async fn protections_that_cannot_be_evaluated_fail_closed_with_api_gateway_responses() {
         let (rest, summaries) = router_with(&protected_doc(), ApiKind::Rest, STRICT, "");
         assert_eq!(call(&rest, Method::GET, "/open").await.0, StatusCode::OK);
         assert_eq!(
@@ -1075,20 +1077,127 @@ mod tests {
 
         let relaxed = Enforcement {
             authorization: AuthorizationMode::Skip,
-            request_validation: Unsupported::Ignore,
         };
         let (rest, summaries) = router_with(&protected_doc(), ApiKind::Rest, relaxed, "");
-        for path in ["/iam", "/key", "/validated", "/key-and-validated"] {
+        for path in ["/iam", "/key"] {
             assert_eq!(
                 call(&rest, Method::GET, path).await.0,
                 StatusCode::OK,
                 "{path}"
             );
         }
+        for path in ["/validated", "/key-and-validated"] {
+            assert_eq!(
+                call(&rest, Method::GET, path).await.0,
+                StatusCode::NOT_IMPLEMENTED,
+                "{path}: request validation is not an authorization check and is never skipped"
+            );
+        }
+        let problems = |route: &str| {
+            summaries
+                .iter()
+                .find(|s| s.route_key == route)
+                .map(|s| s.problems.len())
+        };
+        assert_eq!(problems("GET /iam"), Some(0));
+        assert_eq!(problems("GET /key"), Some(0));
+        assert_eq!(problems("GET /validated"), Some(1));
+    }
+
+    fn validated_doc() -> Value {
+        json!({
+            "components": {"schemas": {
+                "Pet": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}
+            }},
+            "x-amazon-apigateway-request-validators": {"all": {"validateRequestBody": true, "validateRequestParameters": true}},
+            "x-amazon-apigateway-gateway-responses": {
+                "BAD_REQUEST_BODY": {
+                    "statusCode": "422",
+                    "responseTemplates": {"application/json": "{\"message\": $context.error.messageString, \"detail\": \"$context.error.validationErrorString\"}"}
+                }
+            },
+            "paths": {"/pets": {"post": {
+                "x-amazon-apigateway-request-validator": "all",
+                "parameters": [{"name": "x-tenant", "in": "header", "required": true}],
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Pet"}}}},
+                "x-amazon-apigateway-integration": mock(201)
+            }}}
+        })
+    }
+
+    async fn post_json(router: &Router, headers: &[(&str, &str)], body: &str) -> Reply {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri("/pets")
+            .header("content-type", "application/json");
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let response = router
+            .clone()
+            .oneshot(builder.body(Body::from(body.to_owned())).unwrap())
+            .await
+            .unwrap();
+        let (parts, body) = response.into_parts();
+        let body = axum::body::to_bytes(body, 1 << 20).await.unwrap();
+        Reply {
+            status: parts.status,
+            headers: parts.headers,
+            body: String::from_utf8(body.to_vec()).unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn request_validators_answer_with_the_default_bad_request_responses() {
+        let mut doc = validated_doc();
+        if let Some(doc) = doc.as_object_mut() {
+            doc.remove("x-amazon-apigateway-gateway-responses");
+        }
+        let (rest, summaries) = router_with(&doc, ApiKind::Rest, STRICT, "");
         assert!(
             summaries.iter().all(|s| s.problems.is_empty()),
             "{summaries:?}"
         );
+        let tenant = [("x-tenant", "acme")];
+
+        let ok = post_json(&rest, &tenant, r#"{"name": "Rex"}"#).await;
+        assert_eq!(ok.status, StatusCode::CREATED);
+
+        let bad_body = post_json(&rest, &tenant, r#"{"age": 3}"#).await;
+        assert_eq!(bad_body.status, StatusCode::BAD_REQUEST);
+        assert_eq!(bad_body.body, r#"{"message":"Invalid request body"}"#);
+        assert_eq!(
+            bad_body.headers.get("x-amzn-errortype").unwrap(),
+            "BadRequestException"
+        );
+
+        let no_header = post_json(&rest, &[], r#"{"name": "Rex"}"#).await;
+        assert_eq!(no_header.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            no_header.body,
+            r#"{"message":"Missing required request parameters: [x-tenant]"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn validation_failures_use_the_apis_customized_gateway_responses() {
+        let (rest, _) = router_with(&validated_doc(), ApiKind::Rest, STRICT, "");
+        let reply = post_json(&rest, &[("x-tenant", "acme")], r#"{"age": 3}"#).await;
+        assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            reply.body,
+            r#"{"message": "Invalid request body", "detail": "["name" is a required property]"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn skipping_authorization_does_not_skip_request_validation() {
+        let skip = Enforcement {
+            authorization: AuthorizationMode::Skip,
+        };
+        let (rest, _) = router_with(&validated_doc(), ApiKind::Rest, skip, "");
+        let reply = post_json(&rest, &[("x-tenant", "acme")], "not json").await;
+        assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
@@ -1104,7 +1213,6 @@ mod tests {
         }
         let skip_auth = Enforcement {
             authorization: AuthorizationMode::Skip,
-            ..STRICT
         };
         let (rest, summaries) = router_with(&doc, ApiKind::Rest, skip_auth, "");
         let (status, body) = call(&rest, Method::GET, "/open").await;

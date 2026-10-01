@@ -20,7 +20,7 @@ use tower::ServiceExt as _;
 use crate::authz::KeyStore;
 use crate::aws::{AwsClients, CredentialsMode, LambdaEndpoints};
 use crate::cache::CacheScope;
-use crate::gateway::{ApiContext, AuthorizationMode, Enforcement, Unsupported};
+use crate::gateway::{ApiContext, AuthorizationMode, Enforcement};
 use crate::gateway_response::GatewayResponses;
 use crate::identity::TrustedProxies;
 use crate::integration::StageVariables;
@@ -251,7 +251,6 @@ impl Harness {
             )),
             enforcement: Enforcement {
                 authorization: mode,
-                request_validation: Unsupported::Reject,
             },
             responses: GatewayResponses::default(),
             cors: None,

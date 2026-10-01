@@ -113,6 +113,9 @@ impl<'a> Pipeline<'a> {
         if let Err(error) = self.decode_request(ctx) {
             return self.fail(ctx, &error.failure(self.api.kind));
         }
+        if let Err(failure) = self.route.validation.check(ctx).await {
+            return self.fail(ctx, &failure);
+        }
         let plan = match self.route.cache.as_ref().map(|cache| cache.plan(ctx)) {
             Some(Ok(plan)) => plan,
             Some(Err(failure)) => return self.fail(ctx, &failure),

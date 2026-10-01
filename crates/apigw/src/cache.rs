@@ -599,7 +599,7 @@ mod tests {
     use super::*;
     use crate::authz::KeyStore;
     use crate::aws::{AwsClients, CredentialsMode, LambdaEndpoints};
-    use crate::gateway::{ApiContext, AuthorizationMode, Enforcement, Unsupported};
+    use crate::gateway::{ApiContext, AuthorizationMode, Enforcement};
     use crate::gateway_response::GatewayResponses;
     use crate::integration::StageVariables;
     use crate::model::{ApiKind, ApiModel, IntegrationOverrides, SettingsScope};
@@ -1029,7 +1029,6 @@ mod tests {
             stage_variables: Arc::new(StageVariables::default()),
             enforcement: Enforcement {
                 authorization: AuthorizationMode::Enforce,
-                request_validation: Unsupported::Reject,
             },
             responses: GatewayResponses::default(),
             cors: None,
