@@ -213,6 +213,10 @@ impl Harness {
                 request_validation: Unsupported::Reject,
             },
             responses: GatewayResponses::default(),
+            state: Arc::new(crate::state::StateBackend::InMemory(
+                crate::state::InMemory::new(crate::state::InMemoryLimits::default()),
+            )),
+            replicas: std::num::NonZeroU32::MIN,
             observer: crate::observability::StageObserver::disabled(),
             http: reqwest::Client::new(),
             aws,

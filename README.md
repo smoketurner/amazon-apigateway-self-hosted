@@ -75,11 +75,14 @@ Every flag has an environment variable (`apigw --help` lists them). The main one
 | `--unsupported-validation` | `APIGW_UNSUPPORTED_VALIDATION` | `reject` | `ignore` forwards requests without running request validators |
 | `--trusted-proxies` | `APIGW_TRUSTED_PROXIES` | none | Comma-separated CIDRs or addresses of proxies whose `X-Forwarded-For` and `X-Forwarded-Client-Cert` are believed ([Client IP](docs/deployment.md#client-ip)) |
 | `--trusted-proxy-hops` | `APIGW_TRUSTED_PROXY_HOPS` | `1` | Proxies between the client and `apigw`, counting the one that connects to it |
+| `--replicas` | `APIGW_REPLICAS` | `1` | Gateway replicas serving the API; throttle rates and bursts are divided by this because each replica keeps its own buckets ([parity](docs/parity.md#throttling-caching-and-releases)) |
 | `--proxy-protocol` | `APIGW_PROXY_PROTOCOL` | off | Require a PROXY protocol v2 header on `--listen`, from `--trusted-proxies` only |
 | `--access-logs` | `APIGW_ACCESS_LOGS` | `aws` | `aws` writes to the stage's access log destination, `stdout` writes lines to standard output, `off` writes none ([Observability](#observability)) |
 | `--execution-logs` | `APIGW_EXECUTION_LOGS` | `aws` | Same choices, for `loggingLevel`/`dataTraceEnabled` execution logs |
 | `--metrics-log-group` | `APIGW_METRICS_LOG_GROUP` | none | CloudWatch Logs log group (must exist) that receives metrics as embedded metric format events; metrics are off when unset |
 | `--metrics-namespace` | `APIGW_METRICS_NAMESPACE` | `ApiGatewaySelfHosted` | CloudWatch namespace for the metrics (`AWS/` is reserved) |
+| `--tracing` | `APIGW_TRACING` | `aws` | `aws` sends X-Ray segments for stages with tracing enabled and propagates trace headers; `off` does neither |
+| `--xray-sampling-percent` | `APIGW_XRAY_SAMPLING_PERCENT` | `5` | Percentage of requests traced after the first request each second, when the caller made no sampling decision |
 | `--log-stream` | `APIGW_LOG_STREAM` | `{HOSTNAME}/{start time}/{suffix}` | Log stream this process writes to in every log group |
 
 Logs are JSON on stdout by default (`--log-format text` for humans); filter with `RUST_LOG`.
@@ -150,6 +153,17 @@ query string and request headers (`Authorization`, `X-Api-Key`, and `Cookie` val
 redacted). Request and response bodies are not logged, and events are cut at 1 KB as in API
 Gateway. HTTP APIs have no execution logs.
 
+**X-Ray.** REST stages with tracing enabled send one segment per sampled request (named
+`{API name}/{stage}`, origin `AWS::ApiGateway::Stage`, with the request, the response status, and
+`error`/`throttle`/`fault` flags) with `PutTraceSegments`. The trace comes from the caller's
+`X-Amzn-Trace-Id` or W3C `traceparent` when present, including its sampling decision, and is
+otherwise started here and sampled by X-Ray's default rule (the first request each second, then
+`--xray-sampling-percent`); X-Ray's sampling rules are not fetched. Integrations receive
+`X-Amzn-Trace-Id: Root=...;Parent={this gateway's segment};Sampled=...` (HTTP backends and
+Lambda, per call) and, for HTTP backends, `traceparent`. The segment has no subsegment for the
+integration call, and API Gateway's passive mode (segments only when a caller traced) is not
+reproduced. A stage without tracing leaves trace headers untouched.
+
 **Delivery.** Each destination has a bounded queue (10,000 events). When it is full the newest
 events are dropped and counted in a warning, so a slow destination never slows requests. Queues
 are flushed every 5 seconds, when a batch is full, and at shutdown.
@@ -175,6 +189,7 @@ are flushed every 5 seconds, when a batch is full, and at shutdown.
 | `sts:AssumeRole` | each integration `credentials` and each `authorizerCredentials` role | integrations and authorizers with a role, unless `--integration-credentials=gateway` |
 | `logs:CreateLogStream`, `logs:PutLogEvents` | each access log group, the metrics log group, and `arn:aws:logs:<region>:<account>:log-group:API-Gateway-Execution-Logs_<id>/<stage>:*` | access logs, metrics, execution logs |
 | `logs:CreateLogGroup` | `arn:aws:logs:<region>:<account>:log-group:API-Gateway-Execution-Logs_*` | execution logs (the only log group the gateway creates) |
+| `xray:PutTraceSegments` | `*` | stages with tracing enabled |
 | `firehose:PutRecordBatch` | each access log delivery stream | access logs to Firehose |
 
 ## Documentation

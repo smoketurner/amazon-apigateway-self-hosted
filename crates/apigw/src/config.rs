@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::num::NonZeroU8;
+use std::num::{NonZeroU8, NonZeroU32};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -11,7 +11,7 @@ use crate::gateway::{AuthorizationMode, Enforcement, Unsupported};
 use crate::identity::{TrustedProxies, TrustedProxy};
 use crate::listener::{Edge, ProxyProtocol};
 use crate::model::ApiKind;
-use crate::observability::{Delivery, LogGroup, MetricsNamespace, StreamName};
+use crate::observability::{Delivery, LogGroup, MetricsNamespace, StreamName, TraceDelivery};
 use crate::router::BasePath;
 use crate::source::Source;
 
@@ -126,6 +126,14 @@ pub(crate) struct Config {
     #[arg(long, env = "APIGW_PROXY_PROTOCOL", requires = "trusted_proxies")]
     pub(crate) proxy_protocol: bool,
 
+    /// How many gateway replicas serve this API. Throttle limits are divided by
+    /// this count because each replica keeps its own buckets, so the API-wide rate
+    /// is approximately the configured one. A replica's bucket always holds at
+    /// least one token, so with more replicas than burst tokens the API-wide burst
+    /// is larger than configured.
+    #[arg(long, env = "APIGW_REPLICAS", default_value_t = NonZeroU32::MIN)]
+    pub(crate) replicas: NonZeroU32,
+
     /// Address for `/healthz` and `/routes`. Disabled when unset.
     #[arg(long, env = "APIGW_ADMIN_LISTEN")]
     pub(crate) admin_listen: Option<SocketAddr>,
@@ -165,6 +173,17 @@ pub(crate) struct Config {
     /// CloudWatch namespace for published metrics; `AWS/` namespaces are reserved.
     #[arg(long, env = "APIGW_METRICS_NAMESPACE", default_value_t = MetricsNamespace::default(), value_parser = clap::value_parser!(MetricsNamespace))]
     pub(crate) metrics_namespace: MetricsNamespace,
+
+    /// What stage tracing does: `aws` sends X-Ray segments for stages with
+    /// tracing enabled and propagates `X-Amzn-Trace-Id` and `traceparent` to
+    /// integrations; `off` does neither.
+    #[arg(long, env = "APIGW_TRACING", value_enum, default_value_t = TraceDelivery::Aws)]
+    pub(crate) tracing: TraceDelivery,
+
+    /// Percentage of requests X-Ray traces after the first request each second,
+    /// when the caller made no sampling decision (X-Ray's default rule is 5).
+    #[arg(long, env = "APIGW_XRAY_SAMPLING_PERCENT", default_value_t = 5, value_parser = clap::value_parser!(u8).range(..=100))]
+    pub(crate) xray_sampling_percent: u8,
 
     /// Log stream this process writes to in each CloudWatch Logs log group.
     /// Defaults to `{HOSTNAME}/{start time}/{random suffix}`, unique per process.
@@ -234,6 +253,8 @@ impl Config {
                     namespace: self.metrics_namespace.clone(),
                 }
             }),
+            tracing: self.tracing,
+            sampling_percent: self.xray_sampling_percent,
             stream: StreamName::for_pod(
                 self.log_stream.as_deref(),
                 hostname,
@@ -380,6 +401,15 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn replicas_default_to_one_and_must_be_positive() {
+        let config = parse(&["--http-api-id", "a", "--stage", "s"]).unwrap();
+        assert_eq!(config.replicas.get(), 1);
+        let config = parse(&["--http-api-id", "a", "--stage", "s", "--replicas", "3"]).unwrap();
+        assert_eq!(config.replicas.get(), 3);
+        assert!(parse(&["--http-api-id", "a", "--stage", "s", "--replicas", "0"]).is_err());
     }
 
     #[test]

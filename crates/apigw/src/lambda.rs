@@ -677,6 +677,7 @@ mod tests {
             },
             protections: Protections::default(),
             authorizer: RouteAuthorizer::None,
+            throttle: None,
             unenforced: Vec::new(),
         }
     }

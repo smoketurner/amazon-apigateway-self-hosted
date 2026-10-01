@@ -49,6 +49,13 @@ All notable changes to this project are documented here. The format follows
   dimensions when the stage enables detailed metrics.
 - Execution logs: REST stages with `loggingLevel` `ERROR` or `INFO` (and `dataTraceEnabled`)
   write a request trace to `API-Gateway-Execution-Logs_{apiId}/{stage}` (`--execution-logs`).
+- X-Ray: REST stages with tracing enabled send one segment per sampled request with
+  `PutTraceSegments`. A caller's `X-Amzn-Trace-Id` (or W3C `traceparent`) is continued and its
+  sampling decision honored; otherwise X-Ray's default rule applies (the first request each
+  second, then `--xray-sampling-percent`, default 5). The trace is passed on per request in
+  `X-Amzn-Trace-Id` (HTTP backends and Lambda) and `traceparent` (HTTP backends), with this
+  gateway's segment as the parent, and `$context.xrayTraceId` is available to access logs.
+  `--tracing off` disables all of it.
 - Log delivery uses bounded queues that drop (and count) events instead of slowing requests,
   and flushes everything on shutdown.
 - REST gateway responses: every error the gateway generates (missing authentication token,
@@ -74,6 +81,13 @@ All notable changes to this project are documented here. The format follows
   the 15 minute limit, a 5 minute idle limit, and `$context.integration.responseTransferMode`
   / `timeToAllHeaders`. Output that doesn't follow the streaming format answers `500`.
 
+- Stage throttling: REST `methodSettings` (including the `*/*` default) and HTTP API route
+  settings (including the default route settings) limit each method or route with a token
+  bucket and answer `429` (`THROTTLED` gateway response for REST, `{"message":"Too Many
+  Requests"}` for HTTP). `--replicas` (`APIGW_REPLICAS`) divides the limits per replica.
+- A `StateBackend` (in-memory, bounded, with LRU eviction) holding token buckets, calendar-aligned
+  day/week/month quota counters, and a TTL cache, for usage plans and response caching to use.
+
 ### Changed
 
 - An `HTTP_PROXY` backend that cannot be reached now answers REST clients 504 `Network error
@@ -82,8 +96,8 @@ All notable changes to this project are documented here. The format follows
 - `$context.extendedRequestId` is a 12-character token, the same value as the `x-amz-apigw-id`
   response header.
 - `requestParameters` mappings accept `context.*` and `stageVariables.*` sources.
-- Access logs, execution logs, and detailed metrics are no longer listed as unenforced on
-  `/routes`.
+- Access logs, execution logs, detailed metrics, and tracing are no longer listed as unenforced
+  on `/routes`.
 - `X-Forwarded-For` sent by a client that is not a trusted proxy is no longer forwarded to
   `HTTP_PROXY` integrations: it is replaced by the client's address. `X-Forwarded-Client-Cert` is
   removed from such requests. Set `--trusted-proxies` to keep forwarding a proxy's headers.

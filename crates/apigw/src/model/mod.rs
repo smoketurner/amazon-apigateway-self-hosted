@@ -562,9 +562,7 @@ pub(crate) enum Feature {
     ContentHandling,
     IntegrationTlsConfig,
     ParameterMapping,
-    Throttling,
     ResponseCaching,
-    Tracing,
     Canary,
 }
 
@@ -577,9 +575,7 @@ impl fmt::Display for Feature {
             Self::ContentHandling => "content handling",
             Self::IntegrationTlsConfig => "integration TLS config",
             Self::ParameterMapping => "parameter mapping",
-            Self::Throttling => "throttling",
             Self::ResponseCaching => "response caching",
-            Self::Tracing => "tracing",
             Self::Canary => "canary",
         };
         f.write_str(name)

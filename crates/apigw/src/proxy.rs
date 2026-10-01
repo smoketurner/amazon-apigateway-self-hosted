@@ -37,6 +37,11 @@ impl HttpProxy {
                 headers.append(name.clone(), value.clone());
             }
         }
+        if let Some(trace) = ctx.trace
+            && let Ok(value) = HeaderValue::try_from(trace.traceparent())
+        {
+            headers.insert(HeaderName::from_static("traceparent"), value);
+        }
         for (name, source) in &self.headers {
             let Some(value) = source.resolve(ctx) else {
                 continue;
@@ -272,6 +277,7 @@ mod tests {
             protections: Protections::default(),
             authorizer: RouteAuthorizer::None,
             unenforced: Vec::new(),
+            throttle: None,
         }
     }
 
