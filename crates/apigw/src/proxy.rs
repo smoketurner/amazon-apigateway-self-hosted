@@ -18,10 +18,10 @@ impl HttpProxy {
         &self,
         client: &reqwest::Client,
         route: &Route,
-        mut ctx: RequestContext,
+        ctx: &mut RequestContext,
     ) -> Response {
         let kind = ctx.api.kind;
-        let url = match self.target_url(&route.path, &ctx) {
+        let url = match self.target_url(&route.path, ctx) {
             Ok(url) => url,
             Err(err) => {
                 tracing::error!(route = %route.key, uri = self.uri, %err, "invalid integration URI");
@@ -39,7 +39,7 @@ impl HttpProxy {
             }
         }
         for (name, source) in &self.headers {
-            let Some(value) = source.resolve(&ctx) else {
+            let Some(value) = source.resolve(ctx) else {
                 continue;
             };
             match (
@@ -54,6 +54,7 @@ impl HttpProxy {
                 }
             }
         }
+        ctx.integration.transfer_mode = Some(self.transfer);
         let started = Instant::now();
         let result = client
             .request(method, url)
@@ -73,10 +74,13 @@ impl HttpProxy {
                 return GatewayError::IntegrationFailure.response(kind);
             }
         };
+        let headers_after = u64::try_from(started.elapsed().as_millis()).ok();
+        ctx.integration.status = Some(upstream.status().as_u16());
+        ctx.integration.time_to_all_headers_ms = headers_after;
         tracing::debug!(
             route = %route.key,
             status = upstream.status().as_u16(),
-            latency_ms = started.elapsed().as_millis(),
+            latency_ms = headers_after,
             "integration responded"
         );
         let mut response = Response::new(Body::empty());
@@ -252,6 +256,7 @@ mod tests {
             query_params: BTreeMap::new(),
             headers: BTreeMap::new(),
             timeout: Duration::from_secs(1),
+            transfer: crate::model::ResponseTransferMode::Buffered,
         }
     }
 
@@ -390,10 +395,10 @@ mod tests {
         addr
     }
 
-    async fn send(target: HttpProxy, route_path: &str, request: RequestContext) -> Response {
+    async fn send(target: HttpProxy, route_path: &str, mut request: RequestContext) -> Response {
         let route = route(route_path, &target);
         target
-            .forward(&reqwest::Client::new(), &route, request)
+            .forward(&reqwest::Client::new(), &route, &mut request)
             .await
     }
 

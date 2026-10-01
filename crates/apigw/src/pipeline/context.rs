@@ -5,12 +5,15 @@
 use std::collections::BTreeMap;
 
 use axum::body::Bytes;
-use axum::http::{HeaderMap, Method};
+use axum::http::{HeaderMap, Method, Version};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
+use crate::header_case::HeaderCase;
 use crate::identity::ClientIdentity;
-use crate::model::{ApiKind, RouteKey};
+use crate::model::{ApiKind, ResponseTransferMode, RouteKey};
 
 /// The API and stage a request was received on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +100,20 @@ pub(crate) struct IntegrationOutcome {
     pub(crate) status: Option<u16>,
     pub(crate) latency_ms: Option<u64>,
     pub(crate) error: Option<String>,
+    pub(crate) transfer_mode: Option<ResponseTransferMode>,
+    /// Streaming integrations: time from connecting to having every response
+    /// header (`$context.integration.timeToAllHeaders`).
+    pub(crate) time_to_all_headers_ms: Option<u64>,
+}
+
+impl ResponseTransferMode {
+    /// The value `$context.integration.responseTransferMode` reports.
+    fn context_name(self) -> &'static str {
+        match self {
+            Self::Buffered => "BUFFERED",
+            Self::Stream => "STREAMED",
+        }
+    }
 }
 
 /// One request: what the client sent, plus everything API Gateway records
@@ -113,18 +130,14 @@ pub(crate) struct RequestContext {
     pub(crate) path: String,
     pub(crate) query: QueryString,
     pub(crate) headers: HeaderMap,
+    /// The client's spelling of header names, known for HTTP/1 requests.
+    pub(crate) header_case: HeaderCase,
+    pub(crate) version: Version,
     pub(crate) path_params: Vec<(String, String)>,
     pub(crate) identity: ClientIdentity,
     pub(crate) body: Bytes,
     /// `$context.authorizer.*`, filled by authorizers.
     pub(crate) authorizer: Map<String, Value>,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "filled and read by mapping templates (#26) and access logs (#41)"
-        )
-    )]
     pub(crate) integration: IntegrationOutcome,
 }
 
@@ -152,6 +165,30 @@ impl RequestContext {
         self.domain_name().split('.').next().unwrap_or_default()
     }
 
+    /// `$context.protocol`. REST APIs report `HTTP/1.1` even to HTTP/2 clients
+    /// (the REST `$context.protocol` documentation says so); HTTP APIs report
+    /// the client's version.
+    pub(crate) fn protocol(&self) -> &'static str {
+        if self.api.kind == ApiKind::Rest {
+            return "HTTP/1.1";
+        }
+        match self.version {
+            Version::HTTP_09 => "HTTP/0.9",
+            Version::HTTP_10 => "HTTP/1.0",
+            Version::HTTP_2 => "HTTP/2.0",
+            Version::HTTP_3 => "HTTP/3.0",
+            _ => "HTTP/1.1",
+        }
+    }
+
+    /// `$context.extendedRequestId`: API Gateway's is an opaque 16-character
+    /// base64 token distinct from the request ID, derived here from the random
+    /// tail of the request ID so the two always correspond.
+    pub(crate) fn extended_request_id(&self) -> String {
+        let tail: Vec<u8> = self.request_id.as_bytes().iter().skip(5).copied().collect();
+        BASE64.encode(tail)
+    }
+
     /// `$context.requestTime` in API Gateway's CLF format.
     pub(crate) fn request_time(&self) -> String {
         self.received.strftime("%d/%b/%Y:%H:%M:%S %z").to_string()
@@ -176,14 +213,14 @@ impl RequestContext {
             "apiId": self.api.api_id,
             "domainName": self.domain_name(),
             "domainPrefix": self.domain_prefix(),
-            "extendedRequestId": self.request_id.to_string(),
+            "extendedRequestId": self.extended_request_id(),
             "httpMethod": self.method.as_str(),
             "identity": {
                 "sourceIp": self.source_ip(),
                 "userAgent": self.header_str("user-agent"),
             },
             "path": self.path,
-            "protocol": "HTTP/1.1",
+            "protocol": self.protocol(),
             "requestId": self.request_id.to_string(),
             "requestTime": self.request_time(),
             "requestTimeEpoch": self.received.as_millisecond(),
@@ -201,6 +238,12 @@ impl RequestContext {
         }
         if let Some(ref error) = self.integration.error {
             integration.insert("error", json!(error));
+        }
+        if let Some(mode) = self.integration.transfer_mode {
+            integration.insert("responseTransferMode", json!(mode.context_name()));
+        }
+        if let Some(time) = self.integration.time_to_all_headers_ms {
+            integration.insert("timeToAllHeaders", json!(time));
         }
         if let Value::Object(ref mut fields) = context {
             fields.insert("integration".to_owned(), json!(integration));
@@ -241,6 +284,8 @@ pub(crate) mod tests {
             path: "/pets/7".to_owned(),
             query: QueryString::new(Some("q=1&q=2")),
             headers,
+            header_case: HeaderCase::default(),
+            version: Version::HTTP_11,
             path_params: vec![("petId".to_owned(), "7".to_owned())],
             identity,
             body: Bytes::new(),
@@ -281,6 +326,8 @@ pub(crate) mod tests {
             status: Some(200),
             latency_ms: Some(12),
             error: None,
+            transfer_mode: Some(ResponseTransferMode::Stream),
+            time_to_all_headers_ms: Some(5),
         };
         request
             .authorizer
@@ -296,8 +343,40 @@ pub(crate) mod tests {
         assert_eq!(vars["requestTime"], "14/Nov/2023:22:13:20 +0000");
         assert_eq!(vars["requestTimeEpoch"], 1_700_000_000_000_i64);
         assert_eq!(vars["integration"]["status"], 200);
+        assert_eq!(vars["integration"]["responseTransferMode"], "STREAMED");
+        assert_eq!(vars["integration"]["timeToAllHeaders"], 5);
         assert_eq!(vars["authorizer"]["principalId"], "user-1");
         assert!(vars["integration"].get("error").is_none());
+    }
+
+    #[test]
+    fn protocol_follows_the_client_for_http_apis_only() {
+        let mut http = request(ApiKind::Http);
+        let mut rest = request(ApiKind::Rest);
+        for (version, expected) in [
+            (Version::HTTP_10, "HTTP/1.0"),
+            (Version::HTTP_11, "HTTP/1.1"),
+            (Version::HTTP_2, "HTTP/2.0"),
+        ] {
+            http.version = version;
+            rest.version = version;
+            assert_eq!(http.protocol(), expected);
+            assert_eq!(
+                rest.protocol(),
+                "HTTP/1.1",
+                "REST reports HTTP/1.1 for every client"
+            );
+        }
+    }
+
+    #[test]
+    fn extended_request_id_is_stable_and_distinct_from_the_request_id() {
+        let request = request(ApiKind::Rest);
+        let id = request.extended_request_id();
+        assert_eq!(id.len(), 16);
+        assert!(id.ends_with('='));
+        assert_eq!(id, request.extended_request_id());
+        assert_ne!(id, request.request_id.to_string());
     }
 
     #[test]

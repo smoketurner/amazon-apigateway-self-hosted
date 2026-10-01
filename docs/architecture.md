@@ -13,7 +13,8 @@ One crate, `crates/apigw`, building one binary.
 | `gateway` | What every route of an API shares (`ApiContext`), enforcement of unevaluated protections, and API Gateway-shaped errors (`GatewayError`) |
 | `aws` | `AwsClients`: per-region Lambda clients, assumed integration-role credentials, Lambda endpoint overrides, trace header propagation |
 | `proxy` | `HTTP_PROXY` forwarding |
-| `lambda` | `AWS_PROXY` event construction (payload 1.0 and 2.0) and response mapping |
+| `lambda`, `lambda_response` | `AWS_PROXY` event construction (payload 1.0 and 2.0), invocation (buffered `Invoke` or streamed `InvokeWithResponseStream`), and response mapping |
+| `header_case` | Recovers the client's HTTP/1 header name spelling (hyper keeps it private) by watching request heads on the connection |
 | `listener` | TLS accept loop, PROXY protocol v2, certificate reload |
 | `identity` | Client address and forwarded client certificate, from the peer and trusted proxies' headers |
 | `app` | Startup, refresh loop, shutdown |

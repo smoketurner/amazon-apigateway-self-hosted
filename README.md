@@ -23,7 +23,8 @@ Management's
 |---|---|
 | Resource paths, `{param}`, greedy `{proxy+}`, `ANY`, HTTP API `$default` | Routed exactly as API Gateway routes them |
 | `HTTP_PROXY` integrations | Forwarded, streaming the response; `requestParameters` path/query/header mappings and `timeoutInMillis` honored |
-| `AWS_PROXY` (Lambda) integrations | Invoked with the API Gateway proxy event, payload format 1.0 or 2.0 |
+| `AWS_PROXY` (Lambda) integrations | Invoked with the API Gateway proxy event, payload format 1.0 or 2.0, including qualified ARNs and aliases; REST payload 1.0 keeps the client's header case; 6 MB request/response limit (`502`) |
+| REST response streaming (`responseTransferMode: STREAM`) | Lambda via `InvokeWithResponseStream` (`.../response-streaming-invocations` URIs, metadata + 8 null bytes + payload), and `HTTP_PROXY`; up to 15 minutes, 5 minute idle limit |
 | `MOCK` integrations | Status, literal response headers, and response template returned (templates are not evaluated as VTL) |
 | Stage variables | Read from the stage and substituted into integration URIs; overridable locally |
 | Lambda/Cognito/JWT authorizers | **Not evaluated yet.** Answer `401` unless `--insecure-skip-authorization` is set |
@@ -120,7 +121,7 @@ previous routes keep serving), so a typo never goes unnoticed.
 |---|---|---|
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/restapis/<id>/stages/<stage>/exports/oas30`, `.../restapis/<id>/stages/<stage>` | REST APIs |
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/apis/<id>/exports/OAS30`, `.../apis/<id>/stages/<stage>` | HTTP APIs |
-| `lambda:InvokeFunction` | each integrated function | `AWS_PROXY` routes |
+| `lambda:InvokeFunction` | each integrated function (and its aliases) | `AWS_PROXY` routes; the same action covers `InvokeWithResponseStream` for streaming routes |
 | `sts:AssumeRole` | each integration `credentials` role | integrations with a role, unless `--integration-credentials=gateway` |
 
 ## Documentation

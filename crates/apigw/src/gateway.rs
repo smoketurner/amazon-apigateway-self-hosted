@@ -177,6 +177,9 @@ pub(crate) enum GatewayError {
     RequestTooLarge,
     /// An integration this gateway can't execute yet.
     UnsupportedIntegration,
+    /// A streaming integration's output doesn't follow the response streaming
+    /// format; API Gateway answers `500`.
+    MalformedStreamingResponse,
 }
 
 impl GatewayError {
@@ -198,6 +201,9 @@ impl GatewayError {
             }
             (Self::RequestTooLarge, _) => {
                 ErrorBody::new(StatusCode::PAYLOAD_TOO_LARGE, "Request Entity Too Large")
+            }
+            (Self::MalformedStreamingResponse, _) => {
+                ErrorBody::new(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
             }
             (Self::UnsupportedIntegration, _) => ErrorBody::new(
                 StatusCode::NOT_IMPLEMENTED,
@@ -291,6 +297,12 @@ mod tests {
                 ApiKind::Http,
                 413,
                 "Request Entity Too Large",
+            ),
+            (
+                GatewayError::MalformedStreamingResponse,
+                ApiKind::Rest,
+                500,
+                "Internal server error",
             ),
             (
                 GatewayError::UnsupportedIntegration,

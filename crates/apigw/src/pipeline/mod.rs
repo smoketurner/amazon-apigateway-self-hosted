@@ -12,13 +12,14 @@ pub(crate) mod context;
 
 use axum::body::Body;
 use axum::extract::{FromRequestParts as _, RawPathParams, Request};
-use axum::http::header;
+use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse as _, Response};
 use uuid::Uuid;
 
 pub(crate) use context::{ApiInfo, IntegrationOutcome, QueryString, RequestContext};
 
 use crate::gateway::{ApiContext, GatewayError, MAX_BODY_BYTES, RequestId};
+use crate::header_case::HeaderCase;
 use crate::identity::ClientIdentity;
 use crate::integration::{Integration, MockResponse};
 use crate::model::Protection;
@@ -66,6 +67,13 @@ impl<'a> Pipeline<'a> {
         let body = axum::body::to_bytes(body, MAX_BODY_BYTES)
             .await
             .map_err(|_| GatewayError::RequestTooLarge)?;
+        if !parts.headers.contains_key(header::HOST)
+            && let Some(authority) = parts.uri.authority()
+            && let Ok(host) = HeaderValue::from_str(authority.as_str())
+        {
+            parts.headers.insert(header::HOST, host);
+        }
+        let header_case = parts.extensions.remove::<HeaderCase>().unwrap_or_default();
         let request_id = parts
             .extensions
             .get::<RequestId>()
@@ -91,6 +99,8 @@ impl<'a> Pipeline<'a> {
             path: parts.uri.path().to_owned(),
             query: QueryString::new(parts.uri.query()),
             headers: parts.headers,
+            header_case,
+            version: parts.version,
             path_params,
             identity,
             body,
@@ -99,14 +109,19 @@ impl<'a> Pipeline<'a> {
         })
     }
 
-    async fn integrate(&self, ctx: RequestContext) -> Response {
+    async fn integrate(&self, mut ctx: RequestContext) -> Response {
         match self.route.integration {
             Integration::HttpProxy(ref target) => {
-                target.forward(&self.api.http, self.route, ctx).await
+                target.forward(&self.api.http, self.route, &mut ctx).await
             }
             Integration::Lambda(ref target) => {
                 target
-                    .invoke(&self.api.aws, self.route, &ctx, &self.api.stage_variables)
+                    .invoke(
+                        &self.api.aws,
+                        self.route,
+                        &mut ctx,
+                        &self.api.stage_variables,
+                    )
                     .await
             }
             Integration::Mock(ref mock) => mock.respond(),
