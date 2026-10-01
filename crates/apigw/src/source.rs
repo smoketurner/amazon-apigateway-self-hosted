@@ -9,22 +9,16 @@ use serde_json::Value;
 
 use crate::spec::ApiKind;
 
-const REST_EXPORT_EXTENSIONS: &str = "integrations,authorizers";
+/// `apigateway` includes every API Gateway extension (integrations, request
+/// validators, resource policy, gateway responses, ...); `authorizers` adds the
+/// authorizer definitions.
+const REST_EXPORT_EXTENSIONS: &str = "apigateway,authorizers";
 
 #[derive(Debug, Clone)]
 pub(crate) enum Source {
-    RestApi {
-        api_id: String,
-        stage: String,
-    },
-    HttpApi {
-        api_id: String,
-        stage: Option<String>,
-    },
-    File {
-        path: PathBuf,
-        kind: ApiKind,
-    },
+    RestApi { api_id: String, stage: String },
+    HttpApi { api_id: String, stage: String },
+    File { path: PathBuf, kind: ApiKind },
 }
 
 /// Everything needed to rebuild the routes, in a form that round-trips through
@@ -91,7 +85,7 @@ impl Fetcher {
             Source::HttpApi {
                 ref api_id,
                 ref stage,
-            } => self.fetch_http(api_id, stage.as_deref()).await,
+            } => self.fetch_http(api_id, stage).await,
             Source::File { ref path, kind } => {
                 let openapi = read_json(path).await?;
                 Ok(Snapshot {
@@ -136,7 +130,9 @@ impl Fetcher {
         })
     }
 
-    async fn fetch_http(&self, api_id: &str, stage: Option<&str>) -> Result<Snapshot, SourceError> {
+    /// Exports the stage's deployed configuration; without a stage, `ExportApi`
+    /// would return the latest, possibly undeployed, configuration.
+    async fn fetch_http(&self, api_id: &str, stage: &str) -> Result<Snapshot, SourceError> {
         let export = self
             .http
             .export_api()
@@ -144,31 +140,25 @@ impl Fetcher {
             .specification("OAS30")
             .output_type("JSON")
             .include_extensions(true)
-            .set_stage_name(stage.map(str::to_owned))
+            .stage_name(stage)
             .send()
             .await
             .map_err(aws_error)?;
         let body = export.body.ok_or(SourceError::EmptyExport)?;
         let openapi = parse_export(body.as_ref())?;
-        let stage_variables = match stage {
-            Some(stage) => {
-                let info = self
-                    .http
-                    .get_stage()
-                    .api_id(api_id)
-                    .stage_name(stage)
-                    .send()
-                    .await
-                    .map_err(aws_error)?;
-                into_sorted(info.stage_variables)
-            }
-            None => BTreeMap::new(),
-        };
+        let stage_info = self
+            .http
+            .get_stage()
+            .api_id(api_id)
+            .stage_name(stage)
+            .send()
+            .await
+            .map_err(aws_error)?;
         Ok(Snapshot {
             kind: ApiKind::Http,
             api_id: api_id.to_owned(),
-            stage: stage.map(str::to_owned),
-            stage_variables,
+            stage: Some(stage.to_owned()),
+            stage_variables: into_sorted(stage_info.stage_variables),
             openapi,
         })
     }

@@ -10,7 +10,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header}
 use axum::response::{IntoResponse, Response};
 use uuid::Uuid;
 
-use crate::spec::{ApiKind, Authorization, Integration, MockResponse, Route};
+use crate::spec::{ApiKind, Integration, MockResponse, Protection, Route};
 use crate::{lambda, proxy};
 
 /// API Gateway's maximum payload size.
@@ -18,11 +18,105 @@ pub(crate) const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AuthorizationMode {
-    /// Reject routes that have an authorizer, IAM auth, or API key requirement.
+    /// Refuse routes that have an authorizer, IAM auth, or API key requirement.
     Enforce,
-    /// Serve protected routes without checking credentials, for deployments that
+    /// Serve them without checking credentials, for deployments that
     /// authenticate in front of the gateway.
     Skip,
+}
+
+/// What to do with a protection this gateway cannot evaluate yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum Unsupported {
+    /// Refuse the request so the backend is never reached unprotected.
+    Reject,
+    /// Serve the route as if the protection were absent.
+    Ignore,
+}
+
+/// How the gateway treats protections it does not evaluate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Enforcement {
+    pub(crate) authorization: AuthorizationMode,
+    pub(crate) resource_policy: Unsupported,
+    pub(crate) request_validation: Unsupported,
+}
+
+impl Enforcement {
+    pub(crate) fn warn_if_relaxed(self) {
+        if self.authorization == AuthorizationMode::Skip {
+            tracing::warn!(
+                "serving routes that require authorization WITHOUT checking credentials"
+            );
+        }
+        if self.resource_policy == Unsupported::Ignore {
+            tracing::warn!(
+                "serving routes under resource policies WITHOUT evaluating the policies"
+            );
+        }
+        if self.request_validation == Unsupported::Ignore {
+            tracing::warn!(
+                "forwarding requests to routes with request validators WITHOUT validating them"
+            );
+        }
+    }
+}
+
+impl Enforcement {
+    fn refuses(self, protection: Protection) -> bool {
+        match protection {
+            Protection::ResourcePolicy => self.resource_policy == Unsupported::Reject,
+            Protection::Iam | Protection::Authorizer | Protection::ApiKey => {
+                self.authorization == AuthorizationMode::Enforce
+            }
+            Protection::RequestValidation => self.request_validation == Unsupported::Reject,
+        }
+    }
+
+    /// The protections on `route` that refuse requests, in evaluation order;
+    /// a request gets the first one's response.
+    pub(crate) fn refusals(self, route: &Route) -> impl Iterator<Item = Protection> + '_ {
+        route.protections.iter().filter(move |&p| self.refuses(p))
+    }
+}
+
+impl Protection {
+    /// The response API Gateway gives a client that fails this check, or a 501
+    /// where API Gateway would do work this gateway cannot do yet.
+    pub(crate) fn refusal_response(self, kind: ApiKind) -> Response {
+        match (self, kind) {
+            (Self::ResourcePolicy | Self::ApiKey, _) | (Self::Iam, ApiKind::Http) => {
+                error(StatusCode::FORBIDDEN, "Forbidden")
+            }
+            (Self::Iam, ApiKind::Rest) => {
+                error(StatusCode::FORBIDDEN, "Missing Authentication Token")
+            }
+            (Self::Authorizer, _) => error(StatusCode::UNAUTHORIZED, "Unauthorized"),
+            (Self::RequestValidation, _) => error(
+                StatusCode::NOT_IMPLEMENTED,
+                "Request validation is not supported by this gateway",
+            ),
+        }
+    }
+
+    /// Why a route with this protection is refused, for `/routes` and logs.
+    pub(crate) fn refusal_reason(self) -> &'static str {
+        match self {
+            Self::ResourcePolicy => {
+                "has a resource policy, which this gateway does not evaluate; answering 403 (--unsupported-resource-policy=ignore serves it)"
+            }
+            Self::Iam => {
+                "requires IAM authorization, which cannot be verified outside AWS; answering 403"
+            }
+            Self::Authorizer => {
+                "requires an authorizer, which this gateway does not evaluate; answering 401"
+            }
+            Self::ApiKey => "requires an API key, which this gateway does not check; answering 403",
+            Self::RequestValidation => {
+                "has a request validator, which this gateway does not run; answering 501 (--unsupported-validation=ignore serves it)"
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -34,7 +128,7 @@ pub(crate) struct ApiContext {
     pub(crate) api_id: String,
     pub(crate) stage: Option<String>,
     pub(crate) stage_variables: BTreeMap<String, String>,
-    pub(crate) authorization: AuthorizationMode,
+    pub(crate) enforcement: Enforcement,
     pub(crate) http: reqwest::Client,
     pub(crate) lambda: aws_sdk_lambda::Client,
 }
@@ -115,10 +209,8 @@ pub(crate) async fn handle(
     route: &Route,
     request: axum::extract::Request,
 ) -> Response {
-    if route.authorization == Authorization::Required
-        && ctx.authorization == AuthorizationMode::Enforce
-    {
-        return error(StatusCode::UNAUTHORIZED, "Unauthorized");
+    if let Some(protection) = ctx.enforcement.refusals(route).next() {
+        return protection.refusal_response(ctx.kind);
     }
     let (mut parts, body) = request.into_parts();
     let path_params = match RawPathParams::from_request_parts(&mut parts, &()).await {

@@ -220,7 +220,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::spec::{Authorization, Integration, MethodMatch};
+    use crate::spec::{Integration, MethodMatch, Protections};
 
     fn incoming(params: &[(&str, &str)], query: Option<&str>) -> Incoming {
         let mut headers = HeaderMap::new();
@@ -257,7 +257,7 @@ mod tests {
             method: MethodMatch::Any,
             path: RoutePath::Resource(path.to_owned()),
             integration: Integration::HttpProxy(target.clone()),
-            authorization: Authorization::None,
+            protections: Protections::default(),
         }
     }
 

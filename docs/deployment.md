@@ -141,7 +141,19 @@ see the proxy's address, not the client's.
 
 ## Authorization
 
-`apigw` does not evaluate Lambda authorizers, JWT/Cognito authorizers, IAM auth, or API keys.
-Routes that require them answer `401` by default and are flagged on `/routes`. If
+`apigw` fails closed on every access control it does not evaluate yet, answering the way API
+Gateway answers a caller who fails that check, and lists each one per route on `/routes`:
+
+| Protection | Default response | To serve the route anyway |
+|---|---|---|
+| Resource policy (any statement) | `403 Forbidden` | `--unsupported-resource-policy=ignore` |
+| IAM (`AWS_IAM`) | REST `403 Missing Authentication Token`, HTTP `403 Forbidden` | `--insecure-skip-authorization` |
+| Lambda, Cognito, or JWT authorizer | `401 Unauthorized` | `--insecure-skip-authorization` |
+| API key | `403 Forbidden` | `--insecure-skip-authorization` |
+| Request validator | `501` | `--unsupported-validation=ignore` |
+
+Checks run in API Gateway's order, so a request gets the first applicable response. If
 authentication happens in front of `apigw` (an Istio `RequestAuthentication` +
-`AuthorizationPolicy`, an OAuth proxy), set `--insecure-skip-authorization` to serve them.
+`AuthorizationPolicy`, an OAuth proxy), `--insecure-skip-authorization` serves authenticated
+routes. It deliberately does not cover resource policies: an IP allowlist is not something a
+front proxy usually enforces, so ignoring one is a separate, explicit choice.

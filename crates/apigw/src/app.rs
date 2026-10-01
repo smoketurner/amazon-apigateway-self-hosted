@@ -12,7 +12,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
-use crate::gateway::{ApiContext, AuthorizationMode};
+use crate::gateway::{ApiContext, Enforcement};
 use crate::listener::{self, ConnLimits, Tls};
 use crate::router::{self, BasePath, LoadSummary, Loaded};
 use crate::source::{self, Fetcher, Snapshot};
@@ -23,7 +23,7 @@ const CERT_POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// Everything a definition is built from besides the snapshot itself.
 struct Builder {
     base_path: BasePath,
-    authorization: AuthorizationMode,
+    enforcement: Enforcement,
     stage_variable_overrides: BTreeMap<String, String>,
     overrides_path: Option<std::path::PathBuf>,
     http: reqwest::Client,
@@ -68,25 +68,25 @@ impl Builder {
             api_id: snapshot.api_id.clone(),
             stage: snapshot.stage.clone(),
             stage_variables,
-            authorization: self.authorization,
+            enforcement: self.enforcement,
             http: self.http.clone(),
             lambda: self.lambda.clone(),
         });
         let (router, routes) = router::build(&definition, &ctx, &self.base_path);
         for route in &routes {
-            if let Some(ref problem) = route.problem {
-                tracing::warn!(
-                    route = route.route_key,
-                    integration = route.integration,
-                    problem,
-                    "route loaded with a problem"
-                );
-            } else {
+            if route.problems.is_empty() {
                 tracing::debug!(
                     route = route.route_key,
                     integration = route.integration,
                     target = route.target,
                     "route loaded"
+                );
+            } else {
+                tracing::warn!(
+                    route = route.route_key,
+                    integration = route.integration,
+                    problems = route.problems.join("; "),
+                    "route loaded with problems"
                 );
             }
         }
@@ -233,19 +233,13 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         .context("failed to build the HTTP client")?;
     let builder = Builder {
         base_path: config.base_path.clone(),
-        authorization: if config.insecure_skip_authorization {
-            tracing::warn!(
-                "serving routes that require authorization WITHOUT checking credentials"
-            );
-            AuthorizationMode::Skip
-        } else {
-            AuthorizationMode::Enforce
-        },
+        enforcement: config.enforcement(),
         stage_variable_overrides: config.stage_variable_overrides(std::env::vars()),
         overrides_path: config.integration_overrides.clone(),
         http,
         lambda: aws_sdk_lambda::Client::new(&sdk_config),
     };
+    builder.enforcement.warn_if_relaxed();
     let fetcher = Fetcher::new(config.source(), &sdk_config);
     tracing::info!(source = ?fetcher.source(), "loading API definition");
 
@@ -315,6 +309,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::gateway::{AuthorizationMode, Unsupported};
     use crate::source::Source;
     use crate::spec::ApiKind;
 
@@ -327,7 +322,11 @@ mod tests {
     fn builder(overrides_path: Option<std::path::PathBuf>) -> Builder {
         Builder {
             base_path: BasePath::default(),
-            authorization: AuthorizationMode::Enforce,
+            enforcement: Enforcement {
+                authorization: AuthorizationMode::Enforce,
+                resource_policy: Unsupported::Reject,
+                request_validation: Unsupported::Reject,
+            },
             stage_variable_overrides: BTreeMap::from([(
                 "host".to_owned(),
                 "local.internal".to_owned(),

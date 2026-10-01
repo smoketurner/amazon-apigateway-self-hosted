@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use clap::{ArgGroup, Parser, ValueEnum};
 
+use crate::gateway::{AuthorizationMode, Enforcement, Unsupported};
 use crate::router::BasePath;
 use crate::source::Source;
 use crate::spec::ApiKind;
@@ -21,8 +22,8 @@ pub(crate) struct Config {
     #[arg(long, env = "APIGW_REST_API_ID", requires = "stage")]
     pub(crate) rest_api_id: Option<String>,
 
-    /// HTTP API (v2) to mirror.
-    #[arg(long, env = "APIGW_HTTP_API_ID")]
+    /// HTTP API (v2) to mirror. Requires --stage.
+    #[arg(long, env = "APIGW_HTTP_API_ID", requires = "stage")]
     pub(crate) http_api_id: Option<String>,
 
     /// Serve an `OpenAPI` export from disk instead of downloading one.
@@ -65,6 +66,17 @@ pub(crate) struct Config {
     /// front of the gateway; by default such routes answer 401.
     #[arg(long, env = "APIGW_INSECURE_SKIP_AUTHORIZATION")]
     pub(crate) insecure_skip_authorization: bool,
+
+    /// What to do with routes under a resource policy, which this gateway does
+    /// not evaluate yet: `reject` answers 403, `ignore` serves them unrestricted.
+    /// Not affected by --insecure-skip-authorization.
+    #[arg(long, env = "APIGW_UNSUPPORTED_RESOURCE_POLICY", value_enum, default_value_t = Unsupported::Reject)]
+    pub(crate) unsupported_resource_policy: Unsupported,
+
+    /// What to do with routes that have a request validator, which this gateway
+    /// does not run yet: `reject` answers 501, `ignore` forwards unvalidated requests.
+    #[arg(long, env = "APIGW_UNSUPPORTED_VALIDATION", value_enum, default_value_t = Unsupported::Reject)]
+    pub(crate) unsupported_validation: Unsupported,
 
     /// Address for API traffic.
     #[arg(long, env = "APIGW_LISTEN", default_value = "0.0.0.0:8443")]
@@ -112,12 +124,24 @@ impl Config {
             },
             (None, Some(api_id), _) => Source::HttpApi {
                 api_id: api_id.clone(),
-                stage: self.stage.clone(),
+                stage: self.stage.clone().unwrap_or_default(),
             },
             (None, None, path) => Source::File {
                 path: path.clone().unwrap_or_default(),
                 kind: self.api_type,
             },
+        }
+    }
+
+    pub(crate) fn enforcement(&self) -> Enforcement {
+        Enforcement {
+            authorization: if self.insecure_skip_authorization {
+                AuthorizationMode::Skip
+            } else {
+                AuthorizationMode::Enforce
+            },
+            resource_policy: self.unsupported_resource_policy,
+            request_validation: self.unsupported_validation,
         }
     }
 
@@ -169,7 +193,17 @@ mod tests {
     #[test]
     fn exactly_one_api_source_is_required() {
         assert!(parse(&[]).is_err());
-        assert!(parse(&["--http-api-id", "a", "--openapi-file", "x.json"]).is_err());
+        assert!(
+            parse(&[
+                "--http-api-id",
+                "a",
+                "--stage",
+                "s",
+                "--openapi-file",
+                "x.json"
+            ])
+            .is_err()
+        );
         let config = parse(&["--openapi-file", "x.json", "--api-type", "http"]).unwrap();
         assert!(matches!(
             config.source(),
@@ -178,28 +212,83 @@ mod tests {
                 ..
             }
         ));
-        let config = parse(&["--http-api-id", "a"]).unwrap();
-        assert!(matches!(
-            config.source(),
-            Source::HttpApi { stage: None, .. }
-        ));
+        let config = parse(&["--http-api-id", "a", "--stage", "s"]).unwrap();
+        assert!(matches!(config.source(), Source::HttpApi { ref stage, .. } if stage == "s"));
+    }
+
+    #[test]
+    fn http_api_requires_stage() {
+        assert!(parse(&["--http-api-id", "a"]).is_err());
+    }
+
+    #[test]
+    fn unsupported_protections_are_rejected_unless_ignored() {
+        let config = parse(&["--http-api-id", "a", "--stage", "s"]).unwrap();
+        assert_eq!(
+            config.enforcement(),
+            Enforcement {
+                authorization: AuthorizationMode::Enforce,
+                resource_policy: Unsupported::Reject,
+                request_validation: Unsupported::Reject,
+            }
+        );
+        let config = parse(&[
+            "--http-api-id",
+            "a",
+            "--stage",
+            "s",
+            "--insecure-skip-authorization",
+            "--unsupported-resource-policy",
+            "ignore",
+            "--unsupported-validation",
+            "ignore",
+        ])
+        .unwrap();
+        assert_eq!(
+            config.enforcement(),
+            Enforcement {
+                authorization: AuthorizationMode::Skip,
+                resource_policy: Unsupported::Ignore,
+                request_validation: Unsupported::Ignore,
+            }
+        );
+        assert!(
+            parse(&[
+                "--http-api-id",
+                "a",
+                "--stage",
+                "s",
+                "--unsupported-validation",
+                "maybe"
+            ])
+            .is_err()
+        );
     }
 
     #[test]
     fn tls_is_required() {
-        assert!(Config::try_parse_from(["apigw", "--http-api-id", "a"]).is_err());
+        assert!(Config::try_parse_from(["apigw", "--http-api-id", "a", "--stage", "s"]).is_err());
     }
 
     #[test]
     fn refresh_zero_disables() {
         assert_eq!(
-            parse(&["--http-api-id", "a", "--refresh-seconds", "0"])
-                .unwrap()
-                .refresh_interval(),
+            parse(&[
+                "--http-api-id",
+                "a",
+                "--stage",
+                "s",
+                "--refresh-seconds",
+                "0"
+            ])
+            .unwrap()
+            .refresh_interval(),
             None
         );
         assert_eq!(
-            parse(&["--http-api-id", "a"]).unwrap().refresh_interval(),
+            parse(&["--http-api-id", "a", "--stage", "s"])
+                .unwrap()
+                .refresh_interval(),
             Some(Duration::from_secs(60))
         );
     }
@@ -209,6 +298,8 @@ mod tests {
         let config = parse(&[
             "--http-api-id",
             "a",
+            "--stage",
+            "s",
             "--stage-variable",
             "host=flag",
             "--stage-variable",
@@ -233,7 +324,27 @@ mod tests {
                 ("host".to_owned(), "flag".to_owned()),
             ])
         );
-        assert!(parse(&["--http-api-id", "a", "--stage-variable", "novalue"]).is_err());
-        assert!(parse(&["--http-api-id", "a", "--stage-variable", "=v"]).is_err());
+        assert!(
+            parse(&[
+                "--http-api-id",
+                "a",
+                "--stage",
+                "s",
+                "--stage-variable",
+                "novalue"
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(&[
+                "--http-api-id",
+                "a",
+                "--stage",
+                "s",
+                "--stage-variable",
+                "=v"
+            ])
+            .is_err()
+        );
     }
 }
