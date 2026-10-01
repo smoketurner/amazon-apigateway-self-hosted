@@ -6,6 +6,7 @@ use std::time::Duration;
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use serde_json::Value;
 
+use crate::aws::{FunctionArn, IntegrationCredentials, RoleArn};
 use crate::model::{
     ApiKind, ConnectionType, IntegrationSpec, IntegrationType, PayloadVersion, ResponseTransferMode,
 };
@@ -127,13 +128,22 @@ impl Integration {
                 let function = uri
                     .as_deref()
                     .and_then(LambdaProxy::function_arn)
-                    .ok_or("AWS_PROXY integration is not a Lambda function")?;
+                    .ok_or("AWS_PROXY integration is not a Lambda function")?
+                    .parse::<FunctionArn>()?;
+                let credentials = match spec.credentials.as_deref().map(str::parse).transpose()? {
+                    None => None,
+                    Some(IntegrationCredentials::Role(role)) => Some(role),
+                    Some(IntegrationCredentials::Caller) => {
+                        return Err("caller credential passthrough (arn:aws:iam::*:user/*) needs IAM-authenticated callers, which cannot be verified outside AWS".to_owned());
+                    }
+                };
                 let payload = spec.payload_format_version.unwrap_or(match kind {
                     ApiKind::Rest => PayloadVersion::V1,
                     ApiKind::Http => PayloadVersion::V2,
                 });
                 Ok(Self::Lambda(LambdaProxy {
                     function,
+                    credentials,
                     payload,
                     timeout,
                 }))
@@ -322,7 +332,9 @@ impl MockResponse {
 
 #[derive(Debug, Clone)]
 pub(crate) struct LambdaProxy {
-    pub(crate) function: String,
+    pub(crate) function: FunctionArn,
+    /// The integration role to invoke as; `None` uses the gateway's credentials.
+    pub(crate) credentials: Option<RoleArn>,
     pub(crate) payload: PayloadVersion,
     pub(crate) timeout: Duration,
 }
@@ -419,7 +431,7 @@ mod tests {
             };
             assert_eq!(lambda.payload, expected);
             assert_eq!(
-                lambda.function,
+                lambda.function.as_str(),
                 "arn:aws:lambda:us-east-1:123456789012:function:pets"
             );
         }
@@ -428,7 +440,10 @@ mod tests {
             panic!("expected Lambda");
         };
         assert_eq!(lambda.payload, PayloadVersion::V1);
-        assert_eq!(lambda.function, "arn:aws:lambda:us-east-1:1:function:f");
+        assert_eq!(
+            lambda.function.as_str(),
+            "arn:aws:lambda:us-east-1:1:function:f"
+        );
     }
 
     #[test]
@@ -526,6 +541,31 @@ mod tests {
         }
         assert!(matches!(
             Integration::compile(None, ApiKind::Rest, &StageVariables::default()),
+            Integration::Unsupported { .. }
+        ));
+    }
+
+    #[test]
+    fn lambda_credentials_are_typed_and_caller_passthrough_is_unsupported() {
+        let lambda = |credentials: &str| {
+            compile(
+                json!({"type": "aws_proxy", "uri": "arn:aws:lambda:eu-west-1:1:function:f", "credentials": credentials}),
+                ApiKind::Rest,
+            )
+        };
+        let Integration::Lambda(proxy) = lambda("arn:aws:iam::123456789012:role/invoke") else {
+            panic!("expected Lambda");
+        };
+        assert_eq!(
+            proxy.credentials.unwrap().as_str(),
+            "arn:aws:iam::123456789012:role/invoke"
+        );
+        assert_eq!(proxy.function.region(), Some("eu-west-1"));
+        assert!(
+            matches!(lambda("arn:aws:iam::*:user/*"), Integration::Unsupported { ref reason } if reason.contains("passthrough"))
+        );
+        assert!(matches!(
+            lambda("not-an-arn"),
             Integration::Unsupported { .. }
         ));
     }

@@ -3,7 +3,6 @@
 
 use std::collections::BTreeMap;
 
-use aws_sdk_lambda::primitives::Blob;
 use axum::body::Body;
 use axum::http::{HeaderName, HeaderValue, StatusCode, header};
 use axum::response::Response;
@@ -12,246 +11,290 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use crate::gateway::{self, ApiContext, Incoming};
-use crate::integration::LambdaProxy;
-use crate::model::{PayloadVersion, RoutePath};
-use crate::proxy::timeout_error;
+use crate::aws::AwsClients;
+use crate::gateway::GatewayError;
+use crate::integration::{LambdaProxy, StageVariables};
+use crate::model::PayloadVersion;
+use crate::pipeline::RequestContext;
 use crate::route::Route;
 
-pub(crate) async fn invoke(
-    ctx: &ApiContext,
-    target: &LambdaProxy,
-    route: &Route,
-    incoming: &Incoming,
-) -> Response {
-    let event = match target.payload {
-        PayloadVersion::V1 => event_v1(ctx, route, incoming),
-        PayloadVersion::V2 => event_v2(ctx, route, incoming),
-    };
-    let call = ctx
-        .lambda
-        .invoke()
-        .function_name(&target.function)
-        .payload(Blob::new(event.to_string()))
-        .send();
-    let output = match tokio::time::timeout(target.timeout, call).await {
-        Err(_) => {
-            tracing::warn!(route = %route.key, function = target.function, "Lambda invocation timed out");
-            return timeout_error(ctx.kind);
+impl LambdaProxy {
+    pub(crate) async fn invoke(
+        &self,
+        aws: &AwsClients,
+        route: &Route,
+        ctx: &RequestContext,
+        stage_variables: &StageVariables,
+    ) -> Response {
+        let kind = ctx.api.kind;
+        let event = ProxyEvent {
+            ctx,
+            stage_variables,
         }
-        Ok(Err(err)) => {
-            tracing::error!(
-                route = %route.key,
-                function = target.function,
-                err = %aws_sdk_lambda::error::DisplayErrorContext(err),
-                "Lambda invocation failed"
-            );
-            return internal_error();
+        .render(self.payload);
+        let call = aws.invoke_lambda(
+            &self.function,
+            self.credentials.as_ref(),
+            event.to_string().into_bytes(),
+            ctx.trace_header(),
+        );
+        let invocation = match tokio::time::timeout(self.timeout, call).await {
+            Err(_) => {
+                tracing::warn!(route = %route.key, function = %self.function, "Lambda invocation timed out");
+                return GatewayError::IntegrationTimeout.response(kind);
+            }
+            Ok(Err(err)) => {
+                tracing::error!(route = %route.key, function = %self.function, %err, "Lambda invocation failed");
+                return GatewayError::IntegrationFailure.response(kind);
+            }
+            Ok(Ok(invocation)) => invocation,
+        };
+        if let Some(function_error) = invocation.function_error {
+            tracing::warn!(route = %route.key, function = %self.function, function_error, "Lambda function returned an error");
+            return GatewayError::IntegrationFailure.response(kind);
         }
-        Ok(Ok(output)) => output,
-    };
-    if let Some(function_error) = output.function_error {
-        tracing::warn!(route = %route.key, function = target.function, function_error, "Lambda function returned an error");
-        return internal_error();
-    }
-    let payload = output.payload.map(Blob::into_inner).unwrap_or_default();
-    match into_response(&payload, target.payload) {
-        Ok(response) => response,
-        Err(reason) => {
-            tracing::error!(route = %route.key, function = target.function, reason, "malformed Lambda proxy response");
-            internal_error()
+        match ProxyResponse::into_http(&invocation.payload, self.payload) {
+            Ok(response) => response,
+            Err(reason) => {
+                tracing::error!(route = %route.key, function = %self.function, reason, "malformed Lambda proxy response");
+                GatewayError::IntegrationFailure.response(kind)
+            }
         }
     }
 }
 
-fn internal_error() -> Response {
-    gateway::error(StatusCode::BAD_GATEWAY, "Internal server error")
+/// A request body as proxy events carry it: valid UTF-8 as text, anything else
+/// base64-encoded.
+struct EventBody {
+    body: Value,
+    is_base64: bool,
 }
 
-/// Bodies that are valid UTF-8 are passed as text; anything else is base64.
-fn encode_body(body: &[u8]) -> (Value, bool) {
-    if body.is_empty() {
-        return (Value::Null, false);
-    }
-    match std::str::from_utf8(body) {
-        Ok(text) => (Value::String(text.to_owned()), false),
-        Err(_) => (Value::String(BASE64.encode(body)), true),
-    }
-}
-
-fn object_or_null(map: Map<String, Value>) -> Value {
-    if map.is_empty() {
-        Value::Null
-    } else {
-        Value::Object(map)
-    }
-}
-
-fn string_map<'a>(pairs: impl IntoIterator<Item = (&'a String, &'a String)>) -> Map<String, Value> {
-    pairs
-        .into_iter()
-        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-        .collect()
-}
-
-fn resource_path(route: &Route) -> String {
-    match route.path {
-        RoutePath::Default => "$default".to_owned(),
-        RoutePath::Resource(ref path) => path.clone(),
-    }
-}
-
-fn stage_name(ctx: &ApiContext) -> &str {
-    ctx.stage.as_deref().unwrap_or("$default")
-}
-
-fn event_v1(ctx: &ApiContext, route: &Route, incoming: &Incoming) -> Value {
-    let mut headers = Map::new();
-    let mut multi_headers: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-    for (name, value) in &incoming.headers {
-        let value = String::from_utf8_lossy(value.as_bytes()).into_owned();
-        headers.insert(name.as_str().to_owned(), Value::String(value.clone()));
-        multi_headers
-            .entry(name.as_str().to_owned())
-            .or_default()
-            .push(Value::String(value));
-    }
-    let mut query = Map::new();
-    let mut multi_query: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-    for (key, value) in incoming.query_pairs() {
-        query.insert(key.clone(), Value::String(value.clone()));
-        multi_query
-            .entry(key)
-            .or_default()
-            .push(Value::String(value));
-    }
-    let (body, is_base64) = encode_body(&incoming.body);
-    let resource = resource_path(route);
-    json!({
-        "resource": resource,
-        "path": incoming.path,
-        "httpMethod": incoming.method.as_str(),
-        "headers": object_or_null(headers),
-        "multiValueHeaders": object_or_null(multi_headers.into_iter().map(|(k, v)| (k, Value::Array(v))).collect()),
-        "queryStringParameters": object_or_null(query),
-        "multiValueQueryStringParameters": object_or_null(multi_query.into_iter().map(|(k, v)| (k, Value::Array(v))).collect()),
-        "pathParameters": object_or_null(string_map(incoming.path_params.iter().map(|(k, v)| (k, v)))),
-        "stageVariables": object_or_null(string_map(&ctx.stage_variables)),
-        "requestContext": {
-            "accountId": "",
-            "apiId": ctx.api_id,
-            "httpMethod": incoming.method.as_str(),
-            "path": incoming.path,
-            "protocol": "HTTP/1.1",
-            "requestId": incoming.request_id.to_string(),
-            "requestTime": request_time(incoming.received),
-            "requestTimeEpoch": incoming.received.as_millisecond(),
-            "resourcePath": resource,
-            "stage": stage_name(ctx),
-            "domainName": incoming.header_str("host").unwrap_or_default(),
-            "identity": {
-                "sourceIp": incoming.source_ip,
-                "userAgent": incoming.header_str("user-agent"),
+impl EventBody {
+    fn new(body: &[u8]) -> Self {
+        if body.is_empty() {
+            return Self {
+                body: Value::Null,
+                is_base64: false,
+            };
+        }
+        match std::str::from_utf8(body) {
+            Ok(text) => Self {
+                body: Value::String(text.to_owned()),
+                is_base64: false,
             },
-        },
-        "body": body,
-        "isBase64Encoded": is_base64,
-    })
+            Err(_) => Self {
+                body: Value::String(BASE64.encode(body)),
+                is_base64: true,
+            },
+        }
+    }
 }
 
-fn event_v2(ctx: &ApiContext, route: &Route, incoming: &Incoming) -> Value {
-    let mut headers: BTreeMap<String, String> = BTreeMap::new();
-    let mut cookies = Vec::new();
-    for (name, value) in &incoming.headers {
-        let value = String::from_utf8_lossy(value.as_bytes()).into_owned();
-        if name == header::COOKIE {
-            cookies.extend(
-                value
-                    .split(';')
-                    .map(str::trim)
-                    .filter(|c| !c.is_empty())
-                    .map(str::to_owned),
-            );
-            continue;
+/// A JSON object of string values.
+#[derive(Default)]
+struct StringFields(Map<String, Value>);
+
+impl StringFields {
+    /// Payload format 1.0 sends `null` rather than an empty object.
+    fn or_null(self) -> Value {
+        if self.0.is_empty() {
+            Value::Null
+        } else {
+            Value::Object(self.0)
         }
-        join_into(&mut headers, name.as_str().to_owned(), value);
     }
-    let mut query: BTreeMap<String, String> = BTreeMap::new();
-    for (key, value) in incoming.query_pairs() {
-        join_into(&mut query, key, value);
+}
+
+impl<'a> FromIterator<(&'a String, &'a String)> for StringFields {
+    fn from_iter<I: IntoIterator<Item = (&'a String, &'a String)>>(iter: I) -> Self {
+        Self(
+            iter.into_iter()
+                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                .collect(),
+        )
     }
-    let (body, is_base64) = encode_body(&incoming.body);
-    let route_key = &route.key;
-    let host = incoming.header_str("host").unwrap_or_default();
-    let mut event = json!({
-        "version": "2.0",
-        "routeKey": route_key,
-        "rawPath": incoming.path,
-        "rawQueryString": incoming.query.as_deref().unwrap_or_default(),
-        "headers": string_map(&headers),
-        "requestContext": {
-            "accountId": "",
-            "apiId": ctx.api_id,
-            "domainName": host,
-            "domainPrefix": host.split('.').next().unwrap_or_default(),
-            "http": {
-                "method": incoming.method.as_str(),
-                "path": incoming.path,
+}
+
+/// Values gathered per key, in arrival order.
+#[derive(Default)]
+struct MultiValues(BTreeMap<String, Vec<String>>);
+
+impl MultiValues {
+    fn push(&mut self, key: String, value: String) {
+        self.0.entry(key).or_default().push(value);
+    }
+
+    /// Payload format 1.0: the last value per key, and every value per key.
+    fn single_and_multi(&self) -> (Value, Value) {
+        if self.0.is_empty() {
+            return (Value::Null, Value::Null);
+        }
+        let mut single = Map::new();
+        let mut multi = Map::new();
+        for (key, values) in &self.0 {
+            if let Some(last) = values.last() {
+                single.insert(key.clone(), json!(last));
+            }
+            multi.insert(key.clone(), json!(values));
+        }
+        (Value::Object(single), Value::Object(multi))
+    }
+
+    /// Payload format 2.0 joins repeated values with commas.
+    fn joined(&self) -> Map<String, Value> {
+        self.0
+            .iter()
+            .map(|(k, v)| (k.clone(), json!(v.join(","))))
+            .collect()
+    }
+}
+
+/// An API Gateway proxy event built from a request.
+struct ProxyEvent<'a> {
+    ctx: &'a RequestContext,
+    stage_variables: &'a StageVariables,
+}
+
+impl ProxyEvent<'_> {
+    fn render(&self, version: PayloadVersion) -> Value {
+        match version {
+            PayloadVersion::V1 => self.v1(),
+            PayloadVersion::V2 => self.v2(),
+        }
+    }
+
+    fn headers(&self) -> MultiValues {
+        let mut headers = MultiValues::default();
+        for (name, value) in &self.ctx.headers {
+            headers.push(
+                name.as_str().to_owned(),
+                String::from_utf8_lossy(value.as_bytes()).into_owned(),
+            );
+        }
+        headers
+    }
+
+    fn query(&self) -> MultiValues {
+        let mut query = MultiValues::default();
+        for (key, value) in self.ctx.query.pairs() {
+            query.push(key, value);
+        }
+        query
+    }
+
+    fn path_parameters(&self) -> StringFields {
+        self.ctx.path_params.iter().map(|(k, v)| (k, v)).collect()
+    }
+
+    fn v1(&self) -> Value {
+        let ctx = self.ctx;
+        let (headers, multi_headers) = self.headers().single_and_multi();
+        let (query, multi_query) = self.query().single_and_multi();
+        let body = EventBody::new(&ctx.body);
+        json!({
+            "resource": ctx.resource_path,
+            "path": ctx.path,
+            "httpMethod": ctx.method.as_str(),
+            "headers": headers,
+            "multiValueHeaders": multi_headers,
+            "queryStringParameters": query,
+            "multiValueQueryStringParameters": multi_query,
+            "pathParameters": self.path_parameters().or_null(),
+            "stageVariables": self.stage_variables.into_iter().collect::<StringFields>().or_null(),
+            "requestContext": {
+                "accountId": "",
+                "apiId": ctx.api.api_id,
+                "httpMethod": ctx.method.as_str(),
+                "path": ctx.path,
                 "protocol": "HTTP/1.1",
-                "sourceIp": incoming.source_ip,
-                "userAgent": incoming.header_str("user-agent"),
+                "requestId": ctx.request_id.to_string(),
+                "extendedRequestId": ctx.request_id.to_string(),
+                "requestTime": ctx.request_time(),
+                "requestTimeEpoch": ctx.received.as_millisecond(),
+                "resourcePath": ctx.resource_path,
+                "stage": ctx.api.stage_name(),
+                "domainName": ctx.domain_name(),
+                "domainPrefix": ctx.domain_prefix(),
+                "identity": {
+                    "sourceIp": ctx.source_ip(),
+                    "userAgent": ctx.header_str("user-agent"),
+                },
+                "authorizer": (!ctx.authorizer.is_empty()).then(|| Value::Object(ctx.authorizer.clone())),
             },
-            "requestId": incoming.request_id.to_string(),
-            "routeKey": route_key,
-            "stage": stage_name(ctx),
-            "time": request_time(incoming.received),
-            "timeEpoch": incoming.received.as_millisecond(),
-        },
-        "isBase64Encoded": is_base64,
-    });
-    if let Value::Object(ref mut fields) = event {
-        if !cookies.is_empty() {
-            fields.insert("cookies".to_owned(), json!(cookies));
-        }
-        if !query.is_empty() {
-            fields.insert(
-                "queryStringParameters".to_owned(),
-                Value::Object(string_map(&query)),
-            );
-        }
-        if !incoming.path_params.is_empty() {
-            fields.insert(
-                "pathParameters".to_owned(),
-                Value::Object(string_map(incoming.path_params.iter().map(|(k, v)| (k, v)))),
-            );
-        }
-        if !ctx.stage_variables.is_empty() {
-            fields.insert(
-                "stageVariables".to_owned(),
-                Value::Object(string_map(&ctx.stage_variables)),
-            );
-        }
-        if !body.is_null() {
-            fields.insert("body".to_owned(), body);
-        }
-    }
-    event
-}
-
-/// Payload format 2.0 joins repeated headers and query parameters with commas.
-fn join_into(map: &mut BTreeMap<String, String>, key: String, value: String) {
-    map.entry(key)
-        .and_modify(|existing| {
-            existing.push(',');
-            existing.push_str(&value);
+            "body": body.body,
+            "isBase64Encoded": body.is_base64,
         })
-        .or_insert(value);
+    }
+
+    fn v2(&self) -> Value {
+        let ctx = self.ctx;
+        let mut headers = self.headers();
+        let cookies: Vec<String> = headers
+            .0
+            .remove(header::COOKIE.as_str())
+            .unwrap_or_default()
+            .iter()
+            .flat_map(|value| value.split(';'))
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let body = EventBody::new(&ctx.body);
+        let mut event = json!({
+            "version": "2.0",
+            "routeKey": ctx.route_key.as_str(),
+            "rawPath": ctx.path,
+            "rawQueryString": ctx.query.raw().unwrap_or_default(),
+            "headers": headers.joined(),
+            "requestContext": {
+                "accountId": "",
+                "apiId": ctx.api.api_id,
+                "domainName": ctx.domain_name(),
+                "domainPrefix": ctx.domain_prefix(),
+                "http": {
+                    "method": ctx.method.as_str(),
+                    "path": ctx.path,
+                    "protocol": "HTTP/1.1",
+                    "sourceIp": ctx.source_ip(),
+                    "userAgent": ctx.header_str("user-agent"),
+                },
+                "requestId": ctx.request_id.to_string(),
+                "routeKey": ctx.route_key.as_str(),
+                "stage": ctx.api.stage_name(),
+                "time": ctx.request_time(),
+                "timeEpoch": ctx.received.as_millisecond(),
+            },
+            "isBase64Encoded": body.is_base64,
+        });
+        if let Value::Object(ref mut fields) = event {
+            if !cookies.is_empty() {
+                fields.insert("cookies".to_owned(), json!(cookies));
+            }
+            let query = self.query().joined();
+            if !query.is_empty() {
+                fields.insert("queryStringParameters".to_owned(), Value::Object(query));
+            }
+            let path_parameters = self.path_parameters();
+            if !path_parameters.0.is_empty() {
+                fields.insert(
+                    "pathParameters".to_owned(),
+                    Value::Object(path_parameters.0),
+                );
+            }
+            if !self.stage_variables.is_empty() {
+                let variables: StringFields = self.stage_variables.into_iter().collect();
+                fields.insert("stageVariables".to_owned(), Value::Object(variables.0));
+            }
+            if !body.body.is_null() {
+                fields.insert("body".to_owned(), body.body);
+            }
+        }
+        event
+    }
 }
 
-fn request_time(at: jiff::Timestamp) -> String {
-    at.strftime("%d/%b/%Y:%H:%M:%S %z").to_string()
-}
-
+/// A structured Lambda proxy response.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProxyResponse {
@@ -267,57 +310,61 @@ struct ProxyResponse {
     is_base64_encoded: bool,
 }
 
-fn into_response(payload: &[u8], version: PayloadVersion) -> Result<Response, String> {
-    let value: Value = serde_json::from_slice(payload).map_err(|e| format!("not JSON: {e}"))?;
-    let has_status = value.get("statusCode").is_some();
-    if version == PayloadVersion::V2 && !has_status {
-        let mut response = Response::new(Body::from(value.to_string()));
-        response.headers_mut().insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
-        return Ok(response);
-    }
-    let parsed = ProxyResponse::deserialize(&value).map_err(|e| e.to_string())?;
-    let status = StatusCode::from_u16(parsed.status_code).map_err(|e| e.to_string())?;
-    let body = match (parsed.body, parsed.is_base64_encoded) {
-        (Some(body), true) => BASE64
-            .decode(body)
-            .map_err(|e| format!("body is not base64: {e}"))?,
-        (Some(body), false) => body.into_bytes(),
-        (None, _) => Vec::new(),
-    };
-    let mut response = Response::new(Body::from(body));
-    *response.status_mut() = status;
-    let headers = response.headers_mut();
-    for (name, value) in parsed.headers {
-        let (name, value) = header_pair(&name, &value)?;
-        headers.insert(name, value);
-    }
-    for (name, values) in parsed.multi_value_headers {
-        for value in values {
-            let (name, value) = header_pair(&name, &value)?;
-            headers.append(name, value);
+impl ProxyResponse {
+    /// Turns a function's payload into the HTTP response API Gateway would
+    /// send. Payload format 2.0 treats JSON without `statusCode` as a 200 JSON
+    /// body.
+    fn into_http(payload: &[u8], version: PayloadVersion) -> Result<Response, String> {
+        let value: Value = serde_json::from_slice(payload).map_err(|e| format!("not JSON: {e}"))?;
+        if version == PayloadVersion::V2 && value.get("statusCode").is_none() {
+            let mut response = Response::new(Body::from(value.to_string()));
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            return Ok(response);
         }
+        let parsed = Self::deserialize(&value).map_err(|e| e.to_string())?;
+        let status = StatusCode::from_u16(parsed.status_code).map_err(|e| e.to_string())?;
+        let body = match (parsed.body, parsed.is_base64_encoded) {
+            (Some(body), true) => BASE64
+                .decode(body)
+                .map_err(|e| format!("body is not base64: {e}"))?,
+            (Some(body), false) => body.into_bytes(),
+            (None, _) => Vec::new(),
+        };
+        let mut response = Response::new(Body::from(body));
+        *response.status_mut() = status;
+        let headers = response.headers_mut();
+        for (name, value) in parsed.headers {
+            let (name, value) = Self::header(&name, &value)?;
+            headers.insert(name, value);
+        }
+        for (name, values) in parsed.multi_value_headers {
+            for value in values {
+                let (name, value) = Self::header(&name, &value)?;
+                headers.append(name, value);
+            }
+        }
+        for cookie in parsed.cookies {
+            let value = HeaderValue::try_from(cookie).map_err(|e| e.to_string())?;
+            headers.append(header::SET_COOKIE, value);
+        }
+        Ok(response)
     }
-    for cookie in parsed.cookies {
-        let value = HeaderValue::try_from(cookie).map_err(|e| e.to_string())?;
-        headers.append(header::SET_COOKIE, value);
-    }
-    Ok(response)
-}
 
-fn header_pair(name: &str, value: &Value) -> Result<(HeaderName, HeaderValue), String> {
-    let text = match value {
-        Value::String(s) => s.clone(),
-        Value::Number(_) | Value::Bool(_) => value.to_string(),
-        Value::Null | Value::Array(_) | Value::Object(_) => {
-            return Err(format!("header {name:?} has a non-scalar value"));
-        }
-    };
-    let name = HeaderName::try_from(name).map_err(|e| e.to_string())?;
-    let value = HeaderValue::try_from(text).map_err(|e| e.to_string())?;
-    Ok((name, value))
+    fn header(name: &str, value: &Value) -> Result<(HeaderName, HeaderValue), String> {
+        let text = match value {
+            Value::String(s) => s.clone(),
+            Value::Number(_) | Value::Bool(_) => value.to_string(),
+            Value::Null | Value::Array(_) | Value::Object(_) => {
+                return Err(format!("header {name:?} has a non-scalar value"));
+            }
+        };
+        let name = HeaderName::try_from(name).map_err(|e| e.to_string())?;
+        let value = HeaderValue::try_from(text).map_err(|e| e.to_string())?;
+        Ok((name, value))
+    }
 }
 
 #[cfg(test)]
@@ -325,72 +372,37 @@ fn header_pair(name: &str, value: &Value) -> Result<(HeaderName, HeaderValue), S
 #[expect(clippy::indexing_slicing, reason = "tests index known JSON fields")]
 mod tests {
     use axum::body::Bytes;
-    use axum::http::{HeaderMap, Method};
 
     use super::*;
-    use crate::gateway::{AuthorizationMode, Enforcement, Unsupported};
-    use crate::integration::{Integration, StageVariables};
-    use crate::model::{ApiKind, MethodMatch, Protections, RouteKey};
+    use crate::model::ApiKind;
+    use crate::pipeline::QueryString;
+    use crate::pipeline::context::tests::request;
 
-    fn ctx(kind: ApiKind) -> ApiContext {
-        let config = aws_config::SdkConfig::builder()
-            .behavior_version(aws_config::BehaviorVersion::latest())
-            .build();
-        ApiContext {
-            kind,
-            api_id: "abc123".to_owned(),
-            stage: Some("prod".to_owned()),
-            stage_variables: StageVariables::new(BTreeMap::from([(
-                "env".to_owned(),
-                "local".to_owned(),
-            )])),
-            enforcement: Enforcement {
-                authorization: AuthorizationMode::Enforce,
-                resource_policy: Unsupported::Reject,
-                request_validation: Unsupported::Reject,
-            },
-            http: reqwest::Client::new(),
-            lambda: aws_sdk_lambda::Client::new(&config),
-        }
+    fn variables() -> StageVariables {
+        StageVariables::new(BTreeMap::from([("env".to_owned(), "local".to_owned())]))
     }
 
-    fn route() -> Route {
-        let method = MethodMatch::Exact(Method::POST);
-        let path = RoutePath::Resource("/pets/{petId}".to_owned());
-        Route {
-            key: RouteKey::new(&method, &path),
-            method,
-            path,
-            integration: Integration::Unsupported {
-                reason: String::new(),
-            },
-            protections: Protections::default(),
-            unenforced: Vec::new(),
-        }
+    fn incoming(body: &'static [u8]) -> RequestContext {
+        let mut ctx = request(ApiKind::Rest);
+        ctx.headers.append("x-multi", HeaderValue::from_static("a"));
+        ctx.headers.append("x-multi", HeaderValue::from_static("b"));
+        ctx.headers
+            .insert("cookie", HeaderValue::from_static("s=1; t=2"));
+        ctx.body = Bytes::from_static(body);
+        ctx
     }
 
-    fn incoming(body: &'static [u8]) -> Incoming {
-        let mut headers = HeaderMap::new();
-        headers.append("x-multi", HeaderValue::from_static("a"));
-        headers.append("x-multi", HeaderValue::from_static("b"));
-        headers.insert("cookie", HeaderValue::from_static("s=1; t=2"));
-        headers.insert("host", HeaderValue::from_static("api.example.com"));
-        Incoming {
-            request_id: uuid::Uuid::now_v7(),
-            received: jiff::Timestamp::from_second(1_700_000_000).unwrap(),
-            method: Method::POST,
-            path: "/pets/7".to_owned(),
-            query: Some("q=1&q=2".to_owned()),
-            headers,
-            path_params: vec![("petId".to_owned(), "7".to_owned())],
-            source_ip: Some("192.0.2.1".to_owned()),
-            body: Bytes::from_static(body),
+    fn event(ctx: &RequestContext, version: PayloadVersion) -> Value {
+        ProxyEvent {
+            ctx,
+            stage_variables: &variables(),
         }
+        .render(version)
     }
 
     #[test]
     fn v1_event_has_single_and_multi_value_fields() {
-        let event = event_v1(&ctx(ApiKind::Rest), &route(), &incoming(b"{\"a\":1}"));
+        let event = event(&incoming(b"{\"a\":1}"), PayloadVersion::V1);
         assert_eq!(event["resource"], "/pets/{petId}");
         assert_eq!(event["httpMethod"], "POST");
         assert_eq!(event["headers"]["x-multi"], "b");
@@ -408,13 +420,14 @@ mod tests {
             "14/Nov/2023:22:13:20 +0000"
         );
         assert_eq!(event["requestContext"]["identity"]["sourceIp"], "192.0.2.1");
+        assert!(event["requestContext"]["authorizer"].is_null());
         assert_eq!(event["body"], "{\"a\":1}");
         assert_eq!(event["isBase64Encoded"], false);
     }
 
     #[test]
     fn v2_event_joins_values_and_extracts_cookies() {
-        let event = event_v2(&ctx(ApiKind::Http), &route(), &incoming(&[0xff, 0x00]));
+        let event = event(&incoming(&[0xff, 0x00]), PayloadVersion::V2);
         assert_eq!(event["version"], "2.0");
         assert_eq!(event["routeKey"], "POST /pets/{petId}");
         assert_eq!(event["rawQueryString"], "q=1&q=2");
@@ -429,17 +442,29 @@ mod tests {
 
     #[test]
     fn empty_collections_are_null_in_v1_and_absent_in_v2() {
-        let mut req = incoming(b"");
-        req.query = None;
-        req.path_params.clear();
-        let mut context = ctx(ApiKind::Rest);
-        context.stage_variables = StageVariables::default();
-        let v1 = event_v1(&context, &route(), &req);
-        assert!(v1["queryStringParameters"].is_null());
-        assert!(v1["pathParameters"].is_null());
-        assert!(v1["stageVariables"].is_null());
-        assert!(v1["body"].is_null());
-        let v2 = event_v2(&context, &route(), &req);
+        let mut ctx = incoming(b"");
+        ctx.query = QueryString::new(None);
+        ctx.path_params.clear();
+        let empty = StageVariables::default();
+        let v1 = ProxyEvent {
+            ctx: &ctx,
+            stage_variables: &empty,
+        }
+        .render(PayloadVersion::V1);
+        for field in [
+            "queryStringParameters",
+            "multiValueQueryStringParameters",
+            "pathParameters",
+            "stageVariables",
+            "body",
+        ] {
+            assert!(v1[field].is_null(), "{field}");
+        }
+        let v2 = ProxyEvent {
+            ctx: &ctx,
+            stage_variables: &empty,
+        }
+        .render(PayloadVersion::V2);
         for field in [
             "queryStringParameters",
             "pathParameters",
@@ -448,6 +473,17 @@ mod tests {
         ] {
             assert!(v2.get(field).is_none(), "{field}");
         }
+    }
+
+    #[test]
+    fn authorizer_context_is_included_when_present() {
+        let mut ctx = incoming(b"");
+        ctx.authorizer
+            .insert("principalId".to_owned(), json!("user-1"));
+        assert_eq!(
+            event(&ctx, PayloadVersion::V1)["requestContext"]["authorizer"]["principalId"],
+            "user-1"
+        );
     }
 
     async fn body_of(response: Response) -> Bytes {
@@ -466,7 +502,8 @@ mod tests {
             "body": "aGk=",
             "isBase64Encoded": true
         });
-        let response = into_response(payload.to_string().as_bytes(), PayloadVersion::V2).unwrap();
+        let response =
+            ProxyResponse::into_http(payload.to_string().as_bytes(), PayloadVersion::V2).unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
         assert_eq!(response.headers()["x-num"], "2");
         assert_eq!(response.headers().get_all("x-many").iter().count(), 2);
@@ -476,7 +513,8 @@ mod tests {
 
     #[tokio::test]
     async fn v2_infers_response_without_status_code() {
-        let response = into_response(br#"{"hello":"world"}"#, PayloadVersion::V2).unwrap();
+        let response =
+            ProxyResponse::into_http(br#"{"hello":"world"}"#, PayloadVersion::V2).unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["content-type"], "application/json");
         assert_eq!(&body_of(response).await[..], br#"{"hello":"world"}"#);
@@ -494,7 +532,7 @@ mod tests {
         ];
         for payload in cases {
             assert!(
-                into_response(payload, PayloadVersion::V1).is_err(),
+                ProxyResponse::into_http(payload, PayloadVersion::V1).is_err(),
                 "{}",
                 String::from_utf8_lossy(payload)
             );

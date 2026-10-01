@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Requests run through an explicit `Pipeline` in API Gateway's stage order, carrying a
+  `RequestContext` that owns the `$context` variables used by events and, later, templates,
+  gateway responses, and access logs.
+- Lambda integrations invoke in the region from the function ARN (previously `AWS_REGION`),
+  run as the integration's `credentials` role when it has one (`--integration-credentials`),
+  propagate `X-Amzn-Trace-Id`, and can be pointed at a Runtime Interface Emulator with
+  `--lambda-endpoint`. `/routes` reports the outcome of every role assumption.
 - `--trusted-proxies` / `--trusted-proxy-hops` (`APIGW_TRUSTED_PROXIES`,
   `APIGW_TRUSTED_PROXY_HOPS`): the client address behind Istio or a load balancer is read from
   `X-Forwarded-For`, walking from the right, but only when the TCP peer is a trusted proxy.
