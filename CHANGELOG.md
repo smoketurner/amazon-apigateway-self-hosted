@@ -7,6 +7,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `docs/regex-engine.md` records the evaluation of the `java_regex` crate as a replacement for the
+  `apigw-regex` translation (#57). The translation stays: `java_regex` 0.1.0 overflows the stack on
+  about 4,500 characters of input and returns "no match" silently when it hits its step and depth
+  limits. A new test checks that matching 200,000 characters on a Tokio-sized 2 MiB stack does not
+  overflow it.
 - REST `AWS` integrations: SQS, SNS, DynamoDB, Step Functions, Kinesis, EventBridge, and S3
   (`action/` and `path/` URIs) and non-proxy Lambda run through the request and response templates,
   with SigV4-signed requests (integration `credentials` role or the gateway's credentials), JSON

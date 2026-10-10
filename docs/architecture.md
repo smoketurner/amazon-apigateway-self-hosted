@@ -2,7 +2,8 @@
 
 `crates/apigw` builds the binary. `crates/apigw-regex` is a pure library with no I/O: it translates
 Java regex syntax to `fancy-regex` and provides Java's matching, replacement, and split semantics
-(see its crate docs for the known differences from Java). `crates/apigw-vtl` is a second pure library:
+(see its crate docs for the known differences from Java, and [regex-engine.md](regex-engine.md) for
+why it is not replaced by the `java_regex` crate). `crates/apigw-vtl` is a second pure library:
 an Apache Velocity 1.7 parser and renderer with API Gateway's `$input`, `$util`, `$context`, and
 `$stageVariables`, Jayway-compatible JSON paths, and limits on output size, steps, and nesting. The
 gateway supplies the request through `TemplateInput` and reads `requestOverride` and

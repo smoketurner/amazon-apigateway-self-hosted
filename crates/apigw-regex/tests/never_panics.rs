@@ -110,6 +110,32 @@ fn options() -> RegexOptions {
         .with_size_limit(200_000)
 }
 
+/// Tokio's default worker thread stack, where the gateway evaluates every pattern.
+const WORKER_STACK: usize = 2 * 1024 * 1024;
+
+/// Matching a long input must not grow the call stack with the input: a stack overflow
+/// aborts the process, so no limit or error could catch it. A recursive backtracker
+/// (`java_regex` 0.1.0, evaluated in #57) overflows this stack on `.*` over about 4,500
+/// characters.
+#[test]
+#[expect(clippy::expect_used, reason = "test code")]
+fn long_inputs_do_not_overflow_a_worker_stack() {
+    std::thread::Builder::new()
+        .stack_size(WORKER_STACK)
+        .spawn(|| {
+            let input = "x".repeat(200_000);
+            for pattern in [
+                "(?s).*", "x*", r"\w+", "(?:x)*", r"(x)\1*", "[^,]*,?", "(?m)^x*$",
+            ] {
+                let regex = JavaRegex::new(pattern).expect("pattern compiles");
+                exercise(&regex, &input, "$0");
+            }
+        })
+        .expect("thread spawns")
+        .join()
+        .expect("matching returns");
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(1_500))]
 
