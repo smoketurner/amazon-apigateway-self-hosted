@@ -4,7 +4,7 @@
 # dependency compilation, so only the workspace crates recompile on source changes.
 
 # Keep this Rust version in sync with rust-toolchain.toml.
-FROM rust:1.98.1-alpine AS chef
+FROM rust:1.99.0-alpine AS chef
 # aws-lc-rs compiles C on musl: cmake/make/clang/perl and musl/linux headers.
 RUN apk add --no-cache musl-dev pkgconfig cmake make perl clang linux-headers \
     && cargo install cargo-chef --locked
