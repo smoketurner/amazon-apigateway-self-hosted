@@ -241,6 +241,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- GitHub Actions are locked with a workflow lockfile (`.github/workflows/actions.lock`, generated
+  by `gh actions-lock`): workflows reference actions by version tag and the lockfile records each
+  tag's commit SHA. `verify-lockfile.yml` checks the lockfile in CI and replaces
+  `secure_workflows.yml`, which required SHA-pinned `uses:` lines.
 - HTTP API route selection takes the method into account: a route that matches the path but
   not the method is skipped for a less specific route that serves it, as in API Gateway's
   documented priorities. Previously such requests fell through to `$default`.
