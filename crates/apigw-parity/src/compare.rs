@@ -247,7 +247,7 @@ mod tests {
     #[test]
     fn identical_observations_match() {
         let a = observation(200, &[("content-type", "text/plain")], "x");
-        assert!(Compare::default().diff(&a, &a.clone()).is_empty());
+        assert_eq!(Compare::default().diff(&a, &a.clone()), []);
     }
 
     #[test]
@@ -263,7 +263,7 @@ mod tests {
             status: false,
             ..Compare::default()
         };
-        assert!(lenient.diff(&a, &b).is_empty());
+        assert_eq!(lenient.diff(&a, &b), []);
     }
 
     #[test]
@@ -304,7 +304,7 @@ mod tests {
             &[],
             r#"{ "n": {"b":2, "time":"t2"}, "requestId":"r2", "a":1 }"#,
         );
-        assert!(compare.diff(&a, &b).is_empty());
+        assert_eq!(compare.diff(&a, &b), []);
         let c = observation(200, &[], r#"{"a":2}"#);
         assert_eq!(compare.diff(&a, &c).len(), 1);
         let not_json = observation(200, &[], "plain");
@@ -328,7 +328,7 @@ mod tests {
             body: BodyCompare::Ignore,
             ..Compare::default()
         };
-        assert!(ignore.diff(&a, &b).is_empty());
+        assert_eq!(ignore.diff(&a, &b), []);
     }
 
     #[test]
@@ -347,7 +347,7 @@ mod tests {
             ..echo("/a/1", &[])
         });
         let mut got = want.clone();
-        assert!(compare.diff(&want, &got).is_empty());
+        assert_eq!(compare.diff(&want, &got), []);
         if let Some(ref mut echoed) = got.echo {
             echoed.resource = None;
             echoed.path_parameters.clear();
@@ -394,6 +394,6 @@ mod tests {
         got.echo = None;
         assert_eq!(compare.diff(&want, &got).len(), 1);
         want.echo = None;
-        assert!(compare.diff(&want, &got).is_empty());
+        assert_eq!(compare.diff(&want, &got), []);
     }
 }

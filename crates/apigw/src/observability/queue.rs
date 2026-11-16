@@ -776,7 +776,7 @@ mod tests {
         );
         let shipper = cloudwatch(&aws, false);
         let failed = shipper.ship(vec![event(1, "a")]).await;
-        assert!(failed.is_empty());
+        assert_eq!(failed, []);
         let targets: Vec<String> = aws.calls().into_iter().map(|c| c.target).collect();
         assert_eq!(
             targets,
@@ -830,12 +830,7 @@ mod tests {
         let shipper = Shipper::XRay(XRayShipper::new(aws.xray()));
         let first = event(1, r#"{"id":"aaaaaaaaaaaaaaaa"}"#);
         let second = event(2, r#"{"id":"bbbbbbbbbbbbbbbb"}"#);
-        assert!(
-            shipper
-                .ship(vec![first.clone(), second.clone()])
-                .await
-                .is_empty()
-        );
+        assert_eq!(shipper.ship(vec![first.clone(), second.clone()]).await, []);
         let call = &aws.calls()[0];
         assert_eq!(call.target, "/TraceSegments");
         assert_eq!(call.body["TraceSegmentDocuments"][0], first.message);

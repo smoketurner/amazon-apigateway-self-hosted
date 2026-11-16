@@ -394,7 +394,7 @@ impl ResponseStream {
                 match event {
                     None => return Ok(None),
                     Some(InvokeWithResponseStreamResponseEvent::PayloadChunk(update)) => {
-                        let chunk = update.payload.map(Blob::into_inner).unwrap_or_default();
+                        let chunk = update.payload.map_or_default(Blob::into_inner);
                         if !chunk.is_empty() {
                             return Ok(Some(Bytes::from(chunk)));
                         }
@@ -612,7 +612,7 @@ impl AwsClients {
             .map_err(|err| InvokeError::Aws(DisplayErrorContext(err).to_string()))?;
         Ok(Invocation {
             status: u16::try_from(output.status_code).unwrap_or(200),
-            payload: output.payload.map(Blob::into_inner).unwrap_or_default(),
+            payload: output.payload.map_or_default(Blob::into_inner),
             function_error: output.function_error,
         })
     }
@@ -1120,7 +1120,13 @@ mod tests {
     }
 
     fn credentials_expiring(expiry: Option<jiff::Timestamp>) -> Credentials {
-        Credentials::new("id", "secret", None, expiry.map(SystemTime::from), "test")
+        Credentials::new(
+            "id",
+            "secret",
+            None,
+            expiry.map(|at| SystemTime::try_from(at).unwrap()),
+            "test",
+        )
     }
 
     fn after(now: jiff::Timestamp, seconds: i64) -> jiff::Timestamp {

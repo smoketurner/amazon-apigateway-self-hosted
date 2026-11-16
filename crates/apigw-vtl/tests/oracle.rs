@@ -142,8 +142,7 @@ fn compare(case: &Case, defaults: &Defaults, expected: &Expected) -> Result<(), 
             let want_context = expected
                 .context
                 .as_ref()
-                .map(|json| Value::from(json).to_json().unwrap_or_default())
-                .unwrap_or_default();
+                .map_or_default(|json| Value::from(json).to_json().unwrap_or_default());
             if context != want_context {
                 return Err(format!(
                     "context differs\n  velocity: {want_context}\n  ours:     {context}"

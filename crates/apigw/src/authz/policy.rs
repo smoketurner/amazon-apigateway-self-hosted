@@ -349,11 +349,7 @@ impl TryFrom<RawStatement> for Statement {
             resources: Selector::new(raw.resource, raw.not_resource, CaseSensitivity::Sensitive)
                 .ok_or(PolicyError::MissingResource)?,
             principal: PrincipalSpec::parse(raw.principal.as_ref(), raw.not_principal.as_ref()),
-            conditions: raw
-                .condition
-                .as_ref()
-                .map(Conditions::parse)
-                .unwrap_or_default(),
+            conditions: raw.condition.as_ref().map_or_default(Conditions::parse),
         })
     }
 }

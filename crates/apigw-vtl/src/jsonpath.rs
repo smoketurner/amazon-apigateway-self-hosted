@@ -996,8 +996,7 @@ impl PathParser {
         let text: String = self
             .chars
             .get(start..self.pos)
-            .map(|s| s.iter().collect())
-            .unwrap_or_default();
+            .map_or_default(|s| s.iter().collect());
         if text.is_empty() {
             return Ok(None);
         }
@@ -1278,8 +1277,7 @@ impl PathParser {
         let text: String = self
             .chars
             .get(start..self.pos)
-            .map(|s| s.iter().collect())
-            .unwrap_or_default();
+            .map_or_default(|s| s.iter().collect());
         if is_float {
             text.parse::<f64>()
                 .map(Value::Double)

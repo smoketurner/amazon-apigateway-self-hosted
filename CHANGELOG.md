@@ -241,6 +241,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The toolchain is Rust 1.100.0 (`rust-toolchain.toml`, `rust-version`, and the `Dockerfile` build
+  image), and dependencies are updated to their latest releases, including `jiff` 1.0 and
+  `jsonwebtoken` 12. `matchit` stays on 0.8.4 because axum 0.8 requires exactly that version and the
+  route pre-check has to match it.
 - HTTP API route selection takes the method into account: a route that matches the path but
   not the method is skipped for a less specific route that serves it, as in API Gateway's
   documented priorities. Previously such requests fell through to `$default`.

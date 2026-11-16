@@ -333,8 +333,7 @@ impl StageSettings {
     /// SDK maps are unordered; settings are kept sorted so snapshots compare
     /// and serialize deterministically.
     fn sorted(map: Option<&HashMap<String, String>>) -> BTreeMap<String, String> {
-        map.map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-            .unwrap_or_default()
+        map.map_or_default(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
     }
 }
 

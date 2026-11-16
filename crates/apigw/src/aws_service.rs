@@ -278,7 +278,8 @@ impl ServiceCall {
             .credentials(role)
             .await
             .map_err(ServiceError::Credentials)?;
-        let now = SystemTime::from(jiff::Timestamp::now());
+        let now = SystemTime::try_from(jiff::Timestamp::now())
+            .map_err(|err| ServiceError::Signing(err.to_string()))?;
         let method = self.method.clone();
         let body = self.body.clone();
         let prepared = self.prepare(aws, &credentials, now)?;

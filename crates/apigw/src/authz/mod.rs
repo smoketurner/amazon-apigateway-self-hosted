@@ -217,12 +217,10 @@ impl AuthRequest<'_> {
             (Some(_), None, _) => return Err(Denial::Unauthorized),
         };
         match verdict {
-            Verdict::Allow => Ok(authorized
-                .map(|a| Admitted {
-                    context: a.context,
-                    usage_key: a.usage_key,
-                })
-                .unwrap_or_default()),
+            Verdict::Allow => Ok(authorized.map_or_default(|a| Admitted {
+                context: a.context,
+                usage_key: a.usage_key,
+            })),
             Verdict::Deny {
                 explicit,
                 by: DeniedBy::ResourcePolicy,

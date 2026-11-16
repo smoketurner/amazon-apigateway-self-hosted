@@ -218,14 +218,12 @@ impl CacheSettings {
             .ok()
             .filter(|ttl| *ttl > 0)?;
         let integration = operation.integration.as_ref();
-        let parameters = integration
-            .map(|spec| {
-                spec.cache_key_parameters
-                    .iter()
-                    .filter_map(|name| KeyParameter::parse(name, spec))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let parameters = integration.map_or_default(|spec| {
+            spec.cache_key_parameters
+                .iter()
+                .filter_map(|name| KeyParameter::parse(name, spec))
+                .collect()
+        });
         let route = integration
             .and_then(|spec| spec.cache_namespace.clone())
             .unwrap_or_else(|| match operation.path {

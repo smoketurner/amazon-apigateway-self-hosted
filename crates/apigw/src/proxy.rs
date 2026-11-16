@@ -356,7 +356,7 @@ impl HttpProxy {
             }
         };
         let mut url = reqwest::Url::parse(&url).map_err(|e| e.to_string())?;
-        let mut query = QueryBuilder(url.query().map(str::to_owned).unwrap_or_default());
+        let mut query = QueryBuilder(url.query().map_or_default(str::to_owned));
         if handling == QueryHandling::Forward
             && let Some(raw) = ctx.query.raw()
         {
@@ -711,7 +711,10 @@ mod tests {
             values(&ctx, ParamSource::MultiHeader("x-all".to_owned())),
             ["first", "second"]
         );
-        assert!(values(&ctx, ParamSource::MultiQuery("absent".to_owned())).is_empty());
+        assert_eq!(
+            values(&ctx, ParamSource::MultiQuery("absent".to_owned())),
+            Vec::<String>::new()
+        );
         assert_eq!(values(&ctx, ParamSource::Query("one".to_owned())), ["1"]);
         assert_eq!(
             values(&ctx, ParamSource::BodyPath("owner.name".to_owned())),
@@ -725,13 +728,22 @@ mod tests {
             values(&ctx, ParamSource::BodyPath("list".to_owned())),
             ["[1,2]"]
         );
-        assert!(values(&ctx, ParamSource::BodyPath("nothing".to_owned())).is_empty());
-        assert!(values(&ctx, ParamSource::BodyPath("missing.field".to_owned())).is_empty());
+        assert_eq!(
+            values(&ctx, ParamSource::BodyPath("nothing".to_owned())),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            values(&ctx, ParamSource::BodyPath("missing.field".to_owned())),
+            Vec::<String>::new()
+        );
         assert!(values(&ctx, ParamSource::Body)[0].starts_with("{\"owner\""));
         ctx.body = Bytes::new();
-        assert!(values(&ctx, ParamSource::Body).is_empty());
+        assert_eq!(values(&ctx, ParamSource::Body), Vec::<String>::new());
         ctx.body = Bytes::from_static(b"not json");
-        assert!(values(&ctx, ParamSource::BodyPath("a".to_owned())).is_empty());
+        assert_eq!(
+            values(&ctx, ParamSource::BodyPath("a".to_owned())),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
