@@ -133,13 +133,14 @@ fn expected_authorization(captured: &Captured, service: &str, region: &str) -> S
         .split(';')
         .collect::<Vec<_>>();
     let amz_date = &captured.headers["x-amz-date"];
-    let time = SystemTime::from(
+    let time = SystemTime::try_from(
         jiff::civil::DateTime::strptime("%Y%m%dT%H%M%SZ", amz_date)
             .unwrap()
-            .to_zoned(jiff::tz::TimeZone::UTC)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
             .unwrap()
             .timestamp(),
-    );
+    )
+    .unwrap();
     let mut settings = SigningSettings::default();
     if service == "s3" {
         settings.percent_encoding_mode = PercentEncodingMode::Single;

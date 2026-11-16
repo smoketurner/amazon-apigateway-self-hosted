@@ -32,7 +32,7 @@ impl QuotaPeriod {
     /// The window containing `now`; `None` only at the ends of the supported
     /// date range.
     pub(crate) fn window(self, now: Timestamp) -> Option<QuotaWindow> {
-        let date = now.to_zoned(TimeZone::UTC).date();
+        let date = now.to_zoned_datetime(TimeZone::UTC).date();
         let (first, next) = match self {
             Self::Day => (date, date.tomorrow().ok()?),
             Self::Week => {
@@ -46,7 +46,7 @@ impl QuotaPeriod {
             }
         };
         let midnight = |date: jiff::civil::Date| {
-            date.to_zoned(TimeZone::UTC)
+            date.to_zoned_datetime(TimeZone::UTC)
                 .ok()
                 .map(|zoned| zoned.timestamp())
         };

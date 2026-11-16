@@ -1120,7 +1120,13 @@ mod tests {
     }
 
     fn credentials_expiring(expiry: Option<jiff::Timestamp>) -> Credentials {
-        Credentials::new("id", "secret", None, expiry.map(SystemTime::from), "test")
+        Credentials::new(
+            "id",
+            "secret",
+            None,
+            expiry.map(|at| SystemTime::try_from(at).unwrap()),
+            "test",
+        )
     }
 
     fn after(now: jiff::Timestamp, seconds: i64) -> jiff::Timestamp {
