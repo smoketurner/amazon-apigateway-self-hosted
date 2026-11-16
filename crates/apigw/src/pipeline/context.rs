@@ -631,7 +631,7 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(QueryString::new(Some("")).raw(), None);
-        assert!(QueryString::new(None).pairs().is_empty());
+        assert_eq!(QueryString::new(None).pairs(), []);
     }
 
     #[test]

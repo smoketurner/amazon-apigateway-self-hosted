@@ -908,7 +908,7 @@ mod tests {
             let Integration::Unsupported { reason } = integration else {
                 panic!("{case} compiled to {integration:?}");
             };
-            assert!(!reason.is_empty());
+            assert_ne!(reason, "");
         }
         assert!(matches!(
             Integration::compile(

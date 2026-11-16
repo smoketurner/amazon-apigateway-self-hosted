@@ -535,9 +535,7 @@ mod tests {
     }
 
     fn client(trust: &TrustedProxies, from: &str, forwarded_for: Option<&str>) -> SourceIp {
-        let mut map = forwarded_for
-            .map(|value| headers(&[("x-forwarded-for", value)]))
-            .unwrap_or_default();
+        let mut map = forwarded_for.map_or_default(|value| headers(&[("x-forwarded-for", value)]));
         trust.identify(peer(from), &mut map).source_ip()
     }
 

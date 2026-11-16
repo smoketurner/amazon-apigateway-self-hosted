@@ -480,22 +480,14 @@ GET /b HTTP/1.1\r\nB-Two: 1\r\n\r\n";
         let mut scanner = HeadScanner::default();
         let mut wire = b"GET / HTTP/1.1\r\nX: ".to_vec();
         wire.resize(MAX_HEAD_BYTES + 100, b'a');
-        assert!(scanner.feed(&wire).is_empty());
-        assert!(
-            scanner
-                .feed(b"\r\n\r\nGET / HTTP/1.1\r\nY: 1\r\n\r\n")
-                .is_empty()
-        );
+        assert_eq!(scanner.feed(&wire), []);
+        assert_eq!(scanner.feed(b"\r\n\r\nGET / HTTP/1.1\r\nY: 1\r\n\r\n"), []);
 
         let mut scanner = HeadScanner::default();
         scanner.feed(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n");
         let junk = vec![b'f'; MAX_CHUNK_LINE_BYTES + 10];
         scanner.feed(&junk);
-        assert!(
-            scanner
-                .feed(b"\r\n\r\nGET / HTTP/1.1\r\nY: 1\r\n\r\n")
-                .is_empty()
-        );
+        assert_eq!(scanner.feed(b"\r\n\r\nGET / HTTP/1.1\r\nY: 1\r\n\r\n"), []);
     }
 
     #[test]

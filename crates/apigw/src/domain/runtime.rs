@@ -365,10 +365,7 @@ impl DomainSupervisor {
             .send()
             .await
             .map_err(|err| DomainError::aws(&self.domain, err))?;
-        let mode = domain
-            .routing_mode()
-            .map(RoutingMode::from)
-            .unwrap_or_default();
+        let mode = domain.routing_mode().map_or_default(RoutingMode::from);
         let mappings = self.fetch_mappings().await?;
         let rules = if mode == RoutingMode::ApiMappingOnly {
             Vec::new()

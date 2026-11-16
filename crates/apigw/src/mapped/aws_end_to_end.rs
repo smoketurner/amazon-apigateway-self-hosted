@@ -695,7 +695,7 @@ async fn the_invocation_type_header_makes_an_invocation_asynchronous() {
     );
     let reply = post(&router, "{}").await;
     assert_eq!(reply.status, StatusCode::ACCEPTED);
-    assert!(reply.body.is_empty());
+    assert_eq!(reply.body, "");
     let seen = log.lock().unwrap().remove(0);
     assert_eq!(seen.header("x-amz-invocation-type"), Some("Event"));
 }
