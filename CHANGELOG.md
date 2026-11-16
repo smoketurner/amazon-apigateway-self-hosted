@@ -241,6 +241,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The toolchain is Rust 1.100.0 (`rust-toolchain.toml`, `rust-version`, and the `Dockerfile` build
+  image), and dependencies are updated to their latest releases, including `jiff` 1.0 and
+  `jsonwebtoken` 12. `matchit` stays on 0.8.4 because axum 0.8 requires exactly that version and the
+  route pre-check has to match it.
 - GitHub Actions are locked with a workflow lockfile (`.github/workflows/actions.lock`, generated
   by `gh actions-lock`): workflows reference actions by version tag and the lockfile records each
   tag's commit SHA. `verify-lockfile.yml` checks the lockfile in CI and replaces

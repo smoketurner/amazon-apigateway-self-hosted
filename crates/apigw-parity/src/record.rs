@@ -310,6 +310,6 @@ mod tests {
 
     #[test]
     fn unset_secret_environment_variables_are_skipped() {
-        assert!(record(None).global_secrets().is_empty());
+        assert_eq!(record(None).global_secrets(), Vec::<String>::new());
     }
 }

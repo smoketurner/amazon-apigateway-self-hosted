@@ -292,8 +292,11 @@ mod tests {
         assert_eq!(scopes(json!({"scp": ["a", "b"]})), ["a", "b"]);
         assert_eq!(scopes(json!({"scp": "a b"})), ["a", "b"]);
         assert_eq!(scopes(json!({"scope": "a", "scp": ["b"]})), ["a", "b"]);
-        assert!(scopes(json!({"scope": 7, "scp": null})).is_empty());
-        assert!(scopes(json!({})).is_empty());
+        assert_eq!(
+            scopes(json!({"scope": 7, "scp": null})),
+            Vec::<String>::new()
+        );
+        assert_eq!(scopes(json!({})), Vec::<String>::new());
     }
 
     #[test]

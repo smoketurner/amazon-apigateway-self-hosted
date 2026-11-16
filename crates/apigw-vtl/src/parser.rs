@@ -433,8 +433,7 @@ impl Parser {
         let source: String = self
             .chars
             .get(start..self.pos)
-            .map(|slice| slice.iter().collect())
-            .unwrap_or_default();
+            .map_or_default(|slice| slice.iter().collect());
         Ok(Dollar::Reference(Reference {
             head: head.into(),
             steps,
@@ -659,8 +658,7 @@ impl Parser {
         let call: String = self
             .chars
             .get(start..self.pos)
-            .map(|s| s.iter().collect())
-            .unwrap_or_default();
+            .map_or_default(|s| s.iter().collect());
         builder.add_text(&call);
         Ok(())
     }
@@ -757,8 +755,7 @@ impl Parser {
         let text: String = self
             .chars
             .get(self.pos..name_end)
-            .map(|slice| slice.iter().collect())
-            .unwrap_or_default();
+            .map_or_default(|slice| slice.iter().collect());
         Some(DirectiveToken {
             directive,
             text,
@@ -1160,8 +1157,7 @@ impl Parser {
         let text: String = self
             .chars
             .get(start..self.pos)
-            .map(|slice| slice.iter().collect())
-            .unwrap_or_default();
+            .map_or_default(|slice| slice.iter().collect());
         if is_float {
             let value: f64 = text
                 .parse()

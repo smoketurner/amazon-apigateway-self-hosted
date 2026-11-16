@@ -1195,7 +1195,10 @@ mod tests {
             let aws = MockAws::start().await;
             run(&aws, observed_snapshot(0.0), 2).await;
             assert_eq!(lines(&aws, ACCESS_GROUP), ["prod false"; 2]);
-            assert!(lines(&aws, &format!("{ACCESS_GROUP}/Canary")).is_empty());
+            assert_eq!(
+                lines(&aws, &format!("{ACCESS_GROUP}/Canary")),
+                Vec::<String>::new()
+            );
             assert_eq!(stages(&aws), ["prod"]);
         }
 

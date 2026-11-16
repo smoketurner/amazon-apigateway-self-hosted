@@ -10,7 +10,7 @@ cargo-fuzz = true
 [dependencies]
 apigw-regex    = { path = "../crates/apigw-regex" }
 apigw-vtl      = { path = "../crates/apigw-vtl" }
-arbitrary      = { version = "=1.4.2", features = ["derive"] }
+arbitrary      = { version = "=1.5.0", features = ["derive"] }
 libfuzzer-sys  = "=0.4.13"
 
 [workspace]

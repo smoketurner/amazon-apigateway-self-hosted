@@ -79,7 +79,7 @@ struct IntegrationResponse {
 enum Selection {
     /// No pattern: the response used when no other matches.
     Default,
-    Pattern(JavaRegex),
+    Pattern(Box<JavaRegex>),
     /// A pattern that does not compile never matches.
     Invalid(String),
 }
@@ -248,7 +248,7 @@ impl IntegrationResponse {
             Selection::Default
         } else {
             match JavaRegex::new(key) {
-                Ok(pattern) => Selection::Pattern(pattern),
+                Ok(pattern) => Selection::Pattern(Box::new(pattern)),
                 Err(err) => Selection::Invalid(err.to_string()),
             }
         };

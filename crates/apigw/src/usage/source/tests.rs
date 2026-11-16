@@ -352,7 +352,7 @@ fn a_plan_with_no_limits_has_none() {
         .build();
     let record = AwsUsageSource::plan(&bare).unwrap();
     assert_eq!((record.throttle, record.quota), (None, None));
-    assert!(record.stages.is_empty());
+    assert_eq!(record.stages, []);
 }
 
 #[test]

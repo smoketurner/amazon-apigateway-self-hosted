@@ -686,7 +686,7 @@ mod tests {
         assert_eq!(metrics.len(), 1);
         assert_eq!(metrics[0]["Count"], 2);
         assert!(metrics[0].get("Resource").is_none());
-        assert!(messages(&aws, ACCESS_GROUP).is_empty());
+        assert_eq!(messages(&aws, ACCESS_GROUP), Vec::<String>::new());
     }
 
     #[tokio::test]
@@ -971,7 +971,7 @@ mod tests {
         let incoming = format!("Root={ROOT};Sampled=0");
         let (_, seen) = traced_get(&router, &[("x-amzn-trace-id", &incoming)]).await;
         observability.close().await;
-        assert!(segments(&aws).is_empty());
+        assert_eq!(segments(&aws), Vec::<Value>::new());
         assert!(
             seen["x-amzn-trace-id"]
                 .as_str()
@@ -999,7 +999,7 @@ mod tests {
         let (_, passed) = traced_get(&router, &[("x-amzn-trace-id", &incoming)]).await;
         assert_eq!(passed["x-amzn-trace-id"], incoming);
         observability.close().await;
-        assert!(segments(&aws).is_empty());
+        assert_eq!(segments(&aws), Vec::<Value>::new());
     }
 
     #[tokio::test]
@@ -1013,7 +1013,7 @@ mod tests {
         let (_, seen) = traced_get(&router, &[]).await;
         observability.close().await;
         assert!(seen.get("x-amzn-trace-id").is_none());
-        assert!(segments(&aws).is_empty());
+        assert_eq!(segments(&aws), Vec::<Value>::new());
     }
 
     #[tokio::test]

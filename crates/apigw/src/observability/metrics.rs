@@ -548,7 +548,7 @@ mod tests {
         let closed = CancellationToken::new();
         closed.cancel();
         aggregator.run(queue.clone(), closed).await;
-        assert!(aggregator.drain(0).is_empty());
+        assert_eq!(aggregator.drain(0), Vec::<String>::new());
     }
 
     proptest! {

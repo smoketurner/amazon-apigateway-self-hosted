@@ -103,8 +103,8 @@ mod tests {
     #[test]
     fn evicts_the_least_recently_used_entry() {
         let mut map = lru(2);
-        assert!(map.insert(key("a"), 1).is_empty());
-        assert!(map.insert(key("b"), 2).is_empty());
+        assert_eq!(map.insert(key("a"), 1), Vec::<u32>::new());
+        assert_eq!(map.insert(key("b"), 2), Vec::<u32>::new());
         assert_eq!(map.get_mut(&key("a")), Some(&mut 1));
         assert_eq!(map.insert(key("c"), 3), vec![2]);
         assert!(map.get_mut(&key("b")).is_none());

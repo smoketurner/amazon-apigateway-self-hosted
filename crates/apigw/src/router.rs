@@ -466,8 +466,7 @@ pub(crate) fn domain_dispatcher(domains: DomainRegistry) -> Router {
                         .authority()
                         .map(axum::http::uri::Authority::as_str)
                 })
-                .map(DomainName::host_of)
-                .unwrap_or_default();
+                .map_or_default(DomainName::host_of);
             let Some(state) = domains.find(&host) else {
                 return CustomDomain::error(StatusCode::FORBIDDEN, "Forbidden");
             };
@@ -1586,13 +1585,13 @@ pub(crate) mod tests {
         assert!(secure.protections.contains(Protection::Authorizer) && !secure.problems.is_empty());
         let (skip, summaries) = router(&sample(), ApiKind::Rest, AuthorizationMode::Skip, "");
         assert_eq!(call(&skip, Method::GET, "/secure").await.0, StatusCode::OK);
-        assert!(
+        assert_eq!(
             summaries
                 .iter()
                 .find(|s| s.route_key == "GET /secure")
                 .unwrap()
-                .problems
-                .is_empty()
+                .problems,
+            Vec::<String>::new()
         );
     }
 
@@ -1625,7 +1624,7 @@ pub(crate) mod tests {
             .find(|s| s.route_key == "GET /legacy")
             .unwrap();
         assert_eq!(legacy.integration, "UNSUPPORTED");
-        assert!(!legacy.problems.is_empty());
+        assert_ne!(legacy.problems, Vec::<String>::new());
     }
 
     #[tokio::test]

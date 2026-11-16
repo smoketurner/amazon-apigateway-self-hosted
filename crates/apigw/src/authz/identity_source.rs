@@ -114,7 +114,7 @@ impl IdentitySources {
                 .collect(),
             Some(Value::Array(items)) => items
                 .iter()
-                .map(|item| item.as_str().map(str::to_owned).unwrap_or_default())
+                .map(|item| item.as_str().map_or_default(str::to_owned))
                 .collect(),
             Some(other) => return Err(UnsupportedIdentitySource(other.to_string())),
         };

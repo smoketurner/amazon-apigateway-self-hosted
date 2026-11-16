@@ -159,7 +159,7 @@ mod tests {
     fn error_level_logs_only_failures() {
         let ctx = request(ApiKind::Rest);
         let level = logging(LoggingLevel::Error, true);
-        assert!(level.lines(&ctx, OK).is_empty());
+        assert_eq!(level.lines(&ctx, OK), Vec::<String>::new());
         let failed = level.lines(
             &ctx,
             Outcome {
