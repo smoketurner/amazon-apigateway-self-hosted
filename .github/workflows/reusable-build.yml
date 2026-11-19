@@ -440,23 +440,15 @@ jobs:
       id-token: write
       attestations: write
       artifact-metadata: write
-    env:
-      HELM_VERSION: 4.3.1
-      HELM_SHA256: 0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
-      - name: Install helm
-        run: |
-          set -euo pipefail
-          tarball="helm-v${HELM_VERSION}-linux-amd64.tar.gz"
-          curl -fsSL -o "${RUNNER_TEMP}/${tarball}" "https://get.helm.sh/${tarball}"
-          echo "${HELM_SHA256}  ${RUNNER_TEMP}/${tarball}" | sha256sum -c -
-          mkdir -p "${RUNNER_TEMP}/helm"
-          tar -xzf "${RUNNER_TEMP}/${tarball}" -C "${RUNNER_TEMP}/helm" --strip-components=1 linux-amd64/helm
-          echo "${RUNNER_TEMP}/helm" >> "$GITHUB_PATH"
+      - uses: azure/setup-helm@v5.1.0
+        with:
+          version: v4.3.1
+          checksum-policy: required
 
       # The chart names the image by the digest this run pushed, so a chart
       # version always deploys the image it was released with.

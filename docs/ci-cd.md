@@ -25,8 +25,9 @@
   7-day cooldown.
 
 - **`chart` job** — `make chart-lint`: `helm lint --strict` and `kubeconform` over what the
-  chart renders for each value set in `charts/apigw/ci/`. helm and kubeconform are downloaded
-  at pinned versions and checked against pinned checksums.
+  chart renders for each value set in `charts/apigw/ci/`. `azure/setup-helm` installs a pinned
+  helm version; kubeconform is downloaded at a pinned version and checked against a pinned
+  checksum.
 
 When adding a workflow, keep `--locked` on every cargo invocation, `persist-credentials: false`
 on checkout, and relock with `gh actions-lock` after adding an action.
