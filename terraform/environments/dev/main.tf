@@ -136,6 +136,7 @@ module "ecs_gateway" {
   api_kind            = "rest"
   api_id              = module.rest_api.api_id
   stage_name          = var.stage_name
+  base_path           = local.gateway_base_path
   image_tag           = var.ecs_gateway_image_tag
   log_retention_days  = var.log_retention_days
   gateway_policy_json = module.gateway_policy[0].json
@@ -150,6 +151,7 @@ module "lambda_gateway" {
   api_kind            = "rest"
   api_id              = module.rest_api.api_id
   stage_name          = var.stage_name
+  base_path           = local.gateway_base_path
   image_tag           = var.lambda_gateway_image_tag
   log_retention_days  = var.log_retention_days
   gateway_policy_json = module.gateway_policy[0].json

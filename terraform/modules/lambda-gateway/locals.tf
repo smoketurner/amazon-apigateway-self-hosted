@@ -17,5 +17,8 @@ locals {
   environment = {
     (local.api_environment) = var.api_id
     APIGW_STAGE             = var.stage_name
+    APIGW_BASE_PATH         = var.base_path
+    # The adapter waits for an answer below 500 before the function is ready;
+    # with a base path, the root is still answered (as an unknown route).
   }
 }

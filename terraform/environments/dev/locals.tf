@@ -27,6 +27,10 @@ locals {
 
   any_gateway = var.enable_ecs_gateway || var.enable_lambda_gateway
 
+  # The gateways serve the API under the stage name, as its execute-api URL
+  # does, so `$context.path` and Lambda events match the real API's.
+  gateway_base_path = "/${var.stage_name}"
+
   # Only the role outputs, not the whole modules: each gateway's definition
   # depends on the REST API, which depends on the integration role.
   gateway_role_arns = concat(

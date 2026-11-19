@@ -153,8 +153,8 @@ ip="$(aws ec2 describe-network-interfaces --network-interface-ids "$eni" \
   --query 'NetworkInterfaces[0].Association.PublicIp' --output text)"
 
 curl --insecure "https://$ip:9443/routes"                  # what apigw loaded, and role status
-curl --insecure "https://$ip:8443/mock"                    # apigw
-curl --insecure "https://$ip:8443/lambda-proxy"            # invokes the echo Lambda as the task role
+curl --insecure "https://$ip:8443/ref/mock"                # apigw, under the stage name like the real URL
+curl --insecure "https://$ip:8443/ref/lambda-proxy"        # invokes the echo Lambda as the task role
 curl "$(terraform output -json parity_runner | jq -r .rest.base_url)/mock"   # API Gateway
 ```
 
@@ -190,7 +190,7 @@ docker build --platform linux/arm64 --build-arg APIGW_IMAGE=apigw:local \
 docker push "$repo:dev"
 # terraform.tfvars: lambda_gateway_image_tag = "dev"
 terraform apply                       # creates the function and its URL
-curl "$(terraform output -json lambda_gateway | jq -r .function_url)mock"
+curl "$(terraform output -json lambda_gateway | jq -r .function_url)ref/mock"
 ```
 
 ## Nightly parity workflow

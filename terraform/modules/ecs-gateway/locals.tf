@@ -64,6 +64,7 @@ locals {
       environment = [
         { name = local.api_environment, value = var.api_id },
         { name = "APIGW_STAGE", value = var.stage_name },
+        { name = "APIGW_BASE_PATH", value = var.base_path },
         { name = "APIGW_LISTEN", value = "0.0.0.0:${local.api_port}" },
         { name = "APIGW_ADMIN_LISTEN", value = "0.0.0.0:${local.admin_port}" },
         { name = "APIGW_TLS_CERT", value = "${local.tls_dir}/tls.crt" },

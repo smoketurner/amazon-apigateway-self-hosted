@@ -24,6 +24,12 @@ variable "stage_name" {
   type        = string
 }
 
+variable "base_path" {
+  description = "Path prefix the gateway serves the API under, such as /prod to match an execute-api URL. Empty serves it at the root."
+  type        = string
+  default     = ""
+}
+
 variable "image_tag" {
   description = "Tag of the image (modules/lambda-gateway/image) in this module's ECR repository. Null creates only the repository, so the image can be pushed before the function exists."
   type        = string

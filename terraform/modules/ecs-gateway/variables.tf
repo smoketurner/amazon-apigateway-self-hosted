@@ -49,6 +49,12 @@ variable "stage_name" {
   type        = string
 }
 
+variable "base_path" {
+  description = "Path prefix the gateway serves the API under, such as /prod to match an execute-api URL. Empty serves it at the root."
+  type        = string
+  default     = ""
+}
+
 variable "image_tag" {
   description = "Tag of the apigw image in this module's ECR repository. Tags are immutable; push a new tag to deploy a new build."
   type        = string
