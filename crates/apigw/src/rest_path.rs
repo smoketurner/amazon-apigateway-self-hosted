@@ -20,6 +20,8 @@ use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::Response;
 use tower::ServiceExt as _;
 
+use crate::model::ApiKind;
+
 /// The request path as API Gateway reports it in a Lambda event's `path`:
 /// what the client sent, less the extra leading slashes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,19 +105,28 @@ impl<'a> RestPath<'a> {
 
 /// Serves `router` the way a REST API reads paths: malformed escapes are
 /// refused, and routing sees the path without its extra slashes.
-pub(crate) fn serve(router: Router) -> Router {
+pub(crate) fn serve(router: Router, kind: ApiKind) -> Router {
     let router = Arc::new(router);
     Router::new().fallback(move |mut request: Request| {
         let router = Arc::clone(&router);
         async move {
+            // The endpoint in front of either kind of API answers these two
+            // itself, with its own pages.
             if request.method() == Method::TRACE {
-                return trace_refused();
+                return edge_page(StatusCode::METHOD_NOT_ALLOWED, TRACE_BODY);
             }
             let uri = request.uri().clone();
-            if RestPath::has_malformed_escape(uri.path())
-                || uri.query().is_some_and(RestPath::has_malformed_escape)
-            {
-                return malformed();
+            if RestPath::has_malformed_escape(uri.path()) {
+                return edge_page(StatusCode::BAD_REQUEST, BAD_REQUEST_BODY);
+            }
+            if kind == ApiKind::Http {
+                return match Router::clone(&router).oneshot(request).await {
+                    Ok(response) => response,
+                    Err(never) => match never {},
+                };
+            }
+            if uri.query().is_some_and(RestPath::has_malformed_escape) {
+                return malformed_query();
             }
             let path = RestPath::new(uri.path());
             if path.routed() != uri.path()
@@ -155,19 +166,23 @@ pub(crate) struct EdgeResponse;
 
 /// What the endpoint says to `TRACE`, byte for byte.
 const TRACE_BODY: &str = "<html>\r\n<head><title>405 Not Allowed</title></head>\r\n<body>\r\n<center><h1>405 Not Allowed</h1></center>\r\n</body>\r\n</html>\r\n";
+/// What the endpoint says to a path with a malformed escape, byte for byte.
+const BAD_REQUEST_BODY: &str = "<html>\r\n<head><title>400 Bad Request</title></head>\r\n<body>\r\n<center><h1>400 Bad Request</h1></center>\r\n</body>\r\n</html>\r\n";
 
-/// API Gateway's answer to a malformed escape: `400` and nothing else.
-fn malformed() -> Response {
+/// A REST API's answer to a malformed escape in the query string: `400` and
+/// nothing else. (An HTTP API takes such a query string as it is.)
+fn malformed_query() -> Response {
     let mut response = Response::new(Body::empty());
     *response.status_mut() = StatusCode::BAD_REQUEST;
     response.extensions_mut().insert(EdgeResponse);
     response
 }
 
-/// `TRACE` never reaches a REST API: the endpoint answers `405` in HTML.
-fn trace_refused() -> Response {
-    let mut response = Response::new(Body::from(TRACE_BODY));
-    *response.status_mut() = StatusCode::METHOD_NOT_ALLOWED;
+/// One of the endpoint's own HTML pages: `TRACE` and a path with a malformed
+/// escape never reach an API of either kind.
+fn edge_page(status: StatusCode, page: &'static str) -> Response {
+    let mut response = Response::new(Body::from(page));
+    *response.status_mut() = status;
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html"));
@@ -265,7 +280,10 @@ mod tests {
 
     #[tokio::test]
     async fn requests_are_routed_without_their_extra_slashes() {
-        let router = serve(Router::new().route("/mock", get(|| async { "ok" })));
+        let router = serve(
+            Router::new().route("/mock", get(|| async { "ok" })),
+            ApiKind::Rest,
+        );
         for found in ["/mock", "/mock/", "//mock", "/mock//", "/mock/?a=1"] {
             assert_eq!(status(&router, found).await, StatusCode::OK, "{found}");
         }
@@ -287,5 +305,42 @@ mod tests {
                 "{refused}"
             );
         }
+        let page = |target: &'static str| {
+            let router = router.clone();
+            async move {
+                let request = Request::builder().uri(target).body(Body::empty()).unwrap();
+                let response = router.oneshot(request).await.unwrap();
+                axum::body::to_bytes(response.into_body(), 1024)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert_eq!(&*page("/%zz").await, BAD_REQUEST_BODY.as_bytes());
+        assert!(page("/mock?d=%zz").await.is_empty());
+    }
+
+    /// Measured against a deployed HTTP API.
+    #[tokio::test]
+    async fn an_http_api_takes_odd_query_strings_and_slashes_as_they_are() {
+        let router = serve(
+            Router::new().route("/mock", get(|| async { "ok" })),
+            ApiKind::Http,
+        );
+        assert_eq!(status(&router, "/mock?d=%zz").await, StatusCode::OK);
+        assert_eq!(
+            status(&router, "/mock/").await,
+            StatusCode::NOT_FOUND,
+            "a trailing slash is part of an HTTP API's path"
+        );
+        assert_eq!(status(&router, "/%zz").await, StatusCode::BAD_REQUEST);
+        let trace = Request::builder()
+            .method(Method::TRACE)
+            .uri("/mock")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            router.oneshot(trace).await.unwrap().status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
     }
 }

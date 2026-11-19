@@ -714,8 +714,8 @@ mod tests {
             (
                 GatewayError::IntegrationFailure,
                 ApiKind::Http,
-                502,
-                "Internal server error",
+                500,
+                "Internal Server Error",
             ),
             (
                 GatewayError::IntegrationUnreachable,
