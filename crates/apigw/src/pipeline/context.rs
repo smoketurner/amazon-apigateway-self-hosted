@@ -13,8 +13,6 @@ use axum::extract::OriginalUri;
 use axum::extract::Request;
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, Version, header};
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
@@ -268,6 +266,9 @@ pub(crate) struct RequestContext {
     pub(crate) route_key: RouteKey,
     /// The resource path as configured (`/pets/{petId}`), not the request path.
     pub(crate) resource_path: String,
+    /// The trace API Gateway starts for a request when tracing is off, so
+    /// everything the request touches names the same one.
+    started_trace: Option<TraceId>,
     /// The REST resource's ID, when the gateway could read the API's resources.
     pub(crate) resource_id: Option<String>,
     pub(crate) request_id: Uuid,
@@ -428,6 +429,7 @@ impl RequestContext {
                 deployment_id: api.deployment_id.clone(),
             },
             route_key,
+            started_trace: TraceId::generate(jiff::Timestamp::now()),
             resource_id: api.resource_ids.get(&resource_path).cloned(),
             resource_path,
             request_id,
@@ -456,14 +458,7 @@ impl RequestContext {
     /// base64 token; this one is derived from the random half of the request
     /// ID so the header and the context variable agree.
     pub(crate) fn extended_request_id(&self) -> String {
-        BASE64.encode(
-            self.request_id
-                .as_bytes()
-                .iter()
-                .skip(8)
-                .copied()
-                .collect::<Vec<u8>>(),
-        )
+        RequestId(self.request_id).extended()
     }
 
     /// `$context.protocol`. REST APIs report `HTTP/1.1` even to HTTP/2 clients
@@ -546,11 +541,17 @@ impl RequestContext {
         if self.trace.is_some() {
             return sent.map(str::to_owned);
         }
-        let started = TraceId::generate(self.received)?;
+        let started = self.started_trace?;
         Some(match sent {
             Some(sent) => format!("Self={started};{sent}"),
             None => format!("Root={started}"),
         })
+    }
+
+    /// The ID of the request's trace: the sampled trace's when tracing is on,
+    /// else the one started for this request.
+    pub(crate) fn started_trace_root(&self) -> Option<TraceId> {
+        self.trace.map(|trace| trace.id()).or(self.started_trace)
     }
 
     /// API Gateway's `$context` variables as a JSON object, using API Gateway's
@@ -643,6 +644,7 @@ pub(crate) mod tests {
             },
             route_key: RouteKey::from("POST /pets/{petId}"),
             resource_path: "/pets/{petId}".to_owned(),
+            started_trace: TraceId::generate(jiff::Timestamp::from_second(1_700_000_000).unwrap()),
             resource_id: None,
             request_id: Uuid::now_v7(),
             received: jiff::Timestamp::from_second(1_700_000_000).unwrap(),

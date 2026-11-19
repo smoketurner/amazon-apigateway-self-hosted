@@ -14,6 +14,7 @@ use std::time::Instant;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{FromRequestParts as _, RawPathParams, Request};
+use axum::http::{HeaderName, HeaderValue};
 use axum::response::Response;
 
 pub(crate) use context::{ApiKeyIdentity, RequestContext};
@@ -143,6 +144,9 @@ impl<'a> Pipeline<'a> {
             Err(error) => self.fail(ctx, &error.failure(self.api.kind)),
         };
         response.extensions_mut().insert(timing);
+        if succeeded {
+            self.add_trace_header(ctx, &mut response);
+        }
         let response = match plan {
             Some(plan) if succeeded => match plan.store(&self.api.state, response).await {
                 Ok(response) => response,
@@ -164,6 +168,25 @@ impl<'a> Pipeline<'a> {
             self.encode(ctx, response).await
         } else {
             response
+        }
+    }
+
+    /// A REST API answers with the request's `X-Amzn-Trace-Id` whenever an
+    /// integration ran on something other than itself (measured against a
+    /// deployed API: every integration type but `MOCK`). A backend's own
+    /// value, which an `HTTP_PROXY` integration passes through, stays.
+    fn add_trace_header(&self, ctx: &RequestContext, response: &mut Response) {
+        const TRACE_HEADER: HeaderName = HeaderName::from_static("x-amzn-trace-id");
+        if self.api.kind != ApiKind::Rest
+            || self.route.integration.kind() == "MOCK"
+            || response.headers().contains_key(TRACE_HEADER)
+        {
+            return;
+        }
+        if let Some(trace) = ctx.started_trace_root()
+            && let Ok(value) = HeaderValue::try_from(format!("Root={trace}"))
+        {
+            response.headers_mut().insert(TRACE_HEADER, value);
         }
     }
 

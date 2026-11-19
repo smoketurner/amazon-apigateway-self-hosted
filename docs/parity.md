@@ -201,6 +201,15 @@ also leaves `'` bare; `apigw` sends `%27`.
 - HTTP API payload 1.0 has `version: "1.0"`, the route key as `resourceId`, `identity.cognitoAmr`,
   and a `path` that is the path as sent, stage and escapes included.
 
+**Response headers (REST)**
+
+- Every response carries `x-amz-apigw-id`, not only the ones API Gateway generates.
+- A response from any integration but `MOCK` carries `X-Amzn-Trace-Id`; an `HTTP_PROXY` backend's
+  own value passes through.
+- An `HTTP_PROXY` backend's `x-amzn-RequestId` becomes `x-amzn-Remapped-x-amzn-RequestId`, and its
+  `Content-Length` is repeated as `x-amzn-Remapped-Content-Length`. Neither is in the documented
+  header table.
+
 **Other**
 
 - A response API Gateway generates for a `HEAD` request has `content-length: 0`.
@@ -212,6 +221,9 @@ value is ignored, and a body that is not JSON is a string. A body that opens an 
 string and does not hold one answers `400` `{"message": "Could not process payload"}`.
 
 Known differences that remain:
+
+- Response header names are lower case. API Gateway writes them in mixed case over HTTP/1.1
+  (`Content-Type`, `x-amzn-RequestId`); over HTTP/2 both are lower case.
 
 - `X-Forwarded-For` holds the address `apigw` established for the client. API Gateway appends
   that address to whatever the client sent; `apigw` only keeps a client's value from a trusted

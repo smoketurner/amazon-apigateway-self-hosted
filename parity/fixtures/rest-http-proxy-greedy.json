@@ -8,10 +8,10 @@
       "content-type": "application/json",
       "date": "[masked]",
       "x-amz-apigw-id": "[masked]",
-      "x-amzn-remapped-connection": "keep-alive",
-      "x-amzn-remapped-content-length": "1190",
-      "x-amzn-remapped-date": "Thu, 19 Nov 2026 14:57:54 GMT",
-      "x-amzn-remapped-x-amzn-requestid": "5a57e98d-1767-43b8-ab96-83c39a90a8d2",
+      "x-amzn-remapped-connection": "[masked]",
+      "x-amzn-remapped-content-length": "[masked]",
+      "x-amzn-remapped-date": "[masked]",
+      "x-amzn-remapped-x-amzn-requestid": "[masked]",
       "x-amzn-requestid": "[masked]",
       "x-amzn-trace-id": "[masked]"
     }

@@ -1,6 +1,8 @@
 //! Gateway-wide state and policy: what every route of one API shares, how
 //! unevaluated protections are enforced, and API Gateway's error responses.
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -314,6 +316,15 @@ impl ApiKind {
             Self::Rest => HeaderName::from_static("x-amzn-requestid"),
             Self::Http => HeaderName::from_static("apigw-requestid"),
         }
+    }
+}
+
+impl RequestId {
+    /// `$context.extendedRequestId` and the `x-amz-apigw-id` header. API
+    /// Gateway's is an opaque base64 token; this one is derived from the random
+    /// half of the request ID so the header and the context variable agree.
+    pub(crate) fn extended(self) -> String {
+        BASE64.encode(self.0.as_bytes().get(8..).unwrap_or_default())
     }
 }
 
