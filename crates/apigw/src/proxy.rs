@@ -352,12 +352,23 @@ impl HttpProxy {
         };
         let mut url = reqwest::Url::parse(&url).map_err(|e| e.to_string())?;
         let mut query = QueryBuilder(url.query().map_or_default(str::to_owned));
-        if handling == QueryHandling::Forward
-            && let Some(raw) = ctx.query.raw()
-        {
-            query.append(raw);
+        let rest = ctx.api.kind == ApiKind::Rest;
+        if handling == QueryHandling::Forward {
+            if rest {
+                // A REST API does not forward the query string as sent: it
+                // writes each parameter again in its own escaping.
+                for (name, value) in ctx.query.pairs() {
+                    query.append(&UrlEncoder::rest_query_pair(&name, &value));
+                }
+            } else if let Some(raw) = ctx.query.raw() {
+                query.append(raw);
+            }
         }
         for (name, value) in self.parameters.query_pairs(ctx, overrides) {
+            if rest {
+                query.append(&UrlEncoder::rest_query_pair(&name, &value));
+                continue;
+            }
             let mut pair = String::new();
             UrlEncoder(&mut pair).component(&name);
             pair.push('=');
@@ -510,6 +521,30 @@ impl UrlEncoder<'_> {
         }
     }
 
+    /// `name=value` as a REST API writes a query parameter to an HTTP
+    /// backend (measured against a deployed API): a space is `+`, the
+    /// characters RFC 3986 allows in a query stay bare except the three that
+    /// would change its meaning (`&`, `=`, `+`), and the rest are escaped.
+    pub(crate) fn rest_query_pair(name: &str, value: &str) -> String {
+        let mut pair =
+            String::with_capacity(name.len().saturating_add(value.len()).saturating_add(1));
+        UrlEncoder(&mut pair).rest_query_component(name);
+        pair.push('=');
+        UrlEncoder(&mut pair).rest_query_component(value);
+        pair
+    }
+
+    fn rest_query_component(&mut self, value: &str) {
+        for byte in value.bytes() {
+            match byte {
+                b' ' => self.0.push('+'),
+                b'!' | b'$' | b'\'' | b'(' | b')' | b'*' | b',' | b';' | b':' | b'@' | b'/'
+                | b'?' => self.0.push(char::from(byte)),
+                _ => self.byte(byte),
+            }
+        }
+    }
+
     fn byte(&mut self, byte: u8) {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
             self.0.push(char::from(byte));
@@ -642,6 +677,33 @@ mod tests {
         assert_eq!(url.as_str(), "http://up/items/a%2Fb%20c");
     }
 
+    /// Measured against a deployed REST API with an `HTTP_PROXY` integration.
+    #[test]
+    fn rest_query_strings_are_written_again_in_api_gateways_escaping() {
+        let target = proxy("http://up/x");
+        let sent = "a=%7E~&b=%21!&c=%2A*&d=a%2Fb/c&e=%40@&f=%3A:&g=%C3%A9&h=a%26b&i=%3D&j=%25\
+            &k=%27&l=(%29&m=a,b%2C&n=%5B%5D&o=x+y%20z&p=&q&r=%3F?&s=%24$&t=%3B";
+        let ctx = incoming(&[], Some(sent));
+        let url = target.proxy_url(&route("/x", &target).path, &ctx).unwrap();
+        assert_eq!(
+            url.query().unwrap(),
+            "a=~~&b=!!&c=**&d=a/b/c&e=@@&f=::&g=%C3%A9&h=a%26b&i=%3D&j=%25&k=%27&l=()&m=a,b,\
+            &n=%5B%5D&o=x+y+z&p=&q=&r=??&s=$$&t=;",
+            "API Gateway also leaves `'` bare; the URL type this gateway sends with escapes it"
+        );
+
+        let mut http_api = incoming(&[], Some("o=x+y%20z&q"));
+        http_api.api.kind = ApiKind::Http;
+        let url = target
+            .proxy_url(&route("/x", &target).path, &http_api)
+            .unwrap();
+        assert_eq!(
+            url.query().unwrap(),
+            "o=x+y%20z&q",
+            "HTTP APIs forward it as sent"
+        );
+    }
+
     #[test]
     fn mapped_parameters_are_resolved() {
         let mut target = proxy("http://up/v2/{item}");
@@ -669,7 +731,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             url.as_str(),
-            "http://up/v2/7?search=a&search=b%20c&q=b%20c&tenant=acme"
+            "http://up/v2/7?search=a&search=b+c&q=b+c&tenant=acme"
         );
     }
 
@@ -773,7 +835,7 @@ mod tests {
         let url = target
             .url_for(&path, &ctx, QueryHandling::MappedOnly, &overrides)
             .unwrap();
-        assert_eq!(url.as_str(), "http://up/over/x?n=1&q=a%20b");
+        assert_eq!(url.as_str(), "http://up/over/x?n=1&q=a+b");
         let url = target
             .url_for(
                 &path,
