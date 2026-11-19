@@ -213,8 +213,15 @@ impl GoJson {
         let mut values = serde_json::Deserializer::from_slice(bytes).into_iter::<Value>();
         let value = match values.next() {
             None => return Err(Some(self.empty().to_owned())),
-            Some(Err(error)) if error.is_eof() => return Err(Some(self.truncated().to_owned())),
-            Some(Err(_)) => return Err(Self::bad_start(bytes)),
+            Some(Err(error)) => {
+                return Err(self.bad_literal(bytes).or_else(|| {
+                    if error.is_eof() {
+                        Some(self.truncated().to_owned())
+                    } else {
+                        Self::bad_start(bytes)
+                    }
+                }));
+            }
             Some(Ok(value)) => value,
         };
         if self == Self::Unmarshal {
@@ -258,6 +265,42 @@ impl GoJson {
         match self {
             Self::Unmarshal => "map[string]interface {}",
             Self::Decoder => "jwt.MapClaims",
+        }
+    }
+
+    /// Go's complaint about a `true`, `false`, or `null` that goes wrong
+    /// partway. `json.Unmarshal` reads the end of the input as a space.
+    fn bad_literal(self, bytes: &[u8]) -> Option<String> {
+        let start = bytes.iter().position(|byte| !byte.is_ascii_whitespace())?;
+        let (_, text) = bytes.split_at(start);
+        let literal = match text.first()? {
+            b't' => "true",
+            b'f' => "false",
+            b'n' => "null",
+            _ => return None,
+        };
+        let mut sent = text.iter();
+        for expected in literal.bytes() {
+            let found = match (sent.next(), self) {
+                (Some(&found), _) => found,
+                (None, Self::Unmarshal) => b' ',
+                (None, Self::Decoder) => return None,
+            };
+            if found != expected {
+                return Some(format!(
+                    "invalid character {} in literal {literal} (expecting '{}')",
+                    Self::quoted(found),
+                    char::from(expected)
+                ));
+            }
+        }
+        // A complete literal with something stuck to it.
+        match (sent.next(), self) {
+            (Some(&extra), Self::Unmarshal) if !extra.is_ascii_whitespace() => Some(format!(
+                "invalid character {} after top-level value",
+                Self::quoted(extra)
+            )),
+            (Some(_) | None, Self::Unmarshal | Self::Decoder) => None,
         }
     }
 
@@ -350,11 +393,6 @@ mod tests {
             ),
             (format!("{}..x", encode(REAL_HEADER)), "EOF".to_owned()),
             (
-                token("nojson", "{}"),
-                // Go words this one "invalid character 'o' in literal null".
-                String::new(),
-            ),
-            (
                 token("[1]", "{}"),
                 "json: cannot unmarshal array into Go value of type map[string]interface {}"
                     .to_owned(),
@@ -396,6 +434,43 @@ mod tests {
                 token(REAL_HEADER, r#""s""#),
                 "json: cannot unmarshal string into Go value of type jwt.MapClaims".to_owned(),
             ),
+        ];
+        for (token, expected) in cases {
+            let expected = Some(expected).filter(|text| !text.is_empty());
+            assert_eq!(read(&token), expected, "{token:?}");
+        }
+    }
+
+    /// Measured like the rows above.
+    #[test]
+    fn a_broken_json_literal_is_worded_as_go_words_it() {
+        let cases = [
+            (
+                token("nojson", "{}"),
+                "invalid character 'o' in literal null (expecting 'u')".to_owned(),
+            ),
+            (
+                token("nul", "{}"),
+                "invalid character ' ' in literal null (expecting 'l')".to_owned(),
+            ),
+            (
+                token("fals}", "{}"),
+                "invalid character '}' in literal false (expecting 'e')".to_owned(),
+            ),
+            (
+                token("trux", "{}"),
+                "invalid character 'x' in literal true (expecting 'e')".to_owned(),
+            ),
+            (
+                token(r"nu\", "{}"),
+                r"invalid character '\\' in literal null (expecting 'l')".to_owned(),
+            ),
+            (
+                token("nullx", "{}"),
+                "invalid character 'x' after top-level value".to_owned(),
+            ),
+            // Go has more to say about JSON that goes wrong inside an object.
+            (token(r#"{"alg" 1}"#, "{}"), String::new()),
         ];
         for (token, expected) in cases {
             let expected = Some(expected).filter(|text| !text.is_empty());

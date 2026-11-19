@@ -252,9 +252,9 @@ also leaves `'` bare; `apigw` sends `%27`.
   error_description="..."`, the description in the words of the Go libraries API Gateway reads
   tokens with (`token contains an invalid number of segments`, `illegal base64 data at input
   byte 1`, `signing method HS256 is invalid`, `no "kid" provided in the JWT`, `crypto/rsa:
-  verification error`, and so on). `apigw` gives the same description for 52 of 53 refused
+  verification error`, and so on). `apigw` gives the same description for all 53 refused
   tokens sent to both. It gives none where it cannot know API Gateway's words: JSON that goes
-  wrong after its first character, a wrong issuer, an
+  wrong inside an object, array, string, or number, a wrong issuer, an
   issuer whose keys cannot be fetched, and `nbf` or `iat` in the future. `the token has expired`
   and `the token does not have a valid audience` come from AWS's documentation, not from a
   measurement: no signed token was available to send.
