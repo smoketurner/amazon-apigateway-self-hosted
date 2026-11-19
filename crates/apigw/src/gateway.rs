@@ -211,6 +211,8 @@ pub(crate) enum GatewayError {
     /// The integration is configured in a way that cannot be executed, such as
     /// an invalid endpoint address.
     ApiConfiguration,
+    /// A request template read the body as JSON and the body is broken JSON.
+    UnprocessablePayload,
     RequestTooLarge,
     /// An integration this gateway can't execute yet.
     UnsupportedIntegration,
@@ -259,6 +261,9 @@ impl GatewayError {
                 Failure::new(ResponseType::IntegrationTimeout).with_message("Service Unavailable")
             }
             (Self::ApiConfiguration, _) => Failure::new(ResponseType::ApiConfigurationError),
+            (Self::UnprocessablePayload, _) => Failure::new(ResponseType::Default4xx)
+                .with_message("Could not process payload")
+                .while_executing(),
             (Self::RequestTooLarge, ApiKind::Rest) => Failure::new(ResponseType::RequestTooLarge),
             (Self::RequestTooLarge, ApiKind::Http) => {
                 Failure::new(ResponseType::RequestTooLarge).with_message("Request Entity Too Large")

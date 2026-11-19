@@ -228,6 +228,8 @@ pub(crate) struct Failure {
     message: Cow<'static, str>,
     /// What a request body violated, for `$context.error.validationErrorString`.
     validation: Option<String>,
+    /// Whether `$context.error.messageString` starts with a space.
+    spaced: bool,
 }
 
 impl Failure {
@@ -253,6 +255,7 @@ impl Failure {
             status: response_type.default_status(),
             message: Cow::Borrowed(response_type.default_message()),
             validation: None,
+            spaced: response_type.message_string_is_spaced(),
         }
     }
 
@@ -263,6 +266,7 @@ impl Failure {
             status,
             message: Cow::Borrowed(message),
             validation: None,
+            spaced: false,
         }
     }
 
@@ -275,6 +279,14 @@ impl Failure {
     #[must_use]
     pub(crate) fn with_message(mut self, message: impl Into<Cow<'static, str>>) -> Self {
         self.message = message.into();
+        self
+    }
+
+    /// Marks a failure of a request API Gateway had started executing, whose
+    /// message string starts with a space whatever its response type.
+    #[must_use]
+    pub(crate) const fn while_executing(mut self) -> Self {
+        self.spaced = true;
         self
     }
 
@@ -507,10 +519,11 @@ impl GatewayResponses {
             .unwrap_or(failure.status);
 
         let quoted = json!(failure.message).to_string();
-        let spaced = failure
-            .response_type()
-            .is_some_and(ResponseType::message_string_is_spaced);
-        let message_string = if spaced { format!(" {quoted}") } else { quoted };
+        let message_string = if failure.spaced {
+            format!(" {quoted}")
+        } else {
+            quoted
+        };
         let default_template = failure
             .response_type()
             .map_or(DEFAULT_TEMPLATE, ResponseType::default_template);
