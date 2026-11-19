@@ -615,19 +615,31 @@ mod tests {
         let url = target
             .proxy_url(
                 &route("/{proxy+}", &target).path,
-                &incoming(&[("proxy", "a b/c")], Some("x=1")),
+                &incoming(&[("proxy", "a%20b/c%2Fd")], Some("x=1")),
             )
             .unwrap();
-        assert_eq!(url.as_str(), "http://up/a%20b/c?fixed=1&x=1");
+        assert_eq!(
+            url.as_str(),
+            "http://up/a%20b/c%2Fd?fixed=1&x=1",
+            "a REST path parameter reaches the backend as the client escaped it"
+        );
 
         let target = proxy("http://up/items/{id}");
         let url = target
             .proxy_url(
                 &route("/items/{id}", &target).path,
-                &incoming(&[("id", "a/b")], None),
+                &incoming(&[("id", "a%2Fb")], None),
             )
             .unwrap();
         assert_eq!(url.as_str(), "http://up/items/a%2Fb");
+
+        // An HTTP API's parameters are decoded, so they are escaped again here.
+        let mut decoded = incoming(&[("id", "a/b c")], None);
+        decoded.api.kind = ApiKind::Http;
+        let url = target
+            .proxy_url(&route("/items/{id}", &target).path, &decoded)
+            .unwrap();
+        assert_eq!(url.as_str(), "http://up/items/a%2Fb%20c");
     }
 
     #[test]

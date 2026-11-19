@@ -26,6 +26,7 @@ use crate::integration::StageVariables;
 use crate::model::{ApiKind, PayloadVersion, ResponseTransferMode, RouteKey};
 use crate::observability::Trace;
 use crate::payload::PayloadSettings;
+use crate::rest_path::ReportedPath;
 use crate::route::Route;
 
 /// The API and stage a request was received on.
@@ -403,7 +404,9 @@ impl RequestContext {
             request_id,
             received: jiff::Timestamp::now(),
             method,
-            path: uri.path().to_owned(),
+            path: extensions
+                .remove::<ReportedPath>()
+                .map_or_else(|| uri.path().to_owned(), |reported| reported.0),
             full_path,
             query: QueryString::for_api(api.kind, uri.query()),
             headers,

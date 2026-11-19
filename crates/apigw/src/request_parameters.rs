@@ -150,15 +150,26 @@ impl RequestParameters {
             let Some((name, tail)) = after.trim_start_matches('{').split_once('}') else {
                 return Err("unterminated placeholder".to_owned());
             };
-            let value = match (overrides.path.get(name), self.path.get(name)) {
-                (Some(value), _) => Some(value.clone()),
-                (None, Some(source)) => source.resolve(ctx),
-                (None, None) => ctx.path_param(name).map(str::to_owned),
+            // A REST path parameter is still as the client escaped it, and
+            // goes into the URL that way; any other value is escaped here.
+            let from_path = |ctx: &RequestContext, name: &str| {
+                let sent = ctx.api.kind == ApiKind::Rest;
+                ctx.path_param(name).map(|value| (value.to_owned(), sent))
             };
-            let Some(value) = value else {
+            let value = match (overrides.path.get(name), self.path.get(name)) {
+                (Some(value), _) => Some((value.clone(), false)),
+                (None, Some(ParamSource::Path(source))) => from_path(ctx, source),
+                (None, Some(source)) => source.resolve(ctx).map(|value| (value, false)),
+                (None, None) => from_path(ctx, name),
+            };
+            let Some((value, as_sent)) = value else {
                 return Err(format!("no value for placeholder {{{name}}}"));
             };
-            UrlEncoder(&mut out).path_value(&value, greedy == Some(name));
+            if as_sent {
+                out.push_str(&value);
+            } else {
+                UrlEncoder(&mut out).path_value(&value, greedy == Some(name));
+            }
             rest = tail;
         }
         out.push_str(rest);

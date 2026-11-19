@@ -35,6 +35,7 @@ mod payload;
 mod pipeline;
 mod proxy;
 mod request_parameters;
+mod rest_path;
 mod route;
 mod router;
 mod source;

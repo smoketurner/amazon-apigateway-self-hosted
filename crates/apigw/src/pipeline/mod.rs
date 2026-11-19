@@ -25,9 +25,12 @@ use crate::digest::Sha256Digest;
 use crate::gateway::{ApiContext, AuthorizationMode, GatewayError, MAX_BODY_BYTES};
 use crate::gateway_response::Failure;
 use crate::integration::Integration;
-use crate::model::{ApiKeySource, ApiKind, Protection, ResponseTransferMode, ResponseType};
+use crate::model::{
+    ApiKeySource, ApiKind, Protection, ResponseTransferMode, ResponseType, RoutePath,
+};
 use crate::observability::IntegrationTiming;
 use crate::payload::PayloadSettings;
+use crate::rest_path::RestPath;
 use crate::route::Route;
 use crate::state::Admission;
 use crate::usage::{KeyValue, RouteApiKey, UsageOutcome};
@@ -58,8 +61,14 @@ impl<'a> Pipeline<'a> {
 
     pub(crate) async fn run(self, request: Request) -> Response {
         let (mut parts, body) = request.into_parts();
-        let path_params = match self.path_params {
-            Some(ref params) => Ok(params.clone()),
+        let rest = match self.route.path {
+            RoutePath::Resource(ref template) if self.api.kind == ApiKind::Rest => {
+                RestPath::new(parts.uri.path()).parameters(template)
+            }
+            RoutePath::Resource(_) | RoutePath::Default => None,
+        };
+        let path_params = match self.path_params.as_ref().or(rest.as_ref()) {
+            Some(params) => Ok(params.clone()),
             None => RawPathParams::from_request_parts(&mut parts, &())
                 .await
                 .map(|params| {

@@ -26,6 +26,7 @@ use crate::identity::ClientIdentity;
 use crate::integration::Integration;
 use crate::model::{ApiKind, ApiModel, MethodMatch, Protections, RouteKey, RoutePath};
 use crate::pipeline::Pipeline;
+use crate::rest_path;
 use crate::route::{AccessRules, Route};
 use crate::throttle::ThrottleSettings;
 use crate::usage::ApiKeyRules;
@@ -364,10 +365,10 @@ pub(crate) fn build(
             methods: BTreeMap::new(),
             default,
         });
-        router.fallback(move |request: Request| {
+        rest_path::serve(router.fallback(move |request: Request| {
             let fallback = Arc::clone(&fallback);
             async move { fallback.handle(request).await }
-        })
+        }))
     };
     (base.mount(router, ctx), summaries)
 }
