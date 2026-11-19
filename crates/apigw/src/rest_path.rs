@@ -171,6 +171,10 @@ fn trace_refused() -> Response {
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html"));
+    // The load balancer in front of every REST API names itself.
+    response
+        .headers_mut()
+        .insert(header::SERVER, HeaderValue::from_static("awselb/2.0"));
     response.extensions_mut().insert(EdgeResponse);
     response
 }
@@ -274,6 +278,7 @@ mod tests {
         let refused = router.clone().oneshot(trace).await.unwrap();
         assert_eq!(refused.status(), StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(refused.headers()["content-type"], "text/html");
+        assert_eq!(refused.headers()["server"], "awselb/2.0");
         assert!(refused.extensions().get::<EdgeResponse>().is_some());
         for refused in ["/mock?d=%zz", "/%zz", "/mock?a=%"] {
             assert_eq!(

@@ -379,28 +379,83 @@ pub(crate) fn build(
 /// Serves every request through whichever [`Loaded`] router is current, so a
 /// refreshed definition takes effect without restarting the listener. Requests
 /// already in flight finish on the router they started with.
-pub(crate) fn dispatcher(current: watch::Receiver<Arc<Loaded>>) -> Router {
+pub(crate) fn dispatcher(current: watch::Receiver<Arc<Loaded>>, hosts: AllowedHosts) -> Router {
+    let hosts = Arc::new(hosts);
     Router::new().fallback(move |request: Request| {
         let loaded = Arc::clone(&current.borrow());
-        async move { loaded.serve(request).await }
+        let hosts = Arc::clone(&hosts);
+        async move { loaded.serve(request, &hosts).await }
     })
+}
+
+/// The host names an API answers to. API Gateway answers `403` to a request
+/// whose `Host` is not the API's own; a self-hosted gateway only knows its
+/// names when it is told them.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AllowedHosts(Vec<String>);
+
+impl AllowedHosts {
+    /// Every host is served.
+    pub(crate) fn any() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn only(names: &[String]) -> Self {
+        Self(names.iter().map(|name| name.to_ascii_lowercase()).collect())
+    }
+
+    fn permits(&self, request: &Request) -> bool {
+        if self.0.is_empty() {
+            return true;
+        }
+        let host = request
+            .headers()
+            .get(axum::http::header::HOST)
+            .and_then(|value| value.to_str().ok())
+            .or_else(|| request.uri().host())
+            .unwrap_or_default();
+        let name = match host.rsplit_once(':') {
+            Some((name, port)) if port.bytes().all(|b| b.is_ascii_digit()) => name,
+            Some(_) | None => host,
+        };
+        self.0
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(name))
+    }
+
+    /// API Gateway's answer to a host that is not the API's.
+    fn refusal() -> Response {
+        let mut response = (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({ "message": "Forbidden" })),
+        )
+            .into_response();
+        response.headers_mut().insert(
+            HeaderName::from_static("x-amzn-errortype"),
+            HeaderValue::from_static("ForbiddenException"),
+        );
+        response
+    }
 }
 
 impl Loaded {
     /// Runs `request` through this definition: assigns the request ID, picks the
     /// release, and logs the outcome.
-    async fn serve(&self, mut request: Request) -> Response {
+    async fn serve(&self, mut request: Request, hosts: &AllowedHosts) -> Response {
         let started = Instant::now();
         let request_id = Uuid::now_v7();
         request.extensions_mut().insert(RequestId(request_id));
         let method = request.method().clone();
         let path = request.uri().path().to_owned();
-        let mut response = self
-            .router_for_request()
-            .clone()
-            .oneshot(request)
-            .await
-            .into_response();
+        let mut response = if hosts.permits(&request) {
+            self.router_for_request()
+                .clone()
+                .oneshot(request)
+                .await
+                .into_response()
+        } else {
+            AllowedHosts::refusal()
+        };
         let attributed = response.extensions().get::<EdgeResponse>().is_none();
         if attributed && let Ok(value) = HeaderValue::try_from(request_id.to_string()) {
             response
@@ -502,7 +557,7 @@ pub(crate) fn domain_dispatcher(domains: DomainRegistry) -> Router {
                     if CustomDomain::rewrite_path(&mut request, &routed_path).is_err() {
                         return CustomDomain::error(StatusCode::BAD_REQUEST, "Bad Request");
                     }
-                    loaded.serve(request).await
+                    loaded.serve(request, &AllowedHosts::any()).await
                 }
                 Resolution::Unavailable(stage) => {
                     tracing::warn!(%stage, host, "request for an API stage that has not loaded");
@@ -1732,7 +1787,7 @@ pub(crate) mod tests {
             })
         };
         let (tx, rx) = watch::channel(loaded(first, summary));
-        let app = dispatcher(rx.clone());
+        let app = dispatcher(rx.clone(), AllowedHosts::any());
         let response = app
             .clone()
             .oneshot(Request::builder().uri("/pets").body(Body::empty()).unwrap())
@@ -1748,6 +1803,33 @@ pub(crate) mod tests {
             !response.headers().contains_key("x-amzn-trace-id"),
             "a MOCK integration starts no trace"
         );
+
+        // Measured against a deployed API: a host that is not the API's is a
+        // 403 that still names the request.
+        let named = dispatcher(
+            rx.clone(),
+            AllowedHosts::only(&["api.example.com".to_owned()]),
+        );
+        let from = |host: &'static str| {
+            Request::builder()
+                .uri("/pets")
+                .header("host", host)
+                .body(Body::empty())
+                .unwrap()
+        };
+        for host in ["api.example.com", "API.example.com:8443"] {
+            let served = named.clone().oneshot(from(host)).await.unwrap();
+            assert_eq!(served.status(), StatusCode::OK, "{host}");
+        }
+        let refused = named.clone().oneshot(from("other.example")).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        assert_eq!(refused.headers()["x-amzn-errortype"], "ForbiddenException");
+        assert!(refused.headers().contains_key("x-amzn-requestid"));
+        assert!(refused.headers().contains_key("x-amz-apigw-id"));
+        let body = axum::body::to_bytes(refused.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(&*body, br#"{"message":"Forbidden"}"#);
 
         let doc =
             json!({"paths": {"/pets": {"get": {"x-amazon-apigateway-integration": mock(203)}}}});
