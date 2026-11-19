@@ -5,7 +5,7 @@ export
 
 CARGO ?= cargo
 
-.PHONY: all build check clean fmt fmt-check lint test test-coverage test-mutants parity deny hooks image run help
+.PHONY: all build check clean fmt fmt-check lint test test-coverage test-mutants parity deny hooks image binary chart-lint run help
 
 all: build
 
@@ -55,6 +55,18 @@ hooks: ## Install prek git hooks (pre-commit + pre-push)
 
 image: ## Build the container image as apigw:local
 	docker build -t apigw:local .
+
+binary: ## Build the release's static musl binary: make binary TARGET=aarch64-unknown-linux-musl
+	docker buildx bake ci
+
+##@ Packaging
+
+chart-lint: ## Lint the Helm chart and validate what each ci/ value set renders (requires helm, kubeconform)
+	@set -e; for values in charts/apigw/ci/*.yaml; do \
+		echo "== $$values"; \
+		helm lint --strict charts/apigw --values "$$values"; \
+		helm template apigw charts/apigw --values "$$values" | kubeconform -strict -ignore-missing-schemas -summary; \
+	done
 
 ##@ Run
 

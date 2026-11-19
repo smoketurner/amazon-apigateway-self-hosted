@@ -1,0 +1,3 @@
+# Dockerfile.release only copies the prebuilt binaries.
+*
+!dist/

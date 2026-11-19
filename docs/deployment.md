@@ -1,14 +1,98 @@
 # Deployment
 
-`apigw` ships as a static musl binary in a distroless, non-root image (`Dockerfile`). It is
-built for Kubernetes on any cloud or on-prem, optionally behind Istio.
+`apigw` is a static musl binary for Linux x86_64 and aarch64. Each release publishes it three
+ways, all built from the same binary ([ci-cd.md](ci-cd.md#releases)):
+
+| Form | Where | For |
+|---|---|---|
+| Helm chart | `oci://ghcr.io/smoketurner/charts/apigw` | Kubernetes on any cloud or on-prem, optionally behind Istio |
+| Container image | `ghcr.io/smoketurner/amazon-apigateway-self-hosted:<version>` | your own manifests or another container runtime |
+| `.rpm` and `.deb` | `https://packages.smoketurner.com` | a Linux host, as a systemd service |
+
+Versions are calendar versions (`2026.11.1`). There is no `latest` image tag: a tag never
+moves, and the chart pulls its image by digest.
+
+## Helm
 
 ```bash
-docker build -t apigw:local .   # or: make image
+helm install apigw oci://ghcr.io/smoketurner/charts/apigw --version <version> \
+  --set api.restApiId=a1b2c3d4e5 --set api.stage=prod \
+  --set aws.region=us-east-1 \
+  --set tls.existingSecret=apigw-tls
 ```
 
-The image sets `APIGW_LISTEN=0.0.0.0:8443`, `APIGW_ADMIN_LISTEN=0.0.0.0:9443`, and
-`APIGW_CONFIG_CACHE=/var/cache/apigw/config.json`.
+The chart needs an API source and a certificate, and fails to render without them:
+
+- **API**: exactly one of `api.restApiId` or `api.httpApiId` (with `api.stage`),
+  `api.domainNames`, or `api.openapiFile`. `api.stageVariables` overrides stage variables.
+- **TLS**: `tls.existingSecret` names a `kubernetes.io/tls` Secret, or
+  `tls.certManager.enabled` with `tls.certManager.issuerRef.name` has cert-manager issue one.
+- **AWS credentials**: see [below](#aws-credentials). `aws.existingSecret` loads a Secret's
+  keys as environment variables; `aws.webIdentity.roleArn` projects a service account token
+  and sets `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE`; `aws.configFile` and
+  `aws.sharedCredentialsFile` (empty by default) point at files you mount with `extraVolumes`.
+- `replicaCount` is also passed as `--replicas`; `valkey.existingSecret` shares throttle state.
+- `cache.existingClaim` keeps the last-known-good definition on a PersistentVolumeClaim
+  instead of an `emptyDir`.
+- `istio.destinationRule.enabled` renders the DestinationRule shown under [Istio](#istio).
+- Any other flag goes in `extraEnv` as its `APIGW_*` variable.
+
+`charts/apigw/values.yaml` documents every value. The admin port is used by the probes and is
+never added to the Service.
+
+## Linux packages
+
+The `.rpm` and `.deb` install `/usr/bin/apigw`, a hardened `apigw.service`, an `apigw` system
+user, and `/etc/apigw/apigw.env`. The service is not enabled or started by the install.
+
+```bash
+# Fedora, RHEL 9+, Amazon Linux 2023
+sudo tee /etc/yum.repos.d/smoketurner.repo << 'EOF'
+[smoketurner]
+name=Smoke Turner
+baseurl=https://packages.smoketurner.com/rpm/$basearch/
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://packages.smoketurner.com/gpg/smoketurner.asc
+enabled=1
+EOF
+sudo dnf install -y apigw
+
+# Debian 12+, Ubuntu 22.04+
+curl -fsSL https://packages.smoketurner.com/gpg/smoketurner.asc \
+  | gpg --dearmor \
+  | sudo tee /usr/share/keyrings/smoketurner-archive-keyring.gpg > /dev/null
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/smoketurner-archive-keyring.gpg] https://packages.smoketurner.com/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/smoketurner.list > /dev/null
+sudo apt-get update && sudo apt-get install -y apigw
+```
+
+The signing key is Curve25519, which RPM older than 4.16 (RHEL 8) cannot verify.
+
+Then:
+
+1. Put the certificate and key at `/etc/apigw/tls/tls.crt` and `tls.key`, readable by group
+   `apigw` (or change `APIGW_TLS_CERT` and `APIGW_TLS_KEY`).
+2. Edit `/etc/apigw/apigw.env`: name the API and set up [AWS credentials](#aws-credentials).
+   The file is `0640 root:apigw` because it may hold secrets, and package upgrades keep your
+   copy.
+3. `sudo systemctl enable --now apigw`, then `journalctl -u apigw`.
+
+The unit has no reload command, because certificates and the API definition are re-read on a
+timer. It allows 45 seconds to stop, above the 30 second connection drain. The admin listener
+defaults to `127.0.0.1:9443`. To listen on a port below 1024, add a drop-in with
+`AmbientCapabilities=CAP_NET_BIND_SERVICE` and the same `CapabilityBoundingSet`.
+
+## Container image
+
+The image is distroless and runs as a non-root user. It sets `APIGW_LISTEN=0.0.0.0:8443` and
+`APIGW_ADMIN_LISTEN=0.0.0.0:9443`, and has a writable `/var/cache/apigw` to point
+`APIGW_CONFIG_CACHE` at. It sets no cache path itself, because `--domain-name` rejects one.
+
+```bash
+docker pull ghcr.io/smoketurner/amazon-apigateway-self-hosted:<version>
+docker build -t apigw:local .   # a local build; or: make image
+```
 
 ## TLS
 
@@ -24,9 +108,16 @@ timers work, giving a 5 s TLS handshake limit, a 10 s request-header limit, an i
 that also covers HTTP/2, a per-listener connection cap (`--max-connections`), and a 30 s
 drain on SIGTERM.
 
-## AWS credentials outside AWS
+## AWS credentials
 
-There is no IRSA or EKS Pod Identity off AWS. Options, in order of preference:
+`apigw` resolves credentials and region the way the AWS CLI and SDKs do, in the same order:
+environment variables, the shared `config` and `credentials` files (with `AWS_PROFILE`), SSO,
+`credential_process`, a web identity token, then container and instance metadata. On an EC2
+instance or in EKS nothing needs configuring. `AWS_CONFIG_FILE` and
+`AWS_SHARED_CREDENTIALS_FILE` are never set for you: the systemd service's user has no home
+directory and the image has no `~/.aws`, so shared files are read only when you set these.
+
+Off AWS there is no IRSA or EKS Pod Identity. Options, in order of preference:
 
 1. **IAM Roles Anywhere** — short-lived credentials from an X.509 certificate through
    `credential_process`. The distroless image has no `aws_signing_helper`, so build a derived
@@ -129,6 +220,9 @@ another network fails or reaches the wrong place; the explicit mapping cannot.
 
 ## Kubernetes
 
+The [Helm chart](#helm) renders the manifests below; they are shown for clusters that manage
+plain YAML.
+
 ```yaml
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -150,7 +244,7 @@ spec:
       terminationGracePeriodSeconds: 45   # above the 30 s connection drain
       containers:
         - name: apigw
-          image: ghcr.io/smoketurner/amazon-apigateway-self-hosted:latest
+          image: ghcr.io/smoketurner/amazon-apigateway-self-hosted:2026.11.1
           env:
             - { name: APIGW_REST_API_ID, value: a1b2c3d4e5 }
             - { name: APIGW_STAGE, value: prod }

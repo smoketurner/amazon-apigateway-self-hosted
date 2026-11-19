@@ -1,0 +1,517 @@
+# Builds, signs, and attests every release artifact: the static `apigw`
+# binaries, their archives and CycloneDX SBOMs, the .rpm and .deb packages, the
+# container image, and the Helm chart. Build and attest run inside this
+# reusable workflow so the Sigstore certificate records it, not the caller, as
+# the signer identity, which is what makes the provenance SLSA Build Level 3.
+# Nothing here may hold `contents: write`; the caller publishes the release from
+# the artifacts this workflow uploads.
+#
+# Verify a published asset:
+#   gh attestation verify apigw-<version>-<target>.tar.gz --owner smoketurner \
+#     --signer-workflow smoketurner/amazon-apigateway-self-hosted/.github/workflows/reusable-build.yml
+name: Reusable Build
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Release version without the v prefix (e.g. 2026.11.1)"
+        required: true
+        type: string
+      publish:
+        description: "Push the container image and the Helm chart to GHCR and attest their digests"
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      # The packages.smoketurner.com signing key, which signs the RPMs. Required
+      # on a tag: that repository sets gpgcheck=1, so an unsigned RPM published
+      # there would not install. A dry run without it builds an unsigned RPM.
+      GPG_PRIVATE_KEY:
+        required: false
+      GPG_PASSPHRASE:
+        required: false
+
+permissions: {}
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+  CHART_REGISTRY: ghcr.io/${{ github.repository_owner }}/charts
+
+jobs:
+  binaries:
+    name: Binary (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native runners: nothing is cross-compiled or emulated, because
+          # aws-lc-rs builds C from source.
+          - name: linux-amd64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set SOURCE_DATE_EPOCH for reproducible builds
+        run: |
+          set -euo pipefail
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v4.4.1
+
+      - name: Build the reproducible static binary
+        uses: docker/bake-action@v7.5.0
+        with:
+          source: .
+          targets: ci
+        env:
+          TARGET: ${{ matrix.target }}
+          SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
+          GENERATE_SBOM: "true"
+
+      - name: Smoke test
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ inputs.version }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          reported="$("./target/${TARGET}/release/apigw" --version)"
+          echo "${reported}"
+          if [ "${REF_TYPE}" = "tag" ] && [ "${reported}" != "apigw ${VERSION}" ]; then
+            echo "::error::the binary reports '${reported}', expected 'apigw ${VERSION}'"
+            exit 1
+          fi
+
+      - name: Create the archive
+        id: archive
+        env:
+          VERSION: ${{ inputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          archive="apigw-${VERSION}-${TARGET}.tar.gz"
+          mkdir -p dist
+          # A deterministic archive: fixed order, timestamps, and ownership.
+          tar --sort=name \
+            --mtime="@${SOURCE_DATE_EPOCH}" \
+            --owner=0 --group=0 --numeric-owner \
+            -C "target/${TARGET}/release" \
+            -czf "dist/${archive}" apigw
+          (cd dist && sha256sum "${archive}" > "${archive}.sha256")
+          echo "asset=dist/${archive}" >> "$GITHUB_OUTPUT"
+
+      - name: Collect the SBOM
+        id: sbom
+        env:
+          VERSION: ${{ inputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          sbom="target/${TARGET}/release/apigw.cdx.json"
+          if [ ! -s "${sbom}" ]; then
+            echo "::error title=Missing SBOM::cargo-cyclonedx produced no SBOM for ${TARGET}"
+            exit 1
+          fi
+          name="apigw-${VERSION}-${TARGET}.cdx.json"
+          cp "${sbom}" "dist/${name}"
+          echo "path=dist/${name}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: binaries-${{ matrix.name }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 5
+
+      - name: Attest build provenance
+        uses: actions/attest@v4.2.2
+        with:
+          subject-path: ${{ steps.archive.outputs.asset }}
+
+      - name: Attest the SBOM
+        uses: actions/attest@v4.2.2
+        with:
+          subject-path: ${{ steps.archive.outputs.asset }}
+          sbom-path: ${{ steps.sbom.outputs.path }}
+
+  linux-packages:
+    name: Linux packages (${{ matrix.arch }})
+    needs: binaries
+    # Native runners so each package can be installed in a container of its own
+    # architecture once it is built.
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            artifact: binaries-linux-amd64
+            target: x86_64-unknown-linux-musl
+            nfpm-asset: Linux_x86_64
+            nfpm-sha256: 2afaa5ffb5e3493402e31e7c67a5a1fb42133e3f66fc315ca0051934125561c7
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            artifact: binaries-linux-arm64
+            target: aarch64-unknown-linux-musl
+            nfpm-asset: Linux_arm64
+            nfpm-sha256: d4eee71839e92c68cbd3b101640bad32d2856fc551acae0635be9118e48c9d9c
+    env:
+      NFPM_VERSION: 2.49.0
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: ${{ matrix.artifact }}
+          path: binaries
+
+      - name: Unpack the binary
+        env:
+          VERSION: ${{ inputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p staging
+          tar -xzf "binaries/apigw-${VERSION}-${TARGET}.tar.gz" -C staging
+
+      # From the release tarball, checksum pinned, rather than goreleaser's apt
+      # repository, which is only reachable as [trusted=yes].
+      - name: Install nfpm
+        env:
+          NFPM_ASSET: ${{ matrix.nfpm-asset }}
+          NFPM_SHA256: ${{ matrix.nfpm-sha256 }}
+        run: |
+          set -euo pipefail
+          tarball="nfpm_${NFPM_VERSION}_${NFPM_ASSET}.tar.gz"
+          curl -fsSL -o "${RUNNER_TEMP}/${tarball}" \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/${tarball}"
+          echo "${NFPM_SHA256}  ${RUNNER_TEMP}/${tarball}" | sha256sum -c -
+          mkdir -p "${RUNNER_TEMP}/nfpm"
+          tar -xzf "${RUNNER_TEMP}/${tarball}" -C "${RUNNER_TEMP}/nfpm" nfpm
+          echo "${RUNNER_TEMP}/nfpm" >> "$GITHUB_PATH"
+
+      - name: Stage the signing key
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GPG_PRIVATE_KEY}" ]; then
+            if [ "${REF_TYPE}" = "tag" ]; then
+              echo "::error title=Missing signing key::GPG_PRIVATE_KEY is not set; packages.smoketurner.com rejects unsigned RPMs."
+              exit 1
+            fi
+            echo "::warning title=Unsigned RPM::GPG_PRIVATE_KEY is not set, so this dry run's RPM is unsigned."
+            exit 0
+          fi
+          umask 077
+          printf '%s\n' "${GPG_PRIVATE_KEY}" > "${RUNNER_TEMP}/signing-key.asc"
+          echo "GPG_KEY_FILE=${RUNNER_TEMP}/signing-key.asc" >> "$GITHUB_ENV"
+          gpg --batch --import "${RUNNER_TEMP}/signing-key.asc"
+          gpg --batch --armor --export > "${RUNNER_TEMP}/signing-key.pub.asc"
+
+      - name: Build the .rpm and .deb
+        env:
+          VERSION: ${{ inputs.version }}
+          ARCH: ${{ matrix.arch }}
+          NFPM_RPM_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          nfpm package --config packaging/nfpm.yaml --packager rpm --target dist/
+          nfpm package --config packaging/nfpm.yaml --packager deb --target dist/
+          (cd dist && for f in *.rpm *.deb; do sha256sum "$f" > "$f.sha256"; done)
+          ls -l dist
+
+      - name: Verify the RPM signature
+        if: env.GPG_KEY_FILE != ''
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq rpm
+          db="$(mktemp -d)"
+          rpm --dbpath "$db" --initdb
+          rpmkeys --dbpath "$db" --import "${RUNNER_TEMP}/signing-key.pub.asc"
+          for rpm in dist/*.rpm; do
+            result="$(rpmkeys --dbpath "$db" --checksig -v "$rpm")"
+            echo "${result}"
+            grep -q 'signatures OK' <<< "${result}"
+          done
+
+      - name: Remove the signing key
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/signing-key.asc"
+
+      - name: Install each package in a clean container
+        run: |
+          set -euo pipefail
+          for package in dist/*.rpm dist/*.deb; do
+            packaging/test-install.sh "${package}"
+          done
+
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: packages-linux-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 5
+
+      - name: Attest build provenance
+        uses: actions/attest@v4.2.2
+        with:
+          subject-path: |
+            dist/*.rpm
+            dist/*.deb
+
+  image:
+    name: Container image (${{ matrix.arch }})
+    needs: binaries
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            artifact: binaries-linux-amd64
+            target: x86_64-unknown-linux-musl
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            artifact: binaries-linux-arm64
+            target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: ${{ matrix.artifact }}
+          path: binaries
+
+      - name: Lay out the binary
+        env:
+          VERSION: ${{ inputs.version }}
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/linux-${ARCH}"
+          tar -xzf "binaries/apigw-${VERSION}-${TARGET}.tar.gz" -C "dist/linux-${ARCH}"
+
+      - uses: docker/setup-buildx-action@v4.4.1
+
+      # Runs on a dry run too, so a broken Dockerfile.release is found before a tag.
+      - name: Build and run the image locally
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          docker buildx build --file Dockerfile.release --platform "linux/${ARCH}" \
+            --tag apigw:smoke --load .
+          docker run --rm apigw:smoke --version
+
+      - uses: docker/login-action@v4.8.0
+        if: inputs.publish
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Same builder, so this re-exports the layers built above.
+      - name: Build and push by digest
+        id: build
+        if: inputs.publish
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          file: Dockerfile.release
+          platforms: linux/${{ matrix.arch }}
+          provenance: true
+          sbom: true
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export the digest
+        if: inputs.publish
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p digests
+          touch "digests/${DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@v7.0.2
+        if: inputs.publish
+        with:
+          name: digests-${{ matrix.arch }}
+          path: digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  image-index:
+    name: Container image index
+    needs: image
+    if: inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      # The attest step pushes to the registry, so it also writes an artifact
+      # metadata storage record for the organization's linked artifacts page.
+      artifact-metadata: write
+    outputs:
+      digest: ${{ steps.index.outputs.digest }}
+    steps:
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: digests-*
+          path: digests
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v4.4.1
+
+      - uses: docker/login-action@v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Only the version tag: there is no `latest`, so a tag never moves.
+      - name: Create the manifest list and push it
+        working-directory: digests
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2046  # intentional splitting: one arg per digest
+          docker buildx imagetools create --tag "${IMAGE}:${VERSION}" \
+            $(printf "${IMAGE}@sha256:%s " *)
+
+      - name: Read the index digest
+        id: index
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          digest="$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Attest the pushed image
+        uses: actions/attest@v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.index.outputs.digest }}
+          push-to-registry: true
+
+  chart:
+    name: Helm chart
+    needs: [image, image-index]
+    # image-index is skipped on a dry run; the chart is still packaged then,
+    # without an image digest.
+    if: ${{ !cancelled() && needs.image.result == 'success' && (needs.image-index.result == 'success' || !inputs.publish) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: azure/setup-helm@v5.1.0
+        with:
+          version: v4.3.1
+          checksum-policy: required
+
+      # The chart names the image by the digest this run pushed, so a chart
+      # version always deploys the image it was released with.
+      - name: Pin the image digest
+        if: inputs.publish
+        env:
+          DIGEST: ${{ needs.image-index.outputs.digest }}
+        run: |
+          set -euo pipefail
+          case "${DIGEST}" in
+            sha256:*) ;;
+            *) echo "::error::no image index digest to pin"; exit 1 ;;
+          esac
+          sed -i "s|^  digest: \"\"$|  digest: \"${DIGEST}\"|" charts/apigw/values.yaml
+          grep -qx "  digest: \"${DIGEST}\"" charts/apigw/values.yaml
+
+      - name: Package the chart
+        id: package
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          helm lint --strict charts/apigw --values charts/apigw/ci/rest-secret-values.yaml
+          mkdir -p dist
+          helm package charts/apigw --version "${VERSION}" --app-version "${VERSION}" --destination dist
+          chart="apigw-${VERSION}.tgz"
+          (cd dist && sha256sum "${chart}" > "${chart}.sha256")
+          echo "asset=dist/${chart}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: chart
+          path: dist/
+          if-no-files-found: error
+          retention-days: 5
+
+      - name: Attest the chart archive
+        uses: actions/attest@v4.2.2
+        with:
+          subject-path: ${{ steps.package.outputs.asset }}
+
+      - name: Push the chart to GHCR
+        id: push
+        if: inputs.publish
+        env:
+          ASSET: ${{ steps.package.outputs.asset }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${GHCR_TOKEN}" | helm registry login ghcr.io --username "${GHCR_USER}" --password-stdin
+          helm push "${ASSET}" "oci://${CHART_REGISTRY}" 2>&1 | tee push.log
+          digest="$(sed -n 's/^Digest: \(sha256:[0-9a-f]\{64\}\)$/\1/p' push.log)"
+          if [ -z "${digest}" ]; then
+            echo "::error::helm push reported no digest"
+            exit 1
+          fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Attest the pushed chart
+        if: inputs.publish
+        uses: actions/attest@v4.2.2
+        with:
+          subject-name: ${{ env.CHART_REGISTRY }}/apigw
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

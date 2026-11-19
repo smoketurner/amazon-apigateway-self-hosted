@@ -1,0 +1,11 @@
+apigw {{ .Chart.AppVersion }} is serving TLS on service {{ include "apigw.fullname" . }}:{{ .Values.service.port }}.
+
+A pod becomes ready once the first API definition has loaded. If pods restart,
+check their logs: apigw exits when it can reach neither AWS nor a cached definition.
+
+  kubectl --namespace {{ .Release.Namespace }} logs deployment/{{ include "apigw.fullname" . }}
+
+The admin listener is not on the Service. To list the routes being served:
+
+  kubectl --namespace {{ .Release.Namespace }} port-forward deployment/{{ include "apigw.fullname" . }} {{ .Values.adminPort }}
+  curl --insecure https://localhost:{{ .Values.adminPort }}/routes
