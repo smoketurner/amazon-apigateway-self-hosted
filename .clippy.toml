@@ -21,7 +21,7 @@ absolute-paths-allowed-crates = [
     "std",
     "core",
     "alloc",
-    "jsonschema",
+    "jsonschema_regex",
     "redis",
     "proc_macro",
     "anyhow",
