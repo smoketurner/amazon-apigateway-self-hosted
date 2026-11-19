@@ -218,7 +218,9 @@ also leaves `'` bare; `apigw` sends `%27`.
   a response nothing can be made from is only a `DEFAULT_5XX`.
 - A request no route claims that has an `Authorization` header is read as a failed attempt at
   Signature Version 4: `403` `IncompleteSignatureException`, with a message naming what the header
-  lacks and its SHA-256 digest. A complete header is an `UnrecognizedClientException`.
+  lacks and its SHA-256 digest. Signature parameters in the query string are read the same way. A
+  complete signature is judged by its date next (`Date must be in ISO-8601 'basic format'`,
+  `Signature expired`, `Signature not yet current`) and then by its credentials.
 - A response to `HEAD` from an integration repeats its length as `x-amzn-Remapped-Content-Length`.
 - An `HTTP_PROXY` backend receives the client's own `x-amzn-apigateway-api-id` when it sent one.
 - In a request template a body of `null` reads as `{}`; nulls inside a body are kept.
@@ -243,12 +245,11 @@ Known differences that remain:
 
 - `apigw` resolves `.` and `..` segments in the URL it sends to an HTTP backend; API Gateway
   sends them as they are.
-- API Gateway answers `403` to a request whose `Host` is not the API's; `apigw` serves any host
-  unless `--domain-name` is used.
-- The incomplete-signature messages cover the `Authorization` header only: a `Date` header in
-  the wrong format and signature parameters in the query string get the header's messages or
-  the missing-route answer.
-- The endpoint's `server: awselb/2.0` header on its `405` to `TRACE` is not sent.
+- API Gateway answers `403` to a request whose `Host` is not the API's. `apigw` does the same
+  for hosts outside `--allowed-host`, but serves any host when the flag is not given: it has no
+  name of its own to compare with.
+- A complete signature whose date is current is always an `UnrecognizedClientException`: a
+  gateway outside AWS cannot look the credentials up.
 
 - Response header names are lower case. API Gateway writes them in mixed case over HTTP/1.1
   (`Content-Type`, `x-amzn-RequestId`); over HTTP/2 both are lower case.
