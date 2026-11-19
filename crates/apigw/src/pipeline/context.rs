@@ -13,19 +13,19 @@ use axum::extract::OriginalUri;
 use axum::extract::Request;
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, Version, header};
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use crate::canary::Release;
 use crate::gateway::{ApiContext, RequestId};
 use crate::header_case::HeaderCase;
+use crate::http_routes::decoded_path;
 use crate::identity::ClientIdentity;
 use crate::integration::StageVariables;
 use crate::model::{ApiKind, PayloadVersion, ResponseTransferMode, RouteKey};
-use crate::observability::Trace;
+use crate::observability::{Trace, TraceId};
 use crate::payload::PayloadSettings;
+use crate::rest_path::ReportedPath;
 use crate::route::Route;
 
 /// The API and stage a request was received on.
@@ -36,6 +36,8 @@ pub(crate) struct ApiInfo {
     pub(crate) stage: Option<String>,
     /// Which release serves the request, for stages that have a canary.
     pub(crate) release: Option<Release>,
+    /// The deployment being served, when API Gateway named one.
+    pub(crate) deployment_id: Option<String>,
 }
 
 impl ApiInfo {
@@ -171,6 +173,18 @@ impl AuthorizerContext {
         &self.values
     }
 
+    /// Records how long the authorizer function took, which a REST API
+    /// reports as `$context.authorizer.integrationLatency` and in Lambda
+    /// proxy events, in milliseconds.
+    pub(crate) fn set_integration_latency(&mut self, latency: std::time::Duration) {
+        let millis = json!(u64::try_from(latency.as_millis()).unwrap_or(u64::MAX));
+        self.values
+            .insert("integrationLatency".to_owned(), millis.clone());
+        if let Some(ref mut event) = self.event {
+            event.insert("integrationLatency".to_owned(), millis);
+        }
+    }
+
     /// The value of `requestContext.authorizer` in a Lambda proxy event of this
     /// payload version, if an authorizer ran.
     pub(crate) fn event_value(&self, version: PayloadVersion) -> Option<Value> {
@@ -252,6 +266,11 @@ pub(crate) struct RequestContext {
     pub(crate) route_key: RouteKey,
     /// The resource path as configured (`/pets/{petId}`), not the request path.
     pub(crate) resource_path: String,
+    /// The trace API Gateway starts for a request when tracing is off, so
+    /// everything the request touches names the same one.
+    started_trace: Option<TraceId>,
+    /// The REST resource's ID, when the gateway could read the API's resources.
+    pub(crate) resource_id: Option<String>,
     pub(crate) request_id: Uuid,
     pub(crate) received: jiff::Timestamp,
     pub(crate) method: Method,
@@ -260,6 +279,8 @@ pub(crate) struct RequestContext {
     /// The path as the client sent it, including a stage prefix served with
     /// `--base-path` (`/prod/pets/7`): `$context.path`, and HTTP APIs' `rawPath`.
     pub(crate) full_path: String,
+    /// The path exactly as the client sent it, stage prefix and escapes included.
+    pub(crate) sent_path: String,
     pub(crate) query: QueryString,
     pub(crate) headers: HeaderMap,
     /// The client's spelling of header names, known for HTTP/1 requests.
@@ -380,10 +401,21 @@ impl RequestContext {
             tracing::warn!("request reached the pipeline without a client identity");
             ClientIdentity::unknown()
         });
-        let full_path = extensions
+        let sent_path = extensions
             .get::<OriginalUri>()
             .map_or_else(|| uri.path(), |original| original.0.path())
             .to_owned();
+        // An HTTP API works with the decoded path everywhere but in the
+        // payload 1.0 event's `path`; a REST API never decodes it.
+        let (path, full_path) = match api.kind {
+            ApiKind::Http => (decoded_path(uri.path()), decoded_path(&sent_path)),
+            ApiKind::Rest => (
+                extensions
+                    .remove::<ReportedPath>()
+                    .map_or_else(|| uri.path().to_owned(), |reported| reported.0),
+                sent_path.clone(),
+            ),
+        };
         let (route_key, resource_path) = match route {
             Some(route) => (route.key.clone(), route.path.to_string()),
             None => (RouteKey::from(""), uri.path().to_owned()),
@@ -394,14 +426,18 @@ impl RequestContext {
                 api_id: api.api_id.clone(),
                 stage: api.stage.clone(),
                 release: api.release,
+                deployment_id: api.deployment_id.clone(),
             },
             route_key,
+            started_trace: TraceId::generate(jiff::Timestamp::now()),
+            resource_id: api.resource_ids.get(&resource_path).cloned(),
             resource_path,
             request_id,
             received: jiff::Timestamp::now(),
             method,
-            path: uri.path().to_owned(),
+            path,
             full_path,
+            sent_path,
             query: QueryString::for_api(api.kind, uri.query()),
             headers,
             header_case,
@@ -422,14 +458,7 @@ impl RequestContext {
     /// base64 token; this one is derived from the random half of the request
     /// ID so the header and the context variable agree.
     pub(crate) fn extended_request_id(&self) -> String {
-        BASE64.encode(
-            self.request_id
-                .as_bytes()
-                .iter()
-                .skip(8)
-                .copied()
-                .collect::<Vec<u8>>(),
-        )
+        RequestId(self.request_id).extended()
     }
 
     /// `$context.protocol`. REST APIs report `HTTP/1.1` even to HTTP/2 clients
@@ -473,12 +502,29 @@ impl RequestContext {
         self.headers.get(name).and_then(|v| v.to_str().ok())
     }
 
+    /// A header's value as text, for passing on: unlike [`Self::header_str`]
+    /// it has a value for a header that is not ASCII, whose UTF-8 bytes reach
+    /// the backend as the client sent them.
+    pub(crate) fn header_text(&self, name: &str) -> Option<String> {
+        self.headers
+            .get(name)
+            .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
+    }
+
     pub(crate) fn source_ip(&self) -> Option<String> {
         self.identity.source_ip().ip().map(|ip| ip.to_string())
     }
 
     pub(crate) fn domain_name(&self) -> &str {
         self.header_str("host").unwrap_or_default()
+    }
+
+    /// The port the client connected to: the one its `Host` names, else 443.
+    pub(crate) fn port(&self) -> u16 {
+        self.domain_name()
+            .rsplit_once(':')
+            .and_then(|(_, port)| port.parse().ok())
+            .unwrap_or(443)
     }
 
     pub(crate) fn domain_prefix(&self) -> &str {
@@ -493,6 +539,28 @@ impl RequestContext {
     /// The `X-Amzn-Trace-Id` to propagate to integrations.
     pub(crate) fn trace_header(&self) -> Option<String> {
         self.header_str("x-amzn-trace-id").map(str::to_owned)
+    }
+
+    /// The `X-Amzn-Trace-Id` API Gateway writes into Lambda events and sends
+    /// to AWS services. With tracing on, the request was already stamped with
+    /// this gateway's segment. Without it, API Gateway still starts a trace:
+    /// `Root=` alone, or `Self=` before whatever the client sent.
+    pub(crate) fn started_trace_header(&self) -> Option<String> {
+        let sent = self.header_str("x-amzn-trace-id");
+        if self.trace.is_some() {
+            return sent.map(str::to_owned);
+        }
+        let started = self.started_trace?;
+        Some(match sent {
+            Some(sent) => format!("Self={started};{sent}"),
+            None => format!("Root={started}"),
+        })
+    }
+
+    /// The ID of the request's trace: the sampled trace's when tracing is on,
+    /// else the one started for this request.
+    pub(crate) fn started_trace_root(&self) -> Option<TraceId> {
+        self.trace.map(|trace| trace.id()).or(self.started_trace)
     }
 
     /// API Gateway's `$context` variables as a JSON object, using API Gateway's
@@ -515,6 +583,7 @@ impl RequestContext {
             "requestId": self.request_id.to_string(),
             "requestTime": self.request_time(),
             "requestTimeEpoch": self.received.as_millisecond(),
+            "resourceId": self.resource_id,
             "resourcePath": self.resource_path,
             "routeKey": self.route_key.as_str(),
             "stage": self.api.stage_name(),
@@ -580,14 +649,18 @@ pub(crate) mod tests {
                 api_id: "abc123".to_owned(),
                 stage: Some("prod".to_owned()),
                 release: None,
+                deployment_id: None,
             },
             route_key: RouteKey::from("POST /pets/{petId}"),
             resource_path: "/pets/{petId}".to_owned(),
+            started_trace: TraceId::generate(jiff::Timestamp::from_second(1_700_000_000).unwrap()),
+            resource_id: None,
             request_id: Uuid::now_v7(),
             received: jiff::Timestamp::from_second(1_700_000_000).unwrap(),
             method: Method::POST,
             path: "/pets/7".to_owned(),
             full_path: "/prod/pets/7".to_owned(),
+            sent_path: "/prod/pets/7".to_owned(),
             query: QueryString::new(Some("q=1&q=2")),
             headers,
             header_case: HeaderCase::default(),
@@ -741,6 +814,7 @@ pub(crate) mod tests {
             api_id: "a".to_owned(),
             stage: None,
             release: None,
+            deployment_id: None,
         };
         assert_eq!(info.stage_name(), "$default");
     }

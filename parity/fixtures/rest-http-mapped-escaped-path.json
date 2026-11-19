@@ -1,0 +1,30 @@
+{
+  "name": "rest-http-mapped-escaped-path",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-remapped-connection": "[masked]",
+      "x-amzn-remapped-content-length": "[masked]",
+      "x-amzn-remapped-date": "[masked]",
+      "x-amzn-remapped-x-amzn-requestid": "[masked]",
+      "x-amzn-requestid": "[masked]",
+      "x-amzn-trace-id": "[masked]"
+    }
+  },
+  "echo": {
+    "method": "GET",
+    "path": "/http-mapped/a%20b%2Fc",
+    "query": "fixed=literal&mappedQuery=x+y&q=x+y",
+    "headers": {
+      "accept": "*/*",
+      "user-agent": "apigw-parity",
+      "x-echo-secret": "[redacted]"
+    },
+    "resource": "$default"
+  }
+}

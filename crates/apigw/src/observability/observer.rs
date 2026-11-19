@@ -138,6 +138,7 @@ impl StageObserver {
             api_id: api_id.to_owned(),
             stage: stage.map(str::to_owned),
             release,
+            deployment_id: None,
         };
         let access_log = model.stage.access_log.as_ref().and_then(|settings| {
             let format = settings.format.as_deref().filter(|f| !f.is_empty())?;
@@ -556,6 +557,8 @@ mod tests {
             usage: None,
             observer: StageObserver::new(&observability, &model, "abc", Some("prod"), None),
             release: None,
+            deployment_id: None,
+            resource_ids: Arc::default(),
             payload: Arc::default(),
             cache: CacheScope::Off,
         });
@@ -755,6 +758,7 @@ mod tests {
                 api_id: "abc".to_owned(),
                 stage: Some("prod".to_owned()),
                 release: None,
+                deployment_id: None,
             },
             access_log: None,
             execution_queues: Vec::new(),

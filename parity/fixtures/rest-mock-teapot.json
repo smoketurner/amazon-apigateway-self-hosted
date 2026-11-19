@@ -1,11 +1,14 @@
 {
   "name": "rest-mock-teapot",
-  "source": "hand_written",
+  "source": "recorded",
   "api": "rest",
   "response": {
     "status": 418,
     "headers": {
-      "content-type": "application/json"
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-requestid": "[masked]"
     },
     "body": "{\"message\":\"teapot\"}"
   }

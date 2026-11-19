@@ -282,7 +282,7 @@ fn integer_overflow_is_an_error_not_a_wrapped_value() {
 #[test]
 fn json_paths_need_a_json_body() {
     assert!(matches!(
-        render_with("$input.path('$.a')", "not json", Limits::default()),
+        render_with("$input.path('$.a')", "{\"a\":", Limits::default()),
         Err(RenderError::InvalidBodyJson(_))
     ));
     assert!(matches!(
@@ -353,4 +353,41 @@ fn paren_before_a_closing_directive_is_text_not_a_method_call() {
         "false("
     );
     assert!(render("#foreach($i in [1])$foreach.hasNext( #end").is_err());
+}
+
+/// How a deployed REST API reads the body for `$input.json` and `$input.path`.
+#[test]
+fn bodies_are_read_the_way_api_gateway_reads_them() {
+    let json = |body: &str| render_with("$input.json('$')", body, Limits::default());
+    assert_eq!(
+        json(""),
+        Ok("{}".to_owned()),
+        "an empty body is an empty object"
+    );
+    assert_eq!(json("  "), Ok("{}".to_owned()));
+    assert_eq!(json("null"), Ok("{}".to_owned()));
+    assert_eq!(
+        json("{\"a\":null,\"b\":[null,1]}"),
+        Ok("{\"a\":null,\"b\":[null,1]}".to_owned()),
+        "nulls inside a body are kept"
+    );
+    for (body, rendered) in [
+        ("not json", "\"not json\""),
+        ("tru", "\"tru\""),
+        ("12abc", "\"12abc\""),
+        ("<xml/>", "\"<xml/>\""),
+        ("not json {", "\"not json {\""),
+        ("true", "true"),
+        ("5", "5"),
+        ("\"str\"", "\"str\""),
+        ("{\"a\":1} trailing", "{\"a\":1}"),
+    ] {
+        assert_eq!(json(body), Ok(rendered.to_owned()), "{body}");
+    }
+    for broken in ["{\"a\":", "[1,", "{bad}", "\"unterminated"] {
+        assert!(
+            matches!(json(broken), Err(RenderError::InvalidBodyJson(_))),
+            "{broken}"
+        );
+    }
 }

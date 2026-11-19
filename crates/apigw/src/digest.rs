@@ -32,6 +32,20 @@ impl Sha256Digest {
 }
 
 impl Sha256Digest {
+    /// The plain SHA-256 digest of `bytes`.
+    pub(crate) fn of(bytes: &[u8]) -> Self {
+        let mut digest = [0_u8; 32];
+        let finished = aws_lc_rs::digest::digest(&SHA256, bytes);
+        for (slot, byte) in digest.iter_mut().zip(finished.as_ref()) {
+            *slot = *byte;
+        }
+        Self(digest)
+    }
+
+    pub(crate) const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
     /// The digest written by [`Display`](fmt::Display), or `None` for any other
     /// text.
     pub(crate) fn from_hex(text: &str) -> Option<Self> {

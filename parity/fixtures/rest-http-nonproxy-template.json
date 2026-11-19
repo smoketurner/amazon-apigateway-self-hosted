@@ -1,11 +1,15 @@
 {
   "name": "rest-http-nonproxy-template",
-  "source": "hand_written",
+  "source": "recorded",
   "api": "rest",
   "response": {
     "status": 200,
     "headers": {
-      "content-type": "application/json"
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-requestid": "[masked]",
+      "x-amzn-trace-id": "[masked]"
     },
     "body": "{\"upstreamStatus\":\"ok\",\"path\":\"/http-nonproxy/42\",\"query\":\"\",\"received\":\"{\\\"id\\\":\\\"42\\\",\\\"q\\\":\\\"hello\\\",\\\"stage\\\":\\\"ref\\\"}\"}"
   }

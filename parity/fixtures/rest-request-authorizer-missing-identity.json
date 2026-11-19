@@ -1,11 +1,15 @@
 {
   "name": "rest-request-authorizer-missing-identity",
-  "source": "hand_written",
+  "source": "recorded",
   "api": "rest",
   "response": {
     "status": 401,
     "headers": {
-      "content-type": "application/json"
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-errortype": "UnauthorizedException",
+      "x-amzn-requestid": "[masked]"
     },
     "body": "{\"message\":\"Unauthorized\"}"
   }

@@ -1,0 +1,14 @@
+{
+  "name": "http-lambda-v2-event-post",
+  "source": "recorded",
+  "api": "http",
+  "response": {
+    "status": 200,
+    "headers": {
+      "apigw-requestid": "[masked]",
+      "content-type": "application/json",
+      "date": "[masked]"
+    },
+    "body": "{\"body\": \"{\\\"name\\\":\\\"widget\\\"}\", \"headers\": {\"accept\": \"*/*\", \"content-length\": \"17\", \"content-type\": \"application/json\", \"host\": \"a2jjc5tao1.execute-api.us-east-1.amazonaws.com\", \"user-agent\": \"apigw-parity\", \"x-amzn-trace-id\": \"Root=1-6aff19aa-538349f21ec551765a711033\", \"x-forwarded-for\": \"<ip-1>\", \"x-forwarded-port\": \"443\", \"x-forwarded-proto\": \"https\"}, \"isBase64Encoded\": false, \"pathParameters\": {\"proxy\": \"items\"}, \"rawPath\": \"/ref/lambda-v2/items\", \"rawQueryString\": \"\", \"requestContext\": {\"accountId\": \"[account-id]\", \"apiId\": \"a2jjc5tao1\", \"domainName\": \"a2jjc5tao1.execute-api.us-east-1.amazonaws.com\", \"domainPrefix\": \"a2jjc5tao1\", \"http\": {\"method\": \"POST\", \"path\": \"/ref/lambda-v2/items\", \"protocol\": \"HTTP/1.1\", \"sourceIp\": \"<ip-1>\", \"userAgent\": \"apigw-parity\"}, \"requestId\": \"HGDyxjUSoAMEaQA=\", \"routeKey\": \"ANY /lambda-v2/{proxy+}\", \"stage\": \"ref\", \"time\": \"19/Nov/2026:15:45:46 +0000\", \"timeEpoch\": 1795103146832}, \"routeKey\": \"ANY /lambda-v2/{proxy+}\", \"stageVariables\": {\"echo_host\": \"7alf2exwlga7kld2gkw4kieype0rbaxv.lambda-url.us-east-1.on.aws\", \"echo_secret\": \"[redacted]\"}, \"version\": \"2.0\"}"
+  }
+}

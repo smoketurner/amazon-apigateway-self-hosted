@@ -1,0 +1,11 @@
+{
+  "name": "rest-malformed-query-escape",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 400,
+    "headers": {
+      "date": "[masked]"
+    }
+  }
+}

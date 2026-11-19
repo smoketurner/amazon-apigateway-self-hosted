@@ -4,7 +4,8 @@ cases:
     api: rest
     path: /mock
     compare:
-      headers: [content-type, x-mock]
+      # x-amzn-trace-id is listed to assert it is absent: a MOCK starts no trace
+      headers: [content-type, x-mock, x-amzn-requestid, x-amz-apigw-id, x-amzn-trace-id]
 
   - name: rest-mock-teapot
     api: rest
@@ -187,3 +188,282 @@ cases:
     compare:
       body: ignore
       echo: {fields: [method, path, query, body], headers: [content-type]}
+
+  # Lambda proxy events, compared whole (per-request and per-deployment keys are masked)
+  - name: rest-lambda-proxy-event
+    api: rest
+    path: /lambda-proxy/a%20b/c%2Fd?x=1&x=2&sp=a%20b&e=
+    headers: {X-Custom: A, Cookie: "a=1; b=2"}
+    compare:
+      headers: [content-type, x-amzn-requestid, x-amz-apigw-id, x-amzn-trace-id]
+      body: json
+
+  - name: rest-lambda-proxy-event-post
+    api: rest
+    method: POST
+    path: /lambda-proxy/items
+    headers: {content-type: application/json}
+    body: '{"name":"widget"}'
+    compare:
+      body: json
+
+  - name: rest-lambda-proxy-event-single-parameter
+    api: rest
+    method: POST
+    path: /validated/a%20b%2Fc?page=1
+    headers: {content-type: application/json, x-required: "yes"}
+    body: '{"name":"widget"}'
+    compare:
+      body: json
+
+  # Slashes around the path do not take part in routing; one between segments does
+  - name: rest-trailing-slash
+    api: rest
+    path: /mock/
+    compare:
+      headers: [content-type]
+
+  - name: rest-leading-slashes
+    api: rest
+    path: //mock
+    compare:
+      headers: [content-type]
+
+  - name: rest-interior-double-slash
+    api: rest
+    path: /mock//teapot
+    compare:
+      headers: [content-type, x-amzn-errortype, x-amz-apigw-id, x-amzn-trace-id]
+
+  - name: rest-lambda-proxy-trailing-slash
+    api: rest
+    path: /lambda-proxy/x/
+    compare:
+      body: json
+
+  - name: rest-lambda-proxy-root-trailing-slash
+    api: rest
+    path: /lambda-proxy/
+    compare:
+      body: json
+
+  - name: rest-lambda-proxy-greedy-double-slash
+    api: rest
+    path: //lambda-proxy//x//
+    compare:
+      body: json
+
+  - name: rest-malformed-query-escape
+    api: rest
+    path: /lambda-proxy/x?d=%zz
+    compare:
+      headers: [content-type, x-amzn-errortype]
+
+  # Path parameters reach templates and backends as the client escaped them
+  - name: rest-http-proxy-escaped-path
+    api: rest
+    path: /http-proxy/a%20b%2Fc/d
+    compare:
+      headers:
+        - x-amzn-requestid
+        - x-amz-apigw-id
+        - x-amzn-trace-id
+        - x-amzn-remapped-x-amzn-requestid
+        - x-amzn-remapped-content-length
+        - x-amzn-remapped-date
+      body: ignore
+      echo: {fields: [path]}
+
+  - name: rest-http-mapped-escaped-path
+    api: rest
+    path: /http-mapped/a%20b%2Fc?q=x%20y
+    compare:
+      body: ignore
+      echo: {fields: [path, query]}
+
+  - name: rest-http-nonproxy-escaped-path
+    api: rest
+    path: /http-nonproxy/a%20b%2Fc?q=x%20y
+    compare:
+      headers: [x-amz-apigw-id, x-amzn-trace-id, x-amzn-remapped-content-length]
+      body: json
+
+  # The query string is written again for HTTP backends
+  - name: rest-http-proxy-query-escaping
+    api: rest
+    path: "/http-proxy/x?a=%7E~&b=%21!&c=%2A*&d=a%2Fb/c&e=%40@&f=%3A:&g=%C3%A9&h=a%26b&i=%3D&j=%25&l=(%29&m=a,b%2C&n=%5B%5D&o=x+y%20z&p=&q&r=%3F?&s=%24$"
+    compare:
+      body: ignore
+      echo: {fields: [query]}
+
+  # Gateway responses, byte for byte
+  - name: rest-unsupported-media-type-exact
+    api: rest
+    path: /http-nonproxy/42
+    headers: {content-type: text/plain}
+    compare:
+      headers: [content-type, x-amzn-errortype]
+
+  - name: rest-validated-params-missing-exact
+    api: rest
+    path: /validated-params
+    compare:
+      headers: [content-type, x-amzn-errortype, x-reference-gateway-response]
+
+  - name: rest-token-authorizer-deny
+    api: rest
+    path: /authz/token
+    headers: {Authorization: deny}
+    compare:
+      headers: [content-type, x-amzn-errortype]
+
+  - name: rest-request-authorizer-deny
+    api: rest
+    path: /authz/request
+    headers: {x-auth: deny}
+    compare:
+      headers: [content-type, x-amzn-errortype]
+
+  - name: rest-token-authorizer-allow
+    api: rest
+    path: /authz/token
+    headers: {Authorization: allow}
+    compare:
+      body: json
+
+  - name: rest-request-authorizer-allow
+    api: rest
+    path: /authz/request
+    headers: {x-auth: allow}
+    compare:
+      body: json
+
+  # How request templates read bodies that are empty, not JSON, or broken JSON
+  - name: rest-lambda-nonproxy-object
+    api: rest
+    method: POST
+    path: /lambda-nonproxy
+    headers: {content-type: application/json}
+    body: '{"a":1}'
+    compare:
+      headers: [content-type]
+
+  - name: rest-lambda-nonproxy-empty-body
+    api: rest
+    method: POST
+    path: /lambda-nonproxy
+    compare:
+      headers: [content-type]
+
+  - name: rest-lambda-nonproxy-trailing-text
+    api: rest
+    method: POST
+    path: /lambda-nonproxy
+    headers: {content-type: application/json}
+    body: '{"a":1} trailing'
+    compare:
+      headers: [content-type]
+
+  - name: rest-lambda-nonproxy-broken-json
+    api: rest
+    method: POST
+    path: /lambda-nonproxy
+    headers: {content-type: application/json}
+    body: '{"a":'
+    compare:
+      headers: [content-type, x-amzn-errortype]
+
+  # A proxy response's status must be 100 through 599; anything else is a 502
+  - name: rest-lambda-proxy-status-out-of-range
+    api: rest
+    path: /lambda-proxy/x?echo_status=999
+    compare:
+      headers: [content-type, x-amzn-errortype, x-reference-gateway-response]
+
+  - name: rest-lambda-proxy-status-599
+    api: rest
+    path: /lambda-proxy/x?echo_status=599
+    compare:
+      headers: [content-type]
+      body: ignore
+
+  # X-HTTP-Method-Override changes the method and is not passed on
+  - name: rest-method-override
+    api: rest
+    path: /lambda-proxy/x
+    headers: {X-HTTP-Method-Override: DELETE}
+    compare:
+      body: json
+
+  # TRACE is answered by the endpoint, in HTML, before the API sees it
+  - name: rest-trace
+    api: rest
+    method: TRACE
+    path: /mock
+    compare:
+      headers: [content-type, x-amzn-requestid, x-amz-apigw-id, x-amzn-errortype]
+
+  - name: rest-http-proxy-via
+    api: rest
+    path: /http-proxy/x
+    headers: {Via: 1.1 test}
+    compare:
+      body: ignore
+      echo: {headers: [via]}
+
+  # A function error is an INTEGRATION_FAILURE; a response nothing can be made
+  # from (above) is only a DEFAULT_5XX. Both are a 502 InternalServerErrorException
+  - name: rest-lambda-proxy-function-error
+    api: rest
+    path: /lambda-proxy/x?echo_status=abc
+    compare:
+      headers: [content-type, x-amzn-errortype, x-reference-gateway-response]
+
+  # An Authorization header no route claims is read as a failed signature
+  - name: rest-unknown-route-bearer-token
+    api: rest
+    path: /does-not-exist
+    headers: {Authorization: Bearer abc}
+    compare:
+      headers: [content-type, x-amzn-errortype]
+
+  - name: rest-unknown-route-partial-signature
+    api: rest
+    path: /does-not-exist
+    headers: {Authorization: X Credential=a}
+    compare:
+      headers: [content-type, x-amzn-errortype]
+
+  - name: rest-wrong-method-with-authorization
+    api: rest
+    method: POST
+    path: /authz/token
+    headers: {Authorization: allow}
+    compare:
+      headers: [content-type, x-amzn-errortype]
+
+  - name: rest-lambda-proxy-head
+    api: rest
+    method: HEAD
+    path: /lambda-proxy/x
+    compare:
+      headers: [content-type, x-amzn-remapped-content-length, x-amz-apigw-id]
+
+  - name: rest-lambda-nonproxy-null-body
+    api: rest
+    method: POST
+    path: /lambda-nonproxy
+    headers: {content-type: application/json}
+    body: "null"
+    compare:
+      headers: [content-type]
+
+  - name: rest-lambda-nonproxy-keeps-nulls
+    api: rest
+    method: POST
+    path: /lambda-nonproxy
+    headers: {content-type: application/json}
+    body: '{"a":null,"b":[null,1]}'
+    compare:
+      headers: [content-type]
+

@@ -1,0 +1,27 @@
+{
+  "name": "http-http-proxy-escaped-path",
+  "source": "recorded",
+  "api": "http",
+  "response": {
+    "status": 200,
+    "headers": {
+      "apigw-requestid": "[masked]",
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amzn-requestid": "[masked]",
+      "x-amzn-trace-id": "[masked]"
+    }
+  },
+  "echo": {
+    "method": "GET",
+    "path": "/http-proxy/a%20b/c/d",
+    "query": "q=x%20y%2B&z=1+2",
+    "headers": {
+      "accept": "*/*",
+      "forwarded": "by=<ip-1>;for=<ip-2>;host=a2jjc5tao1.execute-api.us-east-1.amazonaws.com;proto=https",
+      "user-agent": "apigw-parity",
+      "x-echo-secret": "[redacted]"
+    },
+    "resource": "$default"
+  }
+}

@@ -152,6 +152,114 @@ the case must lose its marker and the row changes status. See [parity/README.md]
 - Control-plane calls share a 10 requests per second per-account limit, so refreshes are
   conditional and jittered.
 
+## Measured against deployed APIs
+
+The reference stack ([terraform/README.md](../terraform/README.md)) deploys real REST and HTTP
+APIs, and the fixtures under `parity/` are recordings of what they answer. The behavior below is
+not in API Gateway's documentation, or differs from it; `apigw` follows what the deployed APIs
+do.
+
+**Gateway responses (REST)**
+
+- `$context.error.messageString` starts with a space for failures of a request that has started
+  executing (`{"message": "Internal server error"}`, and the same for `BAD_REQUEST_BODY`,
+  `BAD_REQUEST_PARAMETERS`, `UNSUPPORTED_MEDIA_TYPE`, `INTEGRATION_FAILURE`, `INTEGRATION_TIMEOUT`,
+  `API_CONFIGURATION_ERROR`), in customized templates too. Failures that turn a request away
+  earlier have none (`{"message":"Forbidden"}`).
+- An uncustomized `ACCESS_DENIED` uses the key `Message`, not `message`.
+- The `413` is the plain text `HTTP content length exceeded 10485760 bytes.` with
+  `content-type: text; charset=utf-8` and no `x-amzn-errortype`.
+- `x-amzn-errortype` is `TooManyRequestsException` for `THROTTLED` and `BadRequestException` for
+  `UNSUPPORTED_MEDIA_TYPE`.
+
+**Paths**
+
+- REST: slashes after the last segment and extra slashes before the first do not take part in
+  routing (`/pets/` and `//pets` are `/pets`); a doubled slash between segments does. Path
+  parameters are never percent-decoded, in Lambda events, `$input.params()`, and integration URLs.
+  A `%` that does not start an escape, in the path or query string, answers `400` with no body.
+- HTTP: the path is percent-decoded and runs of slashes are collapsed before routing, and
+  `rawPath`, `$context.path`, and path parameters use that form. A trailing slash is part of the
+  path (`/pets/` is not `/pets`). A greedy parameter under a prefix may be empty (`/files/`).
+
+**Query strings to HTTP backends (REST)** are written again rather than forwarded: a space becomes
+`+`, the characters RFC 3986 allows in a query stay bare, and the rest are escaped. API Gateway
+also leaves `'` bare; `apigw` sends `%27`.
+
+**Lambda events**
+
+- Every event carries `X-Forwarded-For`, `X-Forwarded-Port`, `X-Forwarded-Proto`, and
+  `X-Amzn-Trace-Id` (`Root=...`, or `Self=...;` before what the client sent), whatever the client
+  sent under those names.
+- Header names: REST payload 1.0 keeps the client's spelling except `Host`, `User-Agent`, and
+  `Authorization`; HTTP API payload 1.0 does the same and also spells `Cookie` and
+  `Content-Length` itself and lower-cases `accept`; payload 2.0 is lower case.
+- REST events leave out `Content-Length`; HTTP API events always carry it, `0` for no body.
+- REST `requestContext` has no `authorizer` key when no authorizer ran, carries
+  `authorizer.integrationLatency` when a Lambda authorizer did, and names the `deploymentId` and,
+  when the gateway may call `GetResources`, the `resourceId`.
+- HTTP API payload 1.0 has `version: "1.0"`, the route key as `resourceId`, `identity.cognitoAmr`,
+  and a `path` that is the path as sent, stage and escapes included.
+
+**Response headers (REST)**
+
+- Every response carries `x-amz-apigw-id`, not only the ones API Gateway generates.
+- A response from any integration but `MOCK` carries `X-Amzn-Trace-Id`; an `HTTP_PROXY` backend's
+  own value passes through.
+- An `HTTP_PROXY` backend's `x-amzn-RequestId` becomes `x-amzn-Remapped-x-amzn-RequestId`, and its
+  `Content-Length` is repeated as `x-amzn-Remapped-Content-Length`. Neither is in the documented
+  header table.
+
+**Other**
+
+- A Lambda proxy response's `statusCode` must be 100 through 599. Anything else, like a function
+  error, is a `502` whose `x-amzn-errortype` is `InternalServerErrorException`.
+  `$context.error.responseType` tells the two apart: a function error is an `INTEGRATION_FAILURE`,
+  a response nothing can be made from is only a `DEFAULT_5XX`.
+- A request no route claims that has an `Authorization` header is read as a failed attempt at
+  Signature Version 4: `403` `IncompleteSignatureException`, with a message naming what the header
+  lacks and its SHA-256 digest. Signature parameters in the query string are read the same way. A
+  complete signature is judged by its date next (`Date must be in ISO-8601 'basic format'`,
+  `Signature expired`, `Signature not yet current`) and then by its credentials.
+- A response to `HEAD` from an integration repeats its length as `x-amzn-Remapped-Content-Length`.
+- An `HTTP_PROXY` backend receives the client's own `x-amzn-apigateway-api-id` when it sent one.
+- In a request template a body of `null` reads as `{}`; nulls inside a body are kept.
+- A header value that is not ASCII reaches an HTTP backend byte for byte, also through a
+  parameter mapping. In a REST Lambda event it is not decoded: each byte above 127 appears as the
+  character U+FF00 plus the byte.
+- `X-HTTP-Method-Override` is consumed: neither a Lambda event nor an HTTP backend sees it.
+- `TRACE` never reaches a REST API. The endpoint answers `405` with a small HTML page and, like the
+  `400` for a malformed escape, no `x-amzn-RequestId` or `x-amz-apigw-id`.
+- An `HTTP_PROXY` backend receives the client's `Via` (the documented header table says it is
+  dropped) and `Content-Length: 0` for a body-less request of any method but `GET` and `HEAD`.
+
+- A response API Gateway generates for a `HEAD` request has `content-length: 0`.
+- AWS service integrations receive the request's `X-Amzn-Trace-Id`, which Step Functions reports
+  back as `traceHeader`.
+
+**Request templates** read the body leniently: an empty body is `{}`, what follows the first JSON
+value is ignored, and a body that is not JSON is a string. A body that opens an object, array, or
+string and does not hold one answers `400` `{"message": "Could not process payload"}`.
+
+Known differences that remain:
+
+- `apigw` resolves `.` and `..` segments in the URL it sends to an HTTP backend; API Gateway
+  sends them as they are.
+- API Gateway answers `403` to a request whose `Host` is not the API's. `apigw` does the same
+  for hosts outside `--allowed-host`, but serves any host when the flag is not given: it has no
+  name of its own to compare with.
+- A complete signature whose date is current is always an `UnrecognizedClientException`: a
+  gateway outside AWS cannot look the credentials up.
+
+- Response header names are lower case. API Gateway writes them in mixed case over HTTP/1.1
+  (`Content-Type`, `x-amzn-RequestId`); over HTTP/2 both are lower case.
+
+- `X-Forwarded-For` holds the address `apigw` established for the client. API Gateway appends
+  that address to whatever the client sent; `apigw` only keeps a client's value from a trusted
+  proxy ([deployment.md](deployment.md#client-ip)).
+- `X-Forwarded-Port` is the port in the `Host` header, `443` when it names none. API Gateway
+  always says `443`.
+
 ## Request validation
 
 Differences from API Gateway's validators:

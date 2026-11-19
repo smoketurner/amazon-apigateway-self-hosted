@@ -1,0 +1,16 @@
+{
+  "name": "rest-request-authorizer-allow",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-requestid": "[masked]",
+      "x-amzn-trace-id": "[masked]"
+    },
+    "body": "{\"body\": null, \"headers\": {\"Host\": \"lto2s7vgul.execute-api.us-east-1.amazonaws.com\", \"User-Agent\": \"apigw-parity\", \"X-Amzn-Trace-Id\": \"Root=1-6aff19b9-36e59fd74b0f474e6025cfcf\", \"X-Forwarded-For\": \"<ip-1>\", \"X-Forwarded-Port\": \"443\", \"X-Forwarded-Proto\": \"https\", \"accept\": \"*/*\", \"x-auth\": \"allow\"}, \"httpMethod\": \"GET\", \"isBase64Encoded\": false, \"multiValueHeaders\": {\"Host\": [\"lto2s7vgul.execute-api.us-east-1.amazonaws.com\"], \"User-Agent\": [\"apigw-parity\"], \"X-Amzn-Trace-Id\": [\"Root=1-6aff19b9-36e59fd74b0f474e6025cfcf\"], \"X-Forwarded-For\": [\"<ip-1>\"], \"X-Forwarded-Port\": [\"443\"], \"X-Forwarded-Proto\": [\"https\"], \"accept\": [\"*/*\"], \"x-auth\": [\"allow\"]}, \"multiValueQueryStringParameters\": null, \"path\": \"/authz/request\", \"pathParameters\": null, \"queryStringParameters\": null, \"requestContext\": {\"accountId\": \"[account-id]\", \"apiId\": \"lto2s7vgul\", \"authorizer\": {\"credential\": \"allow\", \"integrationLatency\": 84, \"principal\": \"parity-user\", \"principalId\": \"parity-user\"}, \"deploymentId\": \"8ckp7l\", \"domainName\": \"lto2s7vgul.execute-api.us-east-1.amazonaws.com\", \"domainPrefix\": \"lto2s7vgul\", \"extendedRequestId\": \"HGD1AEUSoAMEX7g=\", \"httpMethod\": \"GET\", \"identity\": {\"accessKey\": null, \"accountId\": null, \"caller\": null, \"cognitoAuthenticationProvider\": null, \"cognitoAuthenticationType\": null, \"cognitoIdentityId\": null, \"cognitoIdentityPoolId\": null, \"principalOrgId\": null, \"sourceIp\": \"<ip-1>\", \"user\": null, \"userAgent\": \"apigw-parity\", \"userArn\": null}, \"path\": \"/ref/authz/request\", \"protocol\": \"HTTP/1.1\", \"requestId\": \"6386ebc3-f518-48c6-bc71-55d2eef0ed2b\", \"requestTime\": \"19/Nov/2026:15:46:01 +0000\", \"requestTimeEpoch\": 1795103161150, \"resourceId\": \"qnw41u\", \"resourcePath\": \"/authz/request\", \"stage\": \"ref\"}, \"resource\": \"/authz/request\", \"stageVariables\": {\"echo_host\": \"7alf2exwlga7kld2gkw4kieype0rbaxv.lambda-url.us-east-1.on.aws\", \"echo_secret\": \"[redacted]\"}}"
+  }
+}

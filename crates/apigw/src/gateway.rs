@@ -1,6 +1,9 @@
 //! Gateway-wide state and policy: what every route of one API shares, how
 //! unevaluated protections are enforced, and API Gateway's error responses.
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use std::num::NonZeroU32;
@@ -16,6 +19,7 @@ use crate::cache::CacheScope;
 use crate::canary::Release;
 use crate::cors::Cors;
 use crate::gateway_response::{Failure, GatewayResponses};
+use crate::incomplete_signature::UnclaimedSignature;
 use crate::integration::StageVariables;
 use crate::limits::LimitExceeded;
 use crate::model::{ApiKind, Protection, ResponseType};
@@ -163,6 +167,10 @@ pub(crate) struct ApiContext {
     /// Which release of a canary stage this context serves; `None` when the
     /// stage has no canary.
     pub(crate) release: Option<Release>,
+    /// The deployment this release serves, when API Gateway named one.
+    pub(crate) deployment_id: Option<String>,
+    /// The ID of each REST resource by its path, when they could be read.
+    pub(crate) resource_ids: Arc<BTreeMap<String, String>>,
     /// Binary media types and compression settings.
     pub(crate) payload: Arc<PayloadSettings>,
     /// Whether this release caches responses, and where.
@@ -180,13 +188,23 @@ impl ApiContext {
     pub(crate) fn reject(&self, request: Request, error: GatewayError) -> Response {
         let (parts, _) = request.into_parts();
         let context = RequestContext::new(self, None, parts, Vec::new());
+        // A REST API reads an `Authorization` header no route claims as a
+        // failed attempt at Signature Version 4.
+        let failure = match (self.kind, error) {
+            (ApiKind::Rest, GatewayError::NoRoute) => {
+                UnclaimedSignature::of(&context.headers, &context.query)
+                    .map(|unclaimed| unclaimed.failure(&context.headers, context.received))
+            }
+            _ => None,
+        }
+        .unwrap_or_else(|| error.failure(self.kind));
         let Some(ref cors) = self.cors else {
-            return self.respond(&context, &error.failure(self.kind));
+            return self.respond(&context, &failure);
         };
         if Cors::is_preflight(&context) {
             return cors.preflight(&context);
         }
-        let mut response = self.respond(&context, &error.failure(self.kind));
+        let mut response = self.respond(&context, &failure);
         cors.decorate(&context, &mut response);
         response
     }
@@ -209,6 +227,11 @@ pub(crate) enum GatewayError {
     /// The integration is configured in a way that cannot be executed, such as
     /// an invalid endpoint address.
     ApiConfiguration,
+    /// A request template read the body as JSON and the body is broken JSON.
+    UnprocessablePayload,
+    /// The integration answered, but not in a form a response can be made
+    /// from, such as a Lambda proxy response without a usable `statusCode`.
+    MalformedIntegrationResponse,
     RequestTooLarge,
     /// An integration this gateway can't execute yet.
     UnsupportedIntegration,
@@ -242,11 +265,29 @@ impl GatewayError {
             }
             (Self::NoRoute, ApiKind::Http) => Failure::gateway(StatusCode::NOT_FOUND, "Not Found"),
             (Self::InvalidRequest, _) => Failure::new(ResponseType::Default4xx),
-            (Self::IntegrationFailure, _) | (Self::IntegrationUnreachable, ApiKind::Http) => {
+            // Both are a 502 `InternalServerErrorException` on a deployed REST
+            // API, but `$context.error.responseType` tells them apart: a
+            // function error is an `INTEGRATION_FAILURE`, an answer no
+            // response can be made from is only a `DEFAULT_5XX`.
+            (Self::IntegrationFailure, ApiKind::Rest) => {
                 Failure::new(ResponseType::IntegrationFailure)
                     .with_status(StatusCode::BAD_GATEWAY)
                     .with_message("Internal server error")
+                    .with_error_type("InternalServerErrorException")
             }
+            (Self::MalformedIntegrationResponse, ApiKind::Rest) => {
+                Failure::new(ResponseType::Default5xx)
+                    .with_status(StatusCode::BAD_GATEWAY)
+                    .with_error_type("InternalServerErrorException")
+            }
+            (
+                Self::IntegrationFailure
+                | Self::IntegrationUnreachable
+                | Self::MalformedIntegrationResponse,
+                ApiKind::Http,
+            ) => Failure::new(ResponseType::IntegrationFailure)
+                .with_status(StatusCode::BAD_GATEWAY)
+                .with_message("Internal server error"),
             (Self::IntegrationUnreachable, ApiKind::Rest) => {
                 Failure::new(ResponseType::IntegrationFailure)
             }
@@ -257,6 +298,9 @@ impl GatewayError {
                 Failure::new(ResponseType::IntegrationTimeout).with_message("Service Unavailable")
             }
             (Self::ApiConfiguration, _) => Failure::new(ResponseType::ApiConfigurationError),
+            (Self::UnprocessablePayload, _) => Failure::new(ResponseType::Default4xx)
+                .with_message("Could not process payload")
+                .while_executing(),
             (Self::RequestTooLarge, ApiKind::Rest) => Failure::new(ResponseType::RequestTooLarge),
             (Self::RequestTooLarge, ApiKind::Http) => {
                 Failure::new(ResponseType::RequestTooLarge).with_message("Request Entity Too Large")
@@ -296,6 +340,9 @@ impl ApiKind {
             return;
         };
         *request.method_mut() = method;
+        // The override is consumed: neither a Lambda event nor an HTTP
+        // backend sees the header.
+        request.headers_mut().remove("x-http-method-override");
     }
 
     /// The header carrying the request ID on every response.
@@ -304,6 +351,15 @@ impl ApiKind {
             Self::Rest => HeaderName::from_static("x-amzn-requestid"),
             Self::Http => HeaderName::from_static("apigw-requestid"),
         }
+    }
+}
+
+impl RequestId {
+    /// `$context.extendedRequestId` and the `x-amz-apigw-id` header. API
+    /// Gateway's is an opaque base64 token; this one is derived from the random
+    /// half of the request ID so the header and the context variable agree.
+    pub(crate) fn extended(self) -> String {
+        BASE64.encode(self.0.as_bytes().get(8..).unwrap_or_default())
     }
 }
 
@@ -355,6 +411,10 @@ mod tests {
         let mut rest = request(Method::POST, "PUT");
         ApiKind::Rest.override_method(&mut rest);
         assert_eq!(rest.method(), Method::PUT);
+        assert!(
+            !rest.headers().contains_key("x-http-method-override"),
+            "the override is consumed"
+        );
         let mut http = request(Method::POST, "PUT");
         ApiKind::Http.override_method(&mut http);
         assert_eq!(http.method(), Method::POST);

@@ -45,7 +45,10 @@ impl Requester {
     }
 
     fn with_builder(builder: reqwest::ClientBuilder) -> Result<Self> {
+        // HTTP/1.1 against both sides: a recording and its replay must reach
+        // the gateway the same way, and header-name case only exists there.
         let client = builder
+            .http1_only()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(REQUEST_TIMEOUT)
             .user_agent(USER_AGENT)

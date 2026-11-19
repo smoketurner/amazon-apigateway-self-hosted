@@ -1,11 +1,14 @@
 {
   "name": "policy-open-route",
-  "source": "hand_written",
+  "source": "recorded",
   "api": "rest_policy",
   "response": {
     "status": 200,
     "headers": {
-      "content-type": "application/json"
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-requestid": "[masked]"
     },
     "body": "{\"route\":\"open\"}"
   }

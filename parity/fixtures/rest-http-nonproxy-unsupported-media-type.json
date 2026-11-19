@@ -1,12 +1,16 @@
 {
   "name": "rest-http-nonproxy-unsupported-media-type",
-  "source": "hand_written",
+  "source": "recorded",
   "api": "rest",
   "response": {
     "status": 415,
     "headers": {
-      "content-type": "application/json"
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-errortype": "BadRequestException",
+      "x-amzn-requestid": "[masked]"
     },
-    "body": "{\"message\":\"Unsupported Media Type\"}"
+    "body": "{\"message\": \"Unsupported Media Type\"}"
   }
 }

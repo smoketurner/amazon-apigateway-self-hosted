@@ -12,8 +12,9 @@ pub(crate) mod context;
 
 use std::time::Instant;
 
-use axum::body::{Body, Bytes};
+use axum::body::{Body, Bytes, HttpBody};
 use axum::extract::{FromRequestParts as _, RawPathParams, Request};
+use axum::http::{HeaderName, HeaderValue, Method, header};
 use axum::response::Response;
 
 pub(crate) use context::{ApiKeyIdentity, RequestContext};
@@ -25,9 +26,12 @@ use crate::digest::Sha256Digest;
 use crate::gateway::{ApiContext, AuthorizationMode, GatewayError, MAX_BODY_BYTES};
 use crate::gateway_response::Failure;
 use crate::integration::Integration;
-use crate::model::{ApiKeySource, ApiKind, Protection, ResponseTransferMode, ResponseType};
+use crate::model::{
+    ApiKeySource, ApiKind, Protection, ResponseTransferMode, ResponseType, RoutePath,
+};
 use crate::observability::IntegrationTiming;
 use crate::payload::PayloadSettings;
+use crate::rest_path::RestPath;
 use crate::route::Route;
 use crate::state::Admission;
 use crate::usage::{KeyValue, RouteApiKey, UsageOutcome};
@@ -58,8 +62,14 @@ impl<'a> Pipeline<'a> {
 
     pub(crate) async fn run(self, request: Request) -> Response {
         let (mut parts, body) = request.into_parts();
-        let path_params = match self.path_params {
-            Some(ref params) => Ok(params.clone()),
+        let rest = match self.route.path {
+            RoutePath::Resource(ref template) if self.api.kind == ApiKind::Rest => {
+                RestPath::new(parts.uri.path()).parameters(template)
+            }
+            RoutePath::Resource(_) | RoutePath::Default => None,
+        };
+        let path_params = match self.path_params.as_ref().or(rest.as_ref()) {
+            Some(params) => Ok(params.clone()),
             None => RawPathParams::from_request_parts(&mut parts, &())
                 .await
                 .map(|params| {
@@ -134,6 +144,10 @@ impl<'a> Pipeline<'a> {
             Err(error) => self.fail(ctx, &error.failure(self.api.kind)),
         };
         response.extensions_mut().insert(timing);
+        if succeeded {
+            self.add_trace_header(ctx, &mut response);
+            self.add_head_length(ctx, &mut response);
+        }
         let response = match plan {
             Some(plan) if succeeded => match plan.store(&self.api.state, response).await {
                 Ok(response) => response,
@@ -155,6 +169,50 @@ impl<'a> Pipeline<'a> {
             self.encode(ctx, response).await
         } else {
             response
+        }
+    }
+
+    /// A REST API answers with the request's `X-Amzn-Trace-Id` whenever an
+    /// integration ran on something other than itself (measured against a
+    /// deployed API: every integration type but `MOCK`). A backend's own
+    /// value, which an `HTTP_PROXY` integration passes through, stays.
+    fn add_trace_header(&self, ctx: &RequestContext, response: &mut Response) {
+        const TRACE_HEADER: HeaderName = HeaderName::from_static("x-amzn-trace-id");
+        if self.api.kind != ApiKind::Rest
+            || self.route.integration.kind() == "MOCK"
+            || response.headers().contains_key(TRACE_HEADER)
+        {
+            return;
+        }
+        if let Some(trace) = ctx.started_trace_root()
+            && let Ok(value) = HeaderValue::try_from(format!("Root={trace}"))
+        {
+            response.headers_mut().insert(TRACE_HEADER, value);
+        }
+    }
+
+    /// A REST API repeats the length of an integration's response to a `HEAD`
+    /// request as `x-amzn-Remapped-Content-Length` (measured against a
+    /// deployed API with a Lambda proxy integration).
+    fn add_head_length(&self, ctx: &RequestContext, response: &mut Response) {
+        const REMAPPED_LENGTH: HeaderName =
+            HeaderName::from_static("x-amzn-remapped-content-length");
+        if self.api.kind != ApiKind::Rest
+            || ctx.method != Method::HEAD
+            || response.headers().contains_key(REMAPPED_LENGTH)
+        {
+            return;
+        }
+        let length = response
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .cloned()
+            .or_else(|| {
+                let exact = HttpBody::size_hint(response.body()).exact()?;
+                HeaderValue::try_from(exact.to_string()).ok()
+            });
+        if let Some(length) = length {
+            response.headers_mut().insert(REMAPPED_LENGTH, length);
         }
     }
 

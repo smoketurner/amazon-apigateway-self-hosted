@@ -1,0 +1,30 @@
+{
+  "name": "rest-http-proxy-query-escaping",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-remapped-connection": "[masked]",
+      "x-amzn-remapped-content-length": "[masked]",
+      "x-amzn-remapped-date": "[masked]",
+      "x-amzn-remapped-x-amzn-requestid": "[masked]",
+      "x-amzn-requestid": "[masked]",
+      "x-amzn-trace-id": "[masked]"
+    }
+  },
+  "echo": {
+    "method": "GET",
+    "path": "/http-proxy/x",
+    "query": "a=~~&b=!!&c=**&d=a/b/c&e=@@&f=::&g=%C3%A9&h=a%26b&i=%3D&j=%25&l=()&m=a,b,&n=%5B%5D&o=x+y+z&p=&q=&r=??&s=$$",
+    "headers": {
+      "accept": "*/*",
+      "user-agent": "apigw-parity",
+      "x-echo-secret": "[redacted]"
+    },
+    "resource": "$default"
+  }
+}

@@ -1,6 +1,7 @@
 //! Downloads an API definition from API Gateway (or reads it from disk) and keeps
 //! a last-known-good copy so the gateway can start while AWS is unreachable.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,8 @@ use crate::model::{ApiKind, DeploymentStamp, StageSettings};
 /// validators, resource policy, gateway responses, ...); `authorizers` adds the
 /// authorizer definitions.
 const REST_EXPORT_EXTENSIONS: &str = "apigateway,authorizers";
+/// The most resources `GetResources` returns in one page.
+const RESOURCE_PAGE_SIZE: i32 = 500;
 
 #[derive(Debug, Clone)]
 pub(crate) enum Source {
@@ -47,6 +50,10 @@ pub(crate) struct Snapshot {
     #[serde(default)]
     pub(crate) stage_settings: StageSettings,
     pub(crate) openapi: Value,
+    /// The ID of each REST resource by its path, for `$context.resourceId`.
+    /// Empty when the IDs could not be read; an export does not carry them.
+    #[serde(default)]
+    pub(crate) resource_ids: BTreeMap<String, String>,
     /// The canary deployment's export, when `--canary-export-stage` supplies one.
     #[serde(default)]
     pub(crate) canary: Option<CanarySnapshot>,
@@ -166,6 +173,7 @@ impl Fetcher {
                 stamp: DeploymentStamp::default(),
                 stage_settings: StageSettings::default(),
                 openapi: Export::read(path).await?,
+                resource_ids: BTreeMap::new(),
                 canary: None,
             }))),
         }
@@ -239,8 +247,43 @@ impl Fetcher {
             stamp,
             stage_settings,
             openapi: self.rest_export(api_id, stage).await?,
+            resource_ids: self.rest_resource_ids(api_id).await,
             canary,
         })))
+    }
+
+    /// The API's resource IDs by path. They only fill in
+    /// `$context.resourceId`, so a gateway that may not read them serves
+    /// without them.
+    async fn rest_resource_ids(&self, api_id: &str) -> BTreeMap<String, String> {
+        let mut ids = BTreeMap::new();
+        let mut position = None;
+        loop {
+            let page = self
+                .rest
+                .get_resources()
+                .rest_api_id(api_id)
+                .limit(RESOURCE_PAGE_SIZE)
+                .set_position(position)
+                .send()
+                .await;
+            let page = match page {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::warn!(api_id, error = %SourceError::aws(error), "resource IDs could not be read; $context.resourceId will be empty");
+                    return BTreeMap::new();
+                }
+            };
+            for resource in page.items() {
+                if let (Some(path), Some(id)) = (resource.path(), resource.id()) {
+                    ids.insert(path.to_owned(), id.to_owned());
+                }
+            }
+            position = page.position().map(str::to_owned);
+            if position.is_none() {
+                return ids;
+            }
+        }
     }
 
     /// Exports the stage's deployed configuration; without a stage, `ExportApi`
@@ -282,6 +325,7 @@ impl Fetcher {
             stamp,
             stage_settings: StageSettings::from(&stage_info),
             openapi: Export::parse(body.as_ref())?.0,
+            resource_ids: BTreeMap::new(),
             canary: None,
         })))
     }
@@ -357,6 +401,7 @@ mod tests {
                 ..StageSettings::default()
             },
             openapi: json!({"paths": {}}),
+            resource_ids: BTreeMap::new(),
             canary: None,
         }
     }

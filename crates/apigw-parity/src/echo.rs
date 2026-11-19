@@ -23,6 +23,9 @@ const REDACTED: &str = "[redacted]";
 const MAX_ECHO_BODY: usize = 10 * 1024 * 1024;
 /// Where the echo accepts Lambda Invoke requests; `apigw --lambda-endpoint` points here.
 pub(crate) const LAMBDA_INVOKE_PATH: &str = "/__lambda/invocations";
+/// Where replay points the reference stack's authorizer function.
+pub(crate) const AUTHORIZER_INVOKE_PATH: &str = "/__lambda/authorizer";
+const FUNCTION_ERROR_HEADER: &str = "x-amz-function-error";
 
 /// A Lambda event the echo returns: payload format 2.0 (HTTP API and Lambda
 /// function URLs) or payload format 1.0 (REST API, and HTTP API with payload 1.0).
@@ -216,6 +219,7 @@ impl EchoServer {
         })?;
         let app = Router::new()
             .route(LAMBDA_INVOKE_PATH, post(lambda_invoke))
+            .route(AUTHORIZER_INVOKE_PATH, post(authorizer_invoke))
             .fallback(respond);
         let task = tokio::spawn(async move {
             if let Err(err) = axum::serve(listener, app).await {
@@ -292,13 +296,137 @@ async fn lambda_invoke(body: Bytes) -> Response {
         *response.status_mut() = StatusCode::BAD_REQUEST;
         return response;
     };
-    let payload = Steering::from_event(&event).lambda_payload(&String::from_utf8_lossy(&body));
+    if !is_proxy_event(&event) {
+        // The reference function returns any other event as it is, and fails
+        // when the event's body asks it to.
+        let fail = event
+            .pointer("/body/fail")
+            .is_some_and(|fail| !matches!(fail, Value::Null | Value::Bool(false)));
+        // `(event.get("body") or {}).get("fail")` raises on a truthy body
+        // that is not an object.
+        let not_an_object = event.get("body").filter(|body| match body {
+            Value::Null | Value::Object(_) => false,
+            Value::Bool(truthy) => *truthy,
+            Value::Number(number) => number.as_f64() != Some(0.0),
+            Value::String(text) => !text.is_empty(),
+            Value::Array(items) => !items.is_empty(),
+        });
+        return match (fail, not_an_object) {
+            (true, _) => function_error("Error: forced failure"),
+            (false, Some(body)) => function_error(&format!(
+                "'{}' object has no attribute 'get'",
+                python_type(body)
+            )),
+            (false, None) => payload_response(&event),
+        };
+    }
+    let steer = Steering::from_event(&event);
+    if let Some(ref text) = steer.unparsed_status {
+        return function_error(&format!("invalid literal for int() with base 10: '{text}'"));
+    }
+    let payload = steer.lambda_payload(&String::from_utf8_lossy(&body));
+    payload_response(&payload)
+}
+
+/// What the reference echo function treats as an API Gateway or function URL event.
+fn is_proxy_event(event: &Value) -> bool {
+    event.get("requestContext").is_some()
+        && (event.get("httpMethod").is_some()
+            || event.get("version").and_then(Value::as_str) == Some("2.0"))
+}
+
+fn python_type(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        Value::Number(number) if number.is_f64() => "float",
+        Value::Number(_) => "int",
+        Value::String(_) => "str",
+        Value::Array(_) => "list",
+        Value::Object(_) => "dict",
+    }
+}
+
+fn payload_response(payload: &Value) -> Response {
     let mut response = Response::new(Body::from(payload.to_string()));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
     response
+}
+
+/// An unhandled exception, as Lambda's Invoke API reports one.
+fn function_error(message: &str) -> Response {
+    let mut response = payload_response(&json!({
+        "errorMessage": message,
+        "errorType": "Exception",
+        "requestId": "00000000-0000-0000-0000-000000000000",
+        "stackTrace": [],
+    }));
+    response
+        .headers_mut()
+        .insert(FUNCTION_ERROR_HEADER, HeaderValue::from_static("Unhandled"));
+    response
+}
+
+/// The reference stack's authorizer function: the credential `allow`
+/// authorizes, `deny` denies, and anything else raises.
+async fn authorizer_invoke(body: Bytes) -> Response {
+    let Ok(event) = serde_json::from_slice::<Value>(&body) else {
+        let mut response = Response::new(Body::from("the event is not JSON"));
+        *response.status_mut() = StatusCode::BAD_REQUEST;
+        return response;
+    };
+    let credential = if event.get("type").and_then(Value::as_str) == Some("TOKEN") {
+        event.get("authorizationToken").and_then(Value::as_str)
+    } else {
+        event
+            .get("headers")
+            .and_then(Value::as_object)
+            .and_then(|headers| {
+                headers
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case("x-auth"))
+            })
+            .and_then(|(_, value)| value.as_str())
+    };
+    let claims = json!({
+        "principal": "parity-user",
+        "credential": credential.unwrap_or("None"),
+    });
+    if event.get("version").and_then(Value::as_str) == Some("2.0") {
+        return payload_response(&json!({
+            "isAuthorized": credential == Some("allow"),
+            "context": claims,
+        }));
+    }
+    let effect = match credential {
+        Some("allow") => "Allow",
+        Some("deny") => "Deny",
+        Some(_) | None => return function_error("Unauthorized"),
+    };
+    let method_arn = event
+        .get("methodArn")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let mut parts = method_arn.split('/');
+    let (api_arn, stage) = (
+        parts.next().unwrap_or_default(),
+        parts.next().unwrap_or_default(),
+    );
+    payload_response(&json!({
+        "principalId": "parity-user",
+        "policyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Action": "execute-api:Invoke",
+                "Effect": effect,
+                "Resource": format!("{api_arn}/{stage}/*/*"),
+            }],
+        },
+        "context": claims,
+    }))
 }
 
 fn body_field(bytes: &Bytes) -> Option<String> {
@@ -315,6 +443,16 @@ fn json_response(status: StatusCode, event: &EchoEvent) -> Response {
     let body = serde_json::to_vec(event).unwrap_or_default();
     let mut response = Response::new(Body::from(body));
     *response.status_mut() = status;
+    // A function URL names its own request and trace, which a gateway in
+    // front of it has to deal with.
+    response.headers_mut().insert(
+        "x-amzn-requestid",
+        HeaderValue::from_static("00000000-0000-0000-0000-000000000000"),
+    );
+    response.headers_mut().insert(
+        "x-amzn-trace-id",
+        HeaderValue::from_static("Root=1-00000000-000000000000000000000000"),
+    );
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
@@ -329,6 +467,9 @@ struct Steering {
     status: StatusCode,
     binary: bool,
     content_type: String,
+    /// An `echo_status` that is not an integer, which the reference function
+    /// fails on (`int()` raises).
+    unparsed_status: Option<String>,
 }
 
 impl Steering {
@@ -337,6 +478,7 @@ impl Steering {
             status: StatusCode::OK,
             binary: false,
             content_type: "image/png".to_owned(),
+            unparsed_status: None,
         }
     }
 
@@ -372,6 +514,8 @@ impl Steering {
                     .and_then(|code| StatusCode::from_u16(code).ok())
                 {
                     self.status = status;
+                } else if value.parse::<i64>().is_err() {
+                    self.unparsed_status = Some(value.to_owned());
                 }
             }
             "echo_binary" => self.binary = value == "1",
@@ -557,7 +701,7 @@ mod tests {
     #[tokio::test]
     async fn lambda_endpoint_answers_with_a_proxy_response_carrying_the_event() {
         let server = EchoServer::start().await.unwrap();
-        let event = r#"{"httpMethod":"GET","path":"/p","queryStringParameters":{"echo_status":"418"},"headers":{"a":"b"}}"#;
+        let event = r#"{"httpMethod":"GET","path":"/p","requestContext":{},"queryStringParameters":{"echo_status":"418"},"headers":{"a":"b"}}"#;
         let (status, payload) = invoke(&server, event).await;
         assert_eq!(status, 200);
         assert_eq!(payload["statusCode"], 418);
@@ -566,8 +710,7 @@ mod tests {
         let echoed = EchoEvent::parse(payload["body"].as_str().unwrap().as_bytes()).unwrap();
         assert_eq!(echoed.received().path, "/p");
 
-        let binary =
-            r#"{"queryStringParameters":{"echo_binary":"1","echo_content_type":"image/gif"}}"#;
+        let binary = r#"{"httpMethod":"GET","requestContext":{},"queryStringParameters":{"echo_binary":"1","echo_content_type":"image/gif"}}"#;
         let (_, payload) = invoke(&server, binary).await;
         assert_eq!(payload["statusCode"], 200);
         assert_eq!(payload["isBase64Encoded"], true);
@@ -575,6 +718,67 @@ mod tests {
 
         let (status, _) = invoke(&server, "not json").await;
         assert_eq!(status, 400);
+    }
+
+    /// What the reference function does with an event that is not a proxy event.
+    #[tokio::test]
+    async fn other_events_are_returned_or_fail_as_the_reference_function_does() {
+        let server = EchoServer::start().await.unwrap();
+        let event = r#"{"body":{"a":1},"method":"POST"}"#;
+        let (_, payload) = invoke(&server, event).await;
+        assert_eq!(payload, json!({"body": {"a": 1}, "method": "POST"}));
+
+        let (_, payload) = invoke(&server, r#"{"body":{"fail":true}}"#).await;
+        assert_eq!(payload["errorMessage"], "Error: forced failure");
+
+        let (_, payload) = invoke(&server, r#"{"body":"text"}"#).await;
+        assert_eq!(
+            payload["errorMessage"],
+            "'str' object has no attribute 'get'"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_authorizer_endpoint_follows_the_reference_authorizer() {
+        let server = EchoServer::start().await.unwrap();
+        let call = |event: Value| {
+            let url = format!("http://{}{AUTHORIZER_INVOKE_PATH}", server.authority());
+            async move {
+                let response = reqwest::Client::new()
+                    .post(url)
+                    .body(event.to_string())
+                    .send()
+                    .await
+                    .unwrap();
+                let failed = response.headers().contains_key(FUNCTION_ERROR_HEADER);
+                let payload: Value =
+                    serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+                (failed, payload)
+            }
+        };
+        let arn = "arn:aws:execute-api:us-east-1:1:abc/ref/GET/x";
+        let token = |credential: &str| json!({"type": "TOKEN", "authorizationToken": credential, "methodArn": arn});
+        let (failed, allow) = call(token("allow")).await;
+        assert!(!failed);
+        let statement = &allow["policyDocument"]["Statement"][0];
+        assert_eq!(statement["Effect"], "Allow");
+        assert_eq!(
+            statement["Resource"],
+            "arn:aws:execute-api:us-east-1:1:abc/ref/*/*"
+        );
+        assert_eq!(allow["context"]["credential"], "allow");
+        let (_, deny) = call(token("deny")).await;
+        assert_eq!(deny["policyDocument"]["Statement"][0]["Effect"], "Deny");
+        let (failed, error) = call(token("other")).await;
+        assert!(failed);
+        assert_eq!(error["errorMessage"], "Unauthorized");
+        let request = json!({"type": "REQUEST", "headers": {"X-Auth": "allow"}, "methodArn": arn});
+        assert_eq!(
+            call(request).await.1["policyDocument"]["Statement"][0]["Effect"],
+            "Allow"
+        );
+        let v2 = json!({"version": "2.0", "headers": {"x-auth": "deny"}});
+        assert_eq!(call(v2).await.1["isAuthorized"], false);
     }
 
     #[test]

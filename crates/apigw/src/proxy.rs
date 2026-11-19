@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use axum::body::{Body, Bytes};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, header};
 use axum::response::Response;
 
 use crate::gateway::{GatewayError, HeaderNameExt as _, MAX_BODY_BYTES};
@@ -145,6 +145,15 @@ impl HttpProxy {
         };
         let method = self.method.clone().unwrap_or_else(|| ctx.method.clone());
         self.request_mapping.apply(ctx, &mut headers, &mut url);
+        // A REST API tells the backend a body-less request has no body, for
+        // every method but GET and HEAD.
+        if ctx.api.kind == ApiKind::Rest
+            && body.is_empty()
+            && method != Method::GET
+            && method != Method::HEAD
+        {
+            headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
+        }
         ctx.integration.transfer_mode = Some(self.transfer);
         let (client, url) = self.client_for(client, route, url, &mut headers).await?;
         let started = Instant::now();
@@ -278,8 +287,12 @@ impl HttpProxy {
     /// and `X-Forwarded-Port` are what Regional endpoints send to HTTP backends;
     /// the port is the one in the `Host` header, `443` when it names none.
     fn add_rest_headers(headers: &mut HeaderMap, ctx: &RequestContext) {
-        if let Ok(id) = HeaderValue::try_from(ctx.api.api_id.as_str()) {
-            headers.insert(HeaderName::from_static("x-amzn-apigateway-api-id"), id);
+        // Only when the client sent none: a deployed API passes the client's.
+        const API_ID: HeaderName = HeaderName::from_static("x-amzn-apigateway-api-id");
+        if !headers.contains_key(API_ID)
+            && let Ok(id) = HeaderValue::try_from(ctx.api.api_id.as_str())
+        {
+            headers.insert(API_ID, id);
         }
         if !headers.contains_key(header::USER_AGENT)
             && let Ok(agent) = HeaderValue::try_from(format!("AmazonAPIGateway_{}", ctx.api.api_id))
@@ -290,12 +303,7 @@ impl HttpProxy {
             HeaderName::from_static("x-forwarded-proto"),
             HeaderValue::from_static("https"),
         );
-        let port = ctx
-            .domain_name()
-            .rsplit_once(':')
-            .and_then(|(_, port)| port.parse::<u16>().ok())
-            .unwrap_or(443);
-        if let Ok(port) = HeaderValue::try_from(port.to_string()) {
+        if let Ok(port) = HeaderValue::try_from(ctx.port().to_string()) {
             headers.insert(HeaderName::from_static("x-forwarded-port"), port);
         }
     }
@@ -357,12 +365,23 @@ impl HttpProxy {
         };
         let mut url = reqwest::Url::parse(&url).map_err(|e| e.to_string())?;
         let mut query = QueryBuilder(url.query().map_or_default(str::to_owned));
-        if handling == QueryHandling::Forward
-            && let Some(raw) = ctx.query.raw()
-        {
-            query.append(raw);
+        let rest = ctx.api.kind == ApiKind::Rest;
+        if handling == QueryHandling::Forward {
+            if rest {
+                // A REST API does not forward the query string as sent: it
+                // writes each parameter again in its own escaping.
+                for (name, value) in ctx.query.pairs() {
+                    query.append(&UrlEncoder::rest_query_pair(&name, &value));
+                }
+            } else if let Some(raw) = ctx.query.raw() {
+                query.append(raw);
+            }
         }
         for (name, value) in self.parameters.query_pairs(ctx, overrides) {
+            if rest {
+                query.append(&UrlEncoder::rest_query_pair(&name, &value));
+                continue;
+            }
             let mut pair = String::new();
             UrlEncoder(&mut pair).component(&name);
             pair.push('=');
@@ -418,7 +437,7 @@ impl ParamSource {
                 let values = self.values(ctx);
                 (!values.is_empty()).then(|| values.join(","))
             }
-            Self::Header(ref name) => ctx.header_str(name).map(str::to_owned),
+            Self::Header(ref name) => ctx.header_text(name),
             Self::Body => Some(ctx.body_text().into_owned()).filter(|body| !body.is_empty()),
             Self::BodyPath(ref expression) => ctx.body_json_path(expression),
             Self::Context(ref path) => ctx.context_value(path),
@@ -442,8 +461,7 @@ impl ParamSource {
                 .headers
                 .get_all(name.as_str())
                 .iter()
-                .filter_map(|value| value.to_str().ok())
-                .map(str::to_owned)
+                .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
                 .collect(),
             Self::Path(_)
             | Self::Query(_)
@@ -512,6 +530,30 @@ impl UrlEncoder<'_> {
     pub(crate) fn component(&mut self, value: &str) {
         for byte in value.bytes() {
             self.byte(byte);
+        }
+    }
+
+    /// `name=value` as a REST API writes a query parameter to an HTTP
+    /// backend (measured against a deployed API): a space is `+`, the
+    /// characters RFC 3986 allows in a query stay bare except the three that
+    /// would change its meaning (`&`, `=`, `+`), and the rest are escaped.
+    pub(crate) fn rest_query_pair(name: &str, value: &str) -> String {
+        let mut pair =
+            String::with_capacity(name.len().saturating_add(value.len()).saturating_add(1));
+        UrlEncoder(&mut pair).rest_query_component(name);
+        pair.push('=');
+        UrlEncoder(&mut pair).rest_query_component(value);
+        pair
+    }
+
+    fn rest_query_component(&mut self, value: &str) {
+        for byte in value.bytes() {
+            match byte {
+                b' ' => self.0.push('+'),
+                b'!' | b'$' | b'\'' | b'(' | b')' | b'*' | b',' | b';' | b':' | b'@' | b'/'
+                | b'?' => self.0.push(char::from(byte)),
+                _ => self.byte(byte),
+            }
         }
     }
 
@@ -620,19 +662,69 @@ mod tests {
         let url = target
             .proxy_url(
                 &route("/{proxy+}", &target).path,
-                &incoming(&[("proxy", "a b/c")], Some("x=1")),
+                &incoming(&[("proxy", "a%20b/c%2Fd")], Some("x=1")),
             )
             .unwrap();
-        assert_eq!(url.as_str(), "http://up/a%20b/c?fixed=1&x=1");
+        assert_eq!(
+            url.as_str(),
+            "http://up/a%20b/c%2Fd?fixed=1&x=1",
+            "a REST path parameter reaches the backend as the client escaped it"
+        );
 
         let target = proxy("http://up/items/{id}");
         let url = target
             .proxy_url(
                 &route("/items/{id}", &target).path,
-                &incoming(&[("id", "a/b")], None),
+                &incoming(&[("id", "a%2Fb")], None),
             )
             .unwrap();
         assert_eq!(url.as_str(), "http://up/items/a%2Fb");
+
+        // An HTTP API's parameters are decoded, so they are escaped again here.
+        let mut decoded = incoming(&[("id", "a/b c")], None);
+        decoded.api.kind = ApiKind::Http;
+        let url = target
+            .proxy_url(&route("/items/{id}", &target).path, &decoded)
+            .unwrap();
+        assert_eq!(url.as_str(), "http://up/items/a%2Fb%20c");
+    }
+
+    /// Measured against a deployed REST API with an `HTTP_PROXY` integration.
+    #[test]
+    fn rest_query_strings_are_written_again_in_api_gateways_escaping() {
+        let target = proxy("http://up/x");
+        let sent = "a=%7E~&b=%21!&c=%2A*&d=a%2Fb/c&e=%40@&f=%3A:&g=%C3%A9&h=a%26b&i=%3D&j=%25\
+            &k=%27&l=(%29&m=a,b%2C&n=%5B%5D&o=x+y%20z&p=&q&r=%3F?&s=%24$&t=%3B";
+        let ctx = incoming(&[], Some(sent));
+        let url = target.proxy_url(&route("/x", &target).path, &ctx).unwrap();
+        assert_eq!(
+            url.query().unwrap(),
+            "a=~~&b=!!&c=**&d=a/b/c&e=@@&f=::&g=%C3%A9&h=a%26b&i=%3D&j=%25&k=%27&l=()&m=a,b,\
+            &n=%5B%5D&o=x+y+z&p=&q=&r=??&s=$$&t=;",
+            "API Gateway also leaves `'` bare; the URL type this gateway sends with escapes it"
+        );
+
+        let mut http_api = incoming(&[], Some("o=x+y%20z&q"));
+        http_api.api.kind = ApiKind::Http;
+        let url = target
+            .proxy_url(&route("/x", &target).path, &http_api)
+            .unwrap();
+        assert_eq!(
+            url.query().unwrap(),
+            "o=x+y%20z&q",
+            "HTTP APIs forward it as sent"
+        );
+    }
+
+    #[test]
+    fn a_mapped_header_that_is_not_ascii_keeps_its_value() {
+        let mut ctx = incoming(&[], None);
+        ctx.headers.insert(
+            "x-from-client",
+            HeaderValue::from_bytes("café".as_bytes()).unwrap(),
+        );
+        let source = ParamSource::Header("x-from-client".to_owned());
+        assert_eq!(source.resolve(&ctx).as_deref(), Some("café"));
     }
 
     #[test]
@@ -662,7 +754,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             url.as_str(),
-            "http://up/v2/7?search=a&search=b%20c&q=b%20c&tenant=acme"
+            "http://up/v2/7?search=a&search=b+c&q=b+c&tenant=acme"
         );
     }
 
@@ -766,7 +858,7 @@ mod tests {
         let url = target
             .url_for(&path, &ctx, QueryHandling::MappedOnly, &overrides)
             .unwrap();
-        assert_eq!(url.as_str(), "http://up/over/x?n=1&q=a%20b");
+        assert_eq!(url.as_str(), "http://up/over/x?n=1&q=a+b");
         let url = target
             .url_for(
                 &path,
@@ -931,6 +1023,15 @@ mod tests {
             );
         }
         assert_eq!(headers["x-amzn-apigateway-api-id"], "abc123");
+        let mut named = incoming(&[], None);
+        named
+            .headers
+            .insert("x-amzn-apigateway-api-id", HeaderValue::from_static("mine"));
+        let sent = HttpProxy::request_headers(&route("/x", &target), &named);
+        assert_eq!(
+            sent["x-amzn-apigateway-api-id"], "mine",
+            "a deployed API passes the client's own value"
+        );
         assert_eq!(headers["user-agent"], "curl/8");
         assert_eq!(headers["x-forwarded-proto"], "https");
         assert_eq!(headers["x-forwarded-port"], "8443");

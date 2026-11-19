@@ -1,0 +1,17 @@
+{
+  "name": "rest-validated-params-missing-exact",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-errortype": "BadRequestException",
+      "x-amzn-requestid": "[masked]",
+      "x-reference-gateway-response": "bad-request-parameters"
+    },
+    "body": "{\"message\": \"Missing required request parameters: [page]\",\"type\":\"BAD_REQUEST_PARAMETERS\"}"
+  }
+}

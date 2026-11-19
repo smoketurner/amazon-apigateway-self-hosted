@@ -1,0 +1,16 @@
+{
+  "name": "rest-lambda-proxy-event",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-requestid": "[masked]",
+      "x-amzn-trace-id": "[masked]"
+    },
+    "body": "{\"body\": null, \"headers\": {\"Host\": \"lto2s7vgul.execute-api.us-east-1.amazonaws.com\", \"User-Agent\": \"apigw-parity\", \"X-Amzn-Trace-Id\": \"Root=1-6aff19b3-7fe0c31a5d049fe17f954991\", \"X-Forwarded-For\": \"<ip-1>\", \"X-Forwarded-Port\": \"443\", \"X-Forwarded-Proto\": \"https\", \"accept\": \"*/*\", \"cookie\": \"a=1; b=2\", \"x-custom\": \"A\"}, \"httpMethod\": \"GET\", \"isBase64Encoded\": false, \"multiValueHeaders\": {\"Host\": [\"lto2s7vgul.execute-api.us-east-1.amazonaws.com\"], \"User-Agent\": [\"apigw-parity\"], \"X-Amzn-Trace-Id\": [\"Root=1-6aff19b3-7fe0c31a5d049fe17f954991\"], \"X-Forwarded-For\": [\"<ip-1>\"], \"X-Forwarded-Port\": [\"443\"], \"X-Forwarded-Proto\": [\"https\"], \"accept\": [\"*/*\"], \"cookie\": [\"a=1; b=2\"], \"x-custom\": [\"A\"]}, \"multiValueQueryStringParameters\": {\"e\": [\"\"], \"sp\": [\"a b\"], \"x\": [\"1\", \"2\"]}, \"path\": \"/lambda-proxy/a%20b/c%2Fd\", \"pathParameters\": {\"proxy\": \"a%20b/c%2Fd\"}, \"queryStringParameters\": {\"e\": \"\", \"sp\": \"a b\", \"x\": \"2\"}, \"requestContext\": {\"accountId\": \"[account-id]\", \"apiId\": \"lto2s7vgul\", \"deploymentId\": \"8ckp7l\", \"domainName\": \"lto2s7vgul.execute-api.us-east-1.amazonaws.com\", \"domainPrefix\": \"lto2s7vgul\", \"extendedRequestId\": \"HGD0DEahoAMEJZA=\", \"httpMethod\": \"GET\", \"identity\": {\"accessKey\": null, \"accountId\": null, \"caller\": null, \"cognitoAuthenticationProvider\": null, \"cognitoAuthenticationType\": null, \"cognitoIdentityId\": null, \"cognitoIdentityPoolId\": null, \"principalOrgId\": null, \"sourceIp\": \"<ip-1>\", \"user\": null, \"userAgent\": \"apigw-parity\", \"userArn\": null}, \"path\": \"/ref/lambda-proxy/a%20b/c%2Fd\", \"protocol\": \"HTTP/1.1\", \"requestId\": \"485cc99f-9420-4210-bad7-43ca50995d67\", \"requestTime\": \"19/Nov/2026:15:45:55 +0000\", \"requestTimeEpoch\": 1795103155097, \"resourceId\": \"t7o32o\", \"resourcePath\": \"/lambda-proxy/{proxy+}\", \"stage\": \"ref\"}, \"resource\": \"/lambda-proxy/{proxy+}\", \"stageVariables\": {\"echo_host\": \"7alf2exwlga7kld2gkw4kieype0rbaxv.lambda-url.us-east-1.on.aws\", \"echo_secret\": \"[redacted]\"}}"
+  }
+}

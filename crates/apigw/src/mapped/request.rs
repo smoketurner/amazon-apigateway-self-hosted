@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use apigw_vtl::RenderError;
 use axum::body::Bytes;
 use axum::http::{HeaderValue, header};
 
@@ -100,7 +101,10 @@ impl RequestSide {
         let input = GatewayInput::new(String::from_utf8_lossy(&body).into_owned(), ctx);
         let rendered = render(parsed, &input, ctx).map_err(|err| {
             tracing::warn!(%err, content_type, "request template failed");
-            GatewayError::ApiConfiguration
+            match err {
+                RenderError::InvalidBodyJson(_) => GatewayError::UnprocessablePayload,
+                _ => GatewayError::ApiConfiguration,
+            }
         })?;
         Ok(BackendRequest {
             overrides: rendered.request_overrides(),

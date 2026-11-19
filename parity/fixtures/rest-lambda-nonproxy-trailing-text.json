@@ -1,0 +1,16 @@
+{
+  "name": "rest-lambda-nonproxy-trailing-text",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-requestid": "[masked]",
+      "x-amzn-trace-id": "[masked]"
+    },
+    "body": "{\"body\":{\"a\":1},\"method\":\"POST\",\"stage\":\"ref\"}"
+  }
+}

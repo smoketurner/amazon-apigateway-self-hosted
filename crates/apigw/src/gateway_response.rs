@@ -10,7 +10,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use axum::body::Body;
-use axum::http::{HeaderName, HeaderValue, StatusCode, header};
+use axum::http::{HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::Response;
 use serde_json::json;
 
@@ -25,6 +25,12 @@ const HEADER_PARAMETER_PREFIX: &str = "gatewayresponse.header.";
 const JSON: &str = "application/json";
 /// What API Gateway uses when a response has no template of its own.
 const DEFAULT_TEMPLATE: &str = r#"{"message":$context.error.messageString}"#;
+/// The body of an uncustomized `ACCESS_DENIED`: IAM's capitalized key, not the
+/// default template's.
+const ACCESS_DENIED_TEMPLATE: &str = r#"{"Message":$context.error.messageString}"#;
+/// The 413 is plain text, not JSON, and no API can customize it.
+const REQUEST_TOO_LARGE_BODY: &str = "HTTP content length exceeded 10485760 bytes.";
+const REQUEST_TOO_LARGE_CONTENT_TYPE: &str = "text; charset=utf-8";
 
 impl ResponseType {
     /// The status API Gateway answers with unless the API customizes it. The
@@ -91,9 +97,12 @@ impl ResponseType {
             Self::ApiConfigurationError => "ApiConfigurationException",
             Self::AuthorizerConfigurationError => "AuthorizerConfigurationException",
             Self::AuthorizerFailure => "AuthorizerFailureException",
-            Self::BadRequestBody | Self::BadRequestParameters | Self::Default4xx => {
-                "BadRequestException"
-            }
+            // `UnsupportedMediaType` too: a deployed API does not say
+            // `UnsupportedMediaTypeException`.
+            Self::BadRequestBody
+            | Self::BadRequestParameters
+            | Self::Default4xx
+            | Self::UnsupportedMediaType => "BadRequestException",
             Self::Default5xx => "InternalFailureException",
             Self::ExpiredToken => "ExpiredTokenException",
             Self::IntegrationFailure => "IntegrationFailureException",
@@ -104,9 +113,8 @@ impl ResponseType {
             Self::QuotaExceeded => "LimitExceededException",
             Self::RequestTooLarge => "RequestTooLargeException",
             Self::ResourceNotFound => "NotFoundException",
-            Self::Throttled => "ThrottlingException",
+            Self::Throttled => "TooManyRequestsException",
             Self::Unauthorized => "UnauthorizedException",
-            Self::UnsupportedMediaType => "UnsupportedMediaTypeException",
             Self::WafFiltered => "WafFilteredException",
         }
     }
@@ -141,6 +149,65 @@ impl ResponseType {
     pub(crate) const fn customizable(self) -> bool {
         !matches!(self, Self::RequestTooLarge)
     }
+
+    /// The template API Gateway renders when the API customizes neither this
+    /// type nor its fallback.
+    const fn default_template(self) -> &'static str {
+        match self {
+            Self::AccessDenied => ACCESS_DENIED_TEMPLATE,
+            Self::ApiConfigurationError
+            | Self::AuthorizerConfigurationError
+            | Self::AuthorizerFailure
+            | Self::BadRequestBody
+            | Self::BadRequestParameters
+            | Self::Default4xx
+            | Self::Default5xx
+            | Self::ExpiredToken
+            | Self::IntegrationFailure
+            | Self::IntegrationTimeout
+            | Self::InvalidApiKey
+            | Self::InvalidSignature
+            | Self::MissingAuthenticationToken
+            | Self::QuotaExceeded
+            | Self::RequestTooLarge
+            | Self::ResourceNotFound
+            | Self::Throttled
+            | Self::Unauthorized
+            | Self::UnsupportedMediaType
+            | Self::WafFiltered => DEFAULT_TEMPLATE,
+        }
+    }
+
+    /// Whether `$context.error.messageString` starts with a space. API Gateway
+    /// writes one for the failures of a request it has started executing
+    /// (`{"message": "Internal server error"}`) and none for the ones that
+    /// turn a request away before that (`{"message":"Forbidden"}`), in
+    /// customized templates as well as the default one.
+    const fn message_string_is_spaced(self) -> bool {
+        match self {
+            Self::ApiConfigurationError
+            | Self::BadRequestBody
+            | Self::BadRequestParameters
+            | Self::Default5xx
+            | Self::IntegrationFailure
+            | Self::IntegrationTimeout
+            | Self::UnsupportedMediaType => true,
+            Self::AccessDenied
+            | Self::AuthorizerConfigurationError
+            | Self::AuthorizerFailure
+            | Self::Default4xx
+            | Self::ExpiredToken
+            | Self::InvalidApiKey
+            | Self::InvalidSignature
+            | Self::MissingAuthenticationToken
+            | Self::QuotaExceeded
+            | Self::RequestTooLarge
+            | Self::ResourceNotFound
+            | Self::Throttled
+            | Self::Unauthorized
+            | Self::WafFiltered => false,
+        }
+    }
 }
 
 /// Which kind of response a [`Failure`] is.
@@ -163,6 +230,10 @@ pub(crate) struct Failure {
     message: Cow<'static, str>,
     /// What a request body violated, for `$context.error.validationErrorString`.
     validation: Option<String>,
+    /// Whether `$context.error.messageString` starts with a space.
+    spaced: bool,
+    /// The `x-amzn-ErrorType` value, when it is not the response type's own.
+    error_type: Option<&'static str>,
 }
 
 impl Failure {
@@ -188,6 +259,8 @@ impl Failure {
             status: response_type.default_status(),
             message: Cow::Borrowed(response_type.default_message()),
             validation: None,
+            spaced: response_type.message_string_is_spaced(),
+            error_type: None,
         }
     }
 
@@ -198,6 +271,8 @@ impl Failure {
             status,
             message: Cow::Borrowed(message),
             validation: None,
+            spaced: false,
+            error_type: None,
         }
     }
 
@@ -210,6 +285,23 @@ impl Failure {
     #[must_use]
     pub(crate) fn with_message(mut self, message: impl Into<Cow<'static, str>>) -> Self {
         self.message = message.into();
+        self
+    }
+
+    /// Names the failure differently in `x-amzn-ErrorType` than its response
+    /// type does: a `502` for an unusable integration answer is an
+    /// `InternalServerErrorException` on a deployed API.
+    #[must_use]
+    pub(crate) const fn with_error_type(mut self, error_type: &'static str) -> Self {
+        self.error_type = Some(error_type);
+        self
+    }
+
+    /// Marks a failure of a request API Gateway had started executing, whose
+    /// message string starts with a space whatever its response type.
+    #[must_use]
+    pub(crate) const fn while_executing(mut self) -> Self {
+        self.spaced = true;
         self
     }
 
@@ -431,6 +523,9 @@ impl GatewayResponses {
         if request.api.kind == ApiKind::Http {
             return Self::plain(failure.status, &failure.message);
         }
+        if failure.response_type() == Some(ResponseType::RequestTooLarge) {
+            return Self::request_too_large(request);
+        }
         let (own, fallback) = self.lookup(failure.response_type());
         let governing = own.or(fallback);
         let status = own
@@ -438,12 +533,22 @@ impl GatewayResponses {
             .or_else(|| fallback.and_then(|c| c.status))
             .unwrap_or(failure.status);
 
+        let quoted = json!(failure.message).to_string();
+        let message_string = if failure.spaced {
+            format!(" {quoted}")
+        } else {
+            quoted
+        };
+        let default_template = failure
+            .response_type()
+            .map_or(DEFAULT_TEMPLATE, ResponseType::default_template);
+
         let mut context = ContextVariables::new(request.variables());
         context.set(
             "error",
             json!({
                 "message": failure.message,
-                "messageString": json!(failure.message).to_string(),
+                "messageString": message_string,
                 "responseType": failure.response_type().map(ResponseType::as_str),
                 "validationErrorString": failure.validation,
             }),
@@ -453,17 +558,27 @@ impl GatewayResponses {
         let chosen = governing.and_then(|c| c.template_for(accept));
         let (content_type, body) = match chosen {
             Some((content_type, template)) => (content_type, template.render(&scope)),
-            None => (JSON, Template(DEFAULT_TEMPLATE.to_owned()).render(&scope)),
+            None => (JSON, Template(default_template.to_owned()).render(&scope)),
         };
 
-        let mut response = Response::new(Body::from(body));
+        // A HEAD request gets the response's headers with a length of zero,
+        // not the length of the body a GET would have had.
+        let head = request.method == Method::HEAD;
+        let mut response = Response::new(if head {
+            Body::empty()
+        } else {
+            Body::from(body)
+        });
         *response.status_mut() = status;
         let headers = response.headers_mut();
+        if head {
+            headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
+        }
         if let Some(response_type) = failure.response_type() {
-            headers.insert(
-                ERROR_TYPE_HEADER,
-                HeaderValue::from_static(response_type.error_type()),
-            );
+            let error_type = failure
+                .error_type
+                .unwrap_or_else(|| response_type.error_type());
+            headers.insert(ERROR_TYPE_HEADER, HeaderValue::from_static(error_type));
         }
         if let Ok(id) = HeaderValue::try_from(request.extended_request_id()) {
             headers.insert(EXTENDED_REQUEST_ID_HEADER, id);
@@ -484,6 +599,21 @@ impl GatewayResponses {
                 }
             }
         }
+        response
+    }
+
+    /// The REST 413: plain text, with no error type header.
+    fn request_too_large(request: &RequestContext) -> Response {
+        let mut response = Response::new(Body::from(REQUEST_TOO_LARGE_BODY));
+        *response.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
+        let headers = response.headers_mut();
+        if let Ok(id) = HeaderValue::try_from(request.extended_request_id()) {
+            headers.insert(EXTENDED_REQUEST_ID_HEADER, id);
+        }
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static(REQUEST_TOO_LARGE_CONTENT_TYPE),
+        );
         response
     }
 
@@ -554,10 +684,8 @@ mod tests {
         ] {
             let response = GatewayResponses::default().render(&error.failure(kind), &request(kind));
             assert_eq!(response.status().as_u16(), status);
-            assert_eq!(
-                body(response).await,
-                json!({ "message": message }).to_string()
-            );
+            let body: Value = serde_json::from_str(&body(response).await).unwrap();
+            assert_eq!(body, json!({ "message": message }));
         }
     }
 
@@ -621,12 +749,6 @@ mod tests {
             ),
             (
                 GatewayError::RequestTooLarge,
-                ApiKind::Rest,
-                413,
-                "HTTP content length exceeded 10485760 bytes",
-            ),
-            (
-                GatewayError::RequestTooLarge,
                 ApiKind::Http,
                 413,
                 "Request Entity Too Large",
@@ -648,12 +770,142 @@ mod tests {
             let response = GatewayResponses::default().render(&error.failure(kind), &request(kind));
             assert_eq!(response.status().as_u16(), status, "{error:?} {kind:?}");
             assert_eq!(response.headers()["content-type"], "application/json");
-            assert_eq!(
-                body(response).await,
-                json!({ "message": message }).to_string(),
-                "{error:?} {kind:?}"
-            );
+            let body: Value = serde_json::from_str(&body(response).await).unwrap();
+            assert_eq!(body, json!({ "message": message }), "{error:?} {kind:?}");
         }
+    }
+
+    /// Bodies measured against a deployed REST API. The failures of a request
+    /// API Gateway has started executing put a space after the colon; the ones
+    /// that turn a request away before that do not.
+    #[tokio::test]
+    async fn rest_bodies_match_api_gateway_byte_for_byte() {
+        let cases = [
+            (
+                ResponseType::MissingAuthenticationToken,
+                r#"{"message":"Missing Authentication Token"}"#,
+            ),
+            (ResponseType::InvalidApiKey, r#"{"message":"Forbidden"}"#),
+            (ResponseType::Unauthorized, r#"{"message":"Unauthorized"}"#),
+            (
+                ResponseType::UnsupportedMediaType,
+                r#"{"message": "Unsupported Media Type"}"#,
+            ),
+            (
+                ResponseType::BadRequestParameters,
+                r#"{"message": "Missing required request parameters"}"#,
+            ),
+            (
+                ResponseType::BadRequestBody,
+                r#"{"message": "Invalid request body"}"#,
+            ),
+            (
+                ResponseType::Default5xx,
+                r#"{"message": "Internal server error"}"#,
+            ),
+            (
+                ResponseType::IntegrationTimeout,
+                r#"{"message": "Endpoint request timed out"}"#,
+            ),
+            (
+                ResponseType::AccessDenied,
+                r#"{"Message":"User is not authorized to access this resource with an explicit deny"}"#,
+            ),
+        ];
+        let ctx = request(ApiKind::Rest);
+        for (response_type, expected) in cases {
+            let response = GatewayResponses::default().render(&Failure::new(response_type), &ctx);
+            assert_eq!(body(response).await, expected, "{response_type}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_customized_template_keeps_the_message_strings_space() {
+        let specs: BTreeMap<String, GatewayResponseSpec> = serde_json::from_value(json!({
+            "DEFAULT_5XX": {"responseTemplates": {"application/json":
+                "{\"message\":$context.error.messageString,\"type\":\"$context.error.responseType\"}"}},
+            "ACCESS_DENIED": {"responseTemplates": {"application/json":
+                "{\"denied\":$context.error.messageString}"}},
+        }))
+        .unwrap();
+        let responses = GatewayResponses::compile(ApiKind::Rest, &specs);
+        let ctx = request(ApiKind::Rest);
+        let failed = responses.render(&Failure::new(ResponseType::ApiConfigurationError), &ctx);
+        assert_eq!(
+            body(failed).await,
+            r#"{"message": "Internal server error","type":"API_CONFIGURATION_ERROR"}"#
+        );
+        let denied = responses.render(&Failure::new(ResponseType::AccessDenied), &ctx);
+        assert_eq!(
+            body(denied).await,
+            r#"{"denied":"User is not authorized to access this resource with an explicit deny"}"#,
+            "a customized ACCESS_DENIED uses its template, not the capitalized key"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_rest_413_is_plain_text_without_an_error_type() {
+        let ctx = request(ApiKind::Rest);
+        let response =
+            GatewayResponses::default().render(&Failure::new(ResponseType::RequestTooLarge), &ctx);
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(response.headers()["content-type"], "text; charset=utf-8");
+        assert!(response.headers().get("x-amzn-errortype").is_none());
+        assert!(response.headers().contains_key("x-amz-apigw-id"));
+        assert_eq!(
+            body(response).await,
+            "HTTP content length exceeded 10485760 bytes."
+        );
+    }
+
+    /// Measured against a deployed REST API.
+    #[tokio::test]
+    async fn a_head_request_gets_the_headers_and_a_zero_length() {
+        let mut ctx = request(ApiKind::Rest);
+        ctx.method = Method::HEAD;
+        let response =
+            GatewayResponses::default().render(&GatewayError::NoRoute.failure(ApiKind::Rest), &ctx);
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.headers()["content-length"], "0");
+        assert_eq!(response.headers()["content-type"], "application/json");
+        assert_eq!(
+            response.headers()["x-amzn-errortype"],
+            "MissingAuthenticationTokenException"
+        );
+        assert_eq!(body(response).await, "");
+    }
+
+    /// Measured against a deployed REST API: a function error or a malformed
+    /// proxy response is a `502` named `InternalServerErrorException`.
+    #[test]
+    fn an_unusable_integration_answer_is_an_internal_server_error() {
+        let ctx = request(ApiKind::Rest);
+        let response = GatewayResponses::default().render(
+            &GatewayError::IntegrationFailure.failure(ApiKind::Rest),
+            &ctx,
+        );
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            response.headers()["x-amzn-errortype"],
+            "InternalServerErrorException"
+        );
+        // `$context.error.responseType` tells the two apart.
+        let function_error = GatewayError::IntegrationFailure.failure(ApiKind::Rest);
+        assert_eq!(
+            function_error.response_type(),
+            Some(ResponseType::IntegrationFailure)
+        );
+        let malformed = GatewayError::MalformedIntegrationResponse.failure(ApiKind::Rest);
+        assert_eq!(malformed.response_type(), Some(ResponseType::Default5xx));
+        assert_eq!(malformed.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn throttled_requests_carry_the_too_many_requests_error_type() {
+        assert_eq!(
+            ResponseType::Throttled.error_type(),
+            "TooManyRequestsException"
+        );
     }
 
     #[test]

@@ -53,3 +53,56 @@ cases:
     compare:
       body: ignore
       echo: {headers: [x-appended]}
+
+  # Lambda events, compared whole (per-request and per-deployment keys are masked)
+  - name: http-lambda-v2-event
+    api: http
+    path: /lambda-v2/a%20b%2Fc/d?q=x%20y%2B&z=1+2&z=3
+    headers: {X-Custom: A, Cookie: "a=1; b=2"}
+    compare:
+      body: json
+
+  - name: http-lambda-v1-event
+    api: http
+    path: /lambda-v1/a%20b%2Fc/d?q=x%20y%2B&z=1+2&z=3
+    headers: {X-Custom: A, Cookie: "a=1; b=2"}
+    compare:
+      body: json
+
+  - name: http-lambda-v2-event-post
+    api: http
+    method: POST
+    path: /lambda-v2/items
+    headers: {content-type: application/json}
+    body: '{"name":"widget"}'
+    compare:
+      body: json
+
+  # Slashes: doubled ones collapse, and a greedy parameter may be empty
+  - name: http-lambda-v2-double-slash
+    api: http
+    path: /lambda-v2/a//b/
+    compare:
+      body: json
+
+  - name: http-lambda-v2-empty-greedy
+    api: http
+    path: /lambda-v2/
+    compare:
+      body: json
+
+  # A trailing slash is not the route: this reaches $default, not GET /authz/jwt
+  - name: http-trailing-slash
+    api: http
+    path: /authz/jwt/
+    compare:
+      headers: [content-type]
+      body: json
+
+  - name: http-http-proxy-escaped-path
+    api: http
+    path: /http-proxy/a%20b%2Fc/d?q=x%20y%2B&z=1+2
+    compare:
+      body: ignore
+      echo: {fields: [path, query]}
+

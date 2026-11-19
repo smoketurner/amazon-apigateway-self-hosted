@@ -578,15 +578,42 @@ impl Interpreter<'_> {
     /// The request body parsed as JSON once and shared, so `$input.path` results alias it.
     fn body_document(&mut self) -> Result<Value, RenderError> {
         if self.body_json.is_none() {
-            let parsed = Value::from_json(self.input.body())
-                .map_err(|err| RenderError::InvalidBodyJson(err.to_string()));
-            self.body_json = Some(parsed);
+            self.body_json = Some(parse_body(self.input.body()));
         }
         match &self.body_json {
             Some(result) => result.clone(),
             None => Ok(Value::Null),
         }
     }
+}
+
+/// Reads a body the way API Gateway does, which is more forgiving than a
+/// JSON parser (measured against a deployed REST API):
+///
+/// - an empty body, or the JSON `null`, is an empty object;
+/// - a body that opens an object, an array, or a string must hold one,
+///   and whatever follows that first value is ignored;
+/// - anything else is a JSON scalar when the whole body is one, and
+///   otherwise the body itself as a string.
+fn parse_body(body: &str) -> Result<Value, RenderError> {
+    let text = body.trim_start();
+    if text.is_empty() {
+        return Ok(Value::Map(Map::new()));
+    }
+    if text.starts_with(['{', '[', '"']) {
+        let mut values = serde_json::Deserializer::from_str(text).into_iter::<serde_json::Value>();
+        return match values.next() {
+            Some(Ok(first)) => Ok(Value::from(&first)),
+            Some(Err(err)) => Err(RenderError::InvalidBodyJson(err.to_string())),
+            None => Err(RenderError::InvalidBodyJson("no value".to_owned())),
+        };
+    }
+    Ok(match Value::from_json(text) {
+        // A body of `null` reads as no body at all.
+        Ok(Value::Null) => Value::Map(Map::new()),
+        Ok(scalar) => scalar,
+        Err(_) => Value::string(body),
+    })
 }
 
 fn evaluate_path(path: &str, document: &Value) -> Result<Value, RenderError> {

@@ -1,11 +1,14 @@
 {
   "name": "http-jwt-authorizer-missing-token",
-  "source": "hand_written",
+  "source": "recorded",
   "api": "http",
   "response": {
     "status": 401,
     "headers": {
-      "content-type": "application/json"
+      "apigw-requestid": "[masked]",
+      "content-type": "application/json",
+      "date": "[masked]",
+      "www-authenticate": "Bearer"
     },
     "body": "{\"message\":\"Unauthorized\"}"
   }

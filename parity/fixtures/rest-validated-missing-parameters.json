@@ -1,10 +1,15 @@
 {
   "name": "rest-validated-missing-parameters",
-  "source": "hand_written",
+  "source": "recorded",
   "api": "rest",
   "response": {
     "status": 400,
     "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-errortype": "BadRequestException",
+      "x-amzn-requestid": "[masked]",
       "x-reference-gateway-response": "bad-request-parameters"
     }
   }

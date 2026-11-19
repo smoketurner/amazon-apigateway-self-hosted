@@ -1,5 +1,6 @@
 //! Compares two observations, honoring the parts of them a case selects.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde_json::Value;
@@ -8,8 +9,10 @@ use crate::case::{BodyCompare, Compare, EchoCompare, EchoField};
 use crate::echo::EchoReceived;
 use crate::fixture::{Observation, Observed};
 
-/// Keys whose values differ per request, masked before JSON bodies are compared.
-const VOLATILE_JSON_KEYS: [&str; 8] = [
+/// Keys whose values differ per request, or between a deployed API and a
+/// replay of its export, masked before JSON bodies are compared. A masked key
+/// must still be present on both sides.
+const VOLATILE_JSON_KEYS: [&str; 24] = [
     "requestId",
     "extendedRequestId",
     "timeEpoch",
@@ -18,7 +21,28 @@ const VOLATILE_JSON_KEYS: [&str; 8] = [
     "requestTime",
     "traceId",
     "x-amzn-trace-id",
+    "X-Amzn-Trace-Id",
+    // What a replay cannot know: it serves an export from a file, on localhost.
+    "apiId",
+    "accountId",
+    "resourceId",
+    "sourceIp",
+    "X-Forwarded-For",
+    "x-forwarded-for",
+    "domainName",
+    "domainPrefix",
+    "Host",
+    "host",
+    "X-Forwarded-Port",
+    "x-forwarded-port",
+    "stageVariables",
+    // How long API Gateway waited for a Lambda authorizer.
+    "integrationLatency",
+    // Assigned by the service an AWS integration called.
+    "executionArn",
 ];
+/// Keys a replay has no value for at all, dropped from both sides.
+const UNKNOWN_TO_REPLAY: [&str; 1] = ["deploymentId"];
 const ABSENT: &str = "<absent>";
 
 /// One difference between an expected and an actual observation.
@@ -106,7 +130,22 @@ impl Compare {
             BodyCompare::Ignore => return,
             BodyCompare::Exact => want == got,
             BodyCompare::Json => match (parse_masked(want), parse_masked(got)) {
-                (Some(want), Some(got)) => want == got,
+                (Some(want), Some(got)) => {
+                    // Name each member that differs instead of printing two documents.
+                    let (want, got) = (flatten(&want), flatten(&got));
+                    let keys: BTreeSet<&String> = want.keys().chain(got.keys()).collect();
+                    for key in keys {
+                        let (want, got) = (want.get(key), got.get(key));
+                        if want != got {
+                            mismatches.push(Mismatch::new(
+                                format!("response.body{key}"),
+                                want.map_or(ABSENT, String::as_str),
+                                got.map_or(ABSENT, String::as_str),
+                            ));
+                        }
+                    }
+                    return;
+                }
                 (Some(_) | None, None) | (None, Some(_)) => want == got,
             },
         };
@@ -183,6 +222,36 @@ impl EchoCompare {
     }
 }
 
+/// Every scalar of `value` by its JSON pointer; empty containers count as
+/// scalars so a missing member and an empty one differ.
+fn flatten(value: &Value) -> BTreeMap<String, String> {
+    fn walk(value: &Value, pointer: &str, out: &mut BTreeMap<String, String>) {
+        match value {
+            Value::Object(members) if !members.is_empty() => {
+                for (key, member) in members {
+                    walk(member, &format!("{pointer}/{key}"), out);
+                }
+            }
+            Value::Array(items) if !items.is_empty() => {
+                for (index, item) in items.iter().enumerate() {
+                    walk(item, &format!("{pointer}/{index}"), out);
+                }
+            }
+            Value::Object(_)
+            | Value::Array(_)
+            | Value::Null
+            | Value::Bool(_)
+            | Value::Number(_)
+            | Value::String(_) => {
+                out.insert(pointer.to_owned(), value.to_string());
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(value, "", &mut out);
+    out
+}
+
 fn parse_masked(text: &str) -> Option<Value> {
     let mut value: Value = serde_json::from_str(text).ok()?;
     mask_volatile(&mut value);
@@ -192,6 +261,7 @@ fn parse_masked(text: &str) -> Option<Value> {
 fn mask_volatile(value: &mut Value) {
     match value {
         Value::Object(members) => {
+            members.retain(|key, _| !UNKNOWN_TO_REPLAY.contains(&key.as_str()));
             for (key, member) in members.iter_mut() {
                 if VOLATILE_JSON_KEYS.contains(&key.as_str()) {
                     *member = Value::Null;
@@ -305,8 +375,22 @@ mod tests {
             r#"{ "n": {"b":2, "time":"t2"}, "requestId":"r2", "a":1 }"#,
         );
         assert_eq!(compare.diff(&a, &b), []);
-        let c = observation(200, &[], r#"{"a":2}"#);
-        assert_eq!(compare.diff(&a, &c).len(), 1);
+        let c = observation(
+            200,
+            &[],
+            r#"{"a":2,"requestId":"r3","n":{"time":"t3","b":2}}"#,
+        );
+        assert_eq!(
+            compare.diff(&a, &c),
+            [Mismatch::new("response.body/a", "1", "2")],
+            "each differing member is named"
+        );
+        let missing = observation(200, &[], r#"{"a":1,"n":{"time":"t3","b":2}}"#);
+        assert_eq!(
+            compare.diff(&a, &missing),
+            [Mismatch::new("response.body/requestId", "null", ABSENT)],
+            "a masked member must still be there"
+        );
         let not_json = observation(200, &[], "plain");
         assert_eq!(
             compare

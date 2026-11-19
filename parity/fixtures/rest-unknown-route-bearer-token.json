@@ -1,0 +1,16 @@
+{
+  "name": "rest-unknown-route-bearer-token",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-errortype": "IncompleteSignatureException",
+      "x-amzn-requestid": "[masked]"
+    },
+    "body": "{\"message\":\"Invalid key=value pair (missing equal-sign) in Authorization header (hashed with SHA-256 and encoded with Base64): 'w1Xc6WwWEogNEZQP/dkBTThsJT4MNlKmzQanIm970rY='.\"}"
+  }
+}

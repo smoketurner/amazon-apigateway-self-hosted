@@ -1,0 +1,16 @@
+{
+  "name": "rest-lambda-nonproxy-empty-body",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-requestid": "[masked]",
+      "x-amzn-trace-id": "[masked]"
+    },
+    "body": "{\"body\":{},\"method\":\"POST\",\"stage\":\"ref\"}"
+  }
+}

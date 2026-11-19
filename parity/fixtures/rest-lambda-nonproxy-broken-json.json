@@ -1,0 +1,16 @@
+{
+  "name": "rest-lambda-nonproxy-broken-json",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-errortype": "BadRequestException",
+      "x-amzn-requestid": "[masked]"
+    },
+    "body": "{\"message\": \"Could not process payload\"}"
+  }
+}

@@ -1,11 +1,19 @@
 {
   "name": "rest-http-proxy-post-body",
-  "source": "hand_written",
+  "source": "recorded",
   "api": "rest",
   "response": {
     "status": 200,
     "headers": {
-      "content-type": "application/json"
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-remapped-connection": "[masked]",
+      "x-amzn-remapped-content-length": "[masked]",
+      "x-amzn-remapped-date": "[masked]",
+      "x-amzn-remapped-x-amzn-requestid": "[masked]",
+      "x-amzn-requestid": "[masked]",
+      "x-amzn-trace-id": "[masked]"
     }
   },
   "echo": {
@@ -13,8 +21,12 @@
     "path": "/http-proxy/items",
     "query": "",
     "headers": {
-      "content-type": "application/json"
+      "accept": "*/*",
+      "content-type": "application/json",
+      "user-agent": "apigw-parity",
+      "x-echo-secret": "[redacted]"
     },
-    "body": "{\"name\":\"widget\"}"
+    "body": "{\"name\":\"widget\"}",
+    "resource": "$default"
   }
 }

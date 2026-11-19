@@ -99,7 +99,13 @@ const RULES: &[HeaderRule] = &[
         [Passthrough, Dropped, Passthrough],
         [Passthrough, Passthrough, Passthrough]
     ),
-    rule!("content-length", Passthrough, Passthrough),
+    // The documented table passes it through everywhere; a deployed REST API
+    // leaves it out of Lambda proxy events.
+    rule!(
+        "content-length",
+        [Passthrough, Passthrough, Dropped],
+        [Passthrough, Passthrough, Passthrough]
+    ),
     rule!("content-md5", Dropped, Remapped),
     rule!("content-type", Passthrough, Passthrough),
     rule!("date", Passthrough, RemappedOverwritten),
@@ -120,9 +126,10 @@ const RULES: &[HeaderRule] = &[
     rule!("trailer", Dropped, Dropped),
     rule!("upgrade", Dropped, Dropped),
     rule!("user-agent", Passthrough, Remapped),
+    // The documented table drops it for `http_proxy`; a deployed API passes it.
     rule!(
         "via",
-        [Dropped, Dropped, Passthrough],
+        [Dropped, Passthrough, Passthrough],
         [Passthrough, Dropped, Dropped]
     ),
     rule!("warn", Passthrough, Passthrough),
@@ -205,6 +212,22 @@ impl Flavor {
                     None => continue,
                 },
             };
+            // Not in the documented table, but what a deployed API does for
+            // an `HTTP_PROXY` integration: the backend's request ID moves
+            // aside for the API's own, and its length is repeated.
+            if self == Self::HttpProxy && name.as_str() == "x-amzn-requestid" {
+                headers.append(
+                    HeaderName::from_static("x-amzn-remapped-x-amzn-requestid"),
+                    value,
+                );
+                continue;
+            }
+            if self == Self::HttpProxy && name == header::CONTENT_LENGTH {
+                headers.append(
+                    HeaderName::from_static("x-amzn-remapped-content-length"),
+                    value.clone(),
+                );
+            }
             match self.response_action(&name) {
                 Passthrough | Exception | Overwritten => {
                     headers.append(name, value);
@@ -334,6 +357,25 @@ impl fmt::Display for Flavor {
 mod tests {
     use super::*;
 
+    /// Measured against a deployed REST API with an `HTTP_PROXY` integration.
+    #[test]
+    fn http_proxy_responses_move_the_backends_request_id_and_repeat_its_length() {
+        let mut upstream = HeaderMap::new();
+        upstream.insert("x-amzn-requestid", HeaderValue::from_static("backend-id"));
+        upstream.insert("content-length", HeaderValue::from_static("1126"));
+        let mut proxied = upstream.clone();
+        Flavor::HttpProxy.remap_response(&mut proxied);
+        assert_eq!(proxied["x-amzn-remapped-x-amzn-requestid"], "backend-id");
+        assert!(!proxied.contains_key("x-amzn-requestid"));
+        assert_eq!(proxied["x-amzn-remapped-content-length"], "1126");
+        assert_eq!(proxied["content-length"], "1126");
+
+        let mut mapped = upstream;
+        Flavor::Http.remap_response(&mut mapped);
+        assert!(!mapped.contains_key("x-amzn-remapped-content-length"));
+        assert!(!mapped.contains_key("x-amzn-remapped-x-amzn-requestid"));
+    }
+
     /// The documentation's table, one line per header: request columns, then
     /// response columns, in `http`/`http_proxy`/`lambda` order. Each cell is
     /// P(assthrough), D(ropped), R(emapped), O(verwritten host), X(exception),
@@ -346,7 +388,7 @@ accept-encoding PPP PPP
 authorization PPP RRR
 connection PPD RRR
 content-encoding PDP PPP
-content-length PPP PPP
+content-length PPD PPP
 content-md5 DDD RRR
 content-type PPP PPP
 date PPP WWW
@@ -363,7 +405,7 @@ transfer-encoding DDX DDD
 trailer DDD DDD
 upgrade DDD DDD
 user-agent PPP RRR
-via DDP PDD
+via DPP PDD
 warn PPP PPP
 www-authenticate DDD RRR";
 
@@ -452,7 +494,7 @@ www-authenticate DDD RRR";
         let sent = Flavor::HttpProxy.request_headers(&client, IamAuthorization::NotUsed);
         let mut names: Vec<&str> = sent.keys().map(HeaderName::as_str).collect();
         names.sort_unstable();
-        assert_eq!(names, ["accept", "user-agent", "x-custom"]);
+        assert_eq!(names, ["accept", "user-agent", "via", "x-custom"]);
         assert_eq!(sent.get_all("x-custom").iter().count(), 2);
 
         let lambda = Flavor::Lambda.request_headers(&client, IamAuthorization::NotUsed);

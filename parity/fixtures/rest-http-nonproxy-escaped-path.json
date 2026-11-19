@@ -1,0 +1,16 @@
+{
+  "name": "rest-http-nonproxy-escaped-path",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-requestid": "[masked]",
+      "x-amzn-trace-id": "[masked]"
+    },
+    "body": "{\"upstreamStatus\":\"ok\",\"path\":\"/http-nonproxy/a%20b%2Fc\",\"query\":\"\",\"received\":\"{\\\"id\\\":\\\"a%20b%2Fc\\\",\\\"q\\\":\\\"x y\\\",\\\"stage\\\":\\\"ref\\\"}\"}"
+  }
+}

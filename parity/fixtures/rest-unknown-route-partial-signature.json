@@ -1,0 +1,16 @@
+{
+  "name": "rest-unknown-route-partial-signature",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-errortype": "IncompleteSignatureException",
+      "x-amzn-requestid": "[masked]"
+    },
+    "body": "{\"message\":\"Authorization header requires 'Signature' parameter. Authorization header requires 'SignedHeaders' parameter. Authorization header requires existence of either a 'X-Amz-Date' or a 'Date' header. (Hashed with SHA-256 and encoded with Base64) Authorization=SYAkdgL47E1r9n/fae+kwe9DITo3gFOXojeT+lp4DyI=\"}"
+  }
+}
