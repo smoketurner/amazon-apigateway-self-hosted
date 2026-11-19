@@ -8,6 +8,8 @@ locals {
   api_resources = var.api_kind == "rest" ? [
     "${local.apigateway_arn}:/restapis/${var.api_id}/stages/${var.stage_name}",
     "${local.apigateway_arn}:/restapis/${var.api_id}/stages/${var.stage_name}/exports/oas30",
+    # Optional for apigw: it fills in $context.resourceId.
+    "${local.apigateway_arn}:/restapis/${var.api_id}/resources",
     "${local.apigateway_arn}:/usageplans",
     "${local.apigateway_arn}:/usageplans/*/keys",
     "${local.apigateway_arn}:/apikeys",
