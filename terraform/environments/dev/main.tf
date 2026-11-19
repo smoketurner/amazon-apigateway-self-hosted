@@ -22,19 +22,14 @@ module "cognito" {
 module "integration_role" {
   source = "../../modules/integration-role"
 
-  name_prefix = var.name_prefix
-  lambda_function_arns = [
-    module.lambda_backends.echo_function_arn,
-    module.lambda_backends.authorizer_function_arn,
-  ]
-  queue_arn         = module.service_targets.queue_arn
-  table_arn         = module.service_targets.table_arn
-  state_machine_arn = module.service_targets.state_machine_arn
-  event_bus_arn     = module.service_targets.event_bus_arn
+  name_prefix          = var.name_prefix
+  lambda_function_arns = local.lambda_function_arns
+  queue_arn            = module.service_targets.queue_arn
+  table_arn            = module.service_targets.table_arn
+  state_machine_arn    = module.service_targets.state_machine_arn
+  event_bus_arn        = module.service_targets.event_bus_arn
 
-  # Only this output, not the whole module: the gateway's task definition
-  # depends on the REST API, which depends on this role.
-  trusted_principal_arns = var.enable_ecs_gateway ? [module.ecs_gateway[0].task_role_arn] : []
+  trusted_principal_arns = local.ecs_gateway_role_arns
 }
 
 module "account_cloudwatch_role" {
@@ -113,7 +108,7 @@ module "ecs_network" {
   count  = local.create_ecs_network ? 1 : 0
 
   name_prefix        = var.name_prefix
-  availability_zones = slice(data.aws_availability_zones.available.names, 0, 2)
+  availability_zones = local.ecs_network_availability_zones
 }
 
 # apigw itself on ECS Fargate, mirroring the reference REST API, to test a
@@ -122,20 +117,17 @@ module "ecs_gateway" {
   source = "../../modules/ecs-gateway"
   count  = var.enable_ecs_gateway ? 1 : 0
 
-  name_prefix        = var.name_prefix
-  vpc_id             = local.create_ecs_network ? module.ecs_network[0].vpc_id : var.vpc_id
-  subnet_ids         = local.create_ecs_network ? module.ecs_network[0].public_subnet_ids : var.ecs_gateway_subnet_ids
-  allowed_cidrs      = var.ecs_gateway_allowed_cidrs
-  api_kind           = "rest"
-  api_id             = module.rest_api.api_id
-  stage_name         = var.stage_name
-  image_tag          = var.ecs_gateway_image_tag
-  log_retention_days = var.log_retention_days
-  lambda_function_arns = [
-    module.lambda_backends.echo_function_arn,
-    module.lambda_backends.authorizer_function_arn,
-  ]
-  assumable_role_arns = [module.integration_role.role_arn]
+  name_prefix          = var.name_prefix
+  vpc_id               = local.ecs_gateway_vpc_id
+  subnet_ids           = local.ecs_gateway_subnet_ids
+  allowed_cidrs        = var.ecs_gateway_allowed_cidrs
+  api_kind             = "rest"
+  api_id               = module.rest_api.api_id
+  stage_name           = var.stage_name
+  image_tag            = var.ecs_gateway_image_tag
+  log_retention_days   = var.log_retention_days
+  lambda_function_arns = local.lambda_function_arns
+  assumable_role_arns  = [module.integration_role.role_arn]
 }
 
 module "github_oidc" {

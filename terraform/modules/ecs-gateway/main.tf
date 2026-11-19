@@ -9,7 +9,7 @@ resource "aws_ecr_repository" "this" {
 }
 
 resource "aws_cloudwatch_log_group" "this" {
-  name              = "/ecs/${local.name}"
+  name              = local.log_group_name
   retention_in_days = var.log_retention_days
 }
 
@@ -22,7 +22,7 @@ resource "aws_iam_role" "execution" {
 
 resource "aws_iam_role_policy_attachment" "execution" {
   role       = aws_iam_role.execution.name
-  policy_arn = "arn:${local.partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+  policy_arn = local.execution_policy_arn
 }
 
 # The task role is the identity apigw's AWS credential chain resolves to.
@@ -80,8 +80,8 @@ resource "aws_ecs_task_definition" "this" {
   family                   = local.name
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = 256
-  memory                   = 512
+  cpu                      = local.task_cpu
+  memory                   = local.task_memory
   execution_role_arn       = aws_iam_role.execution.arn
   task_role_arn            = aws_iam_role.task.arn
 
@@ -94,61 +94,7 @@ resource "aws_ecs_task_definition" "this" {
     name = "tls"
   }
 
-  container_definitions = jsonencode([
-    {
-      name       = "tls-init"
-      image      = "public.ecr.aws/docker/library/alpine:3.24"
-      essential  = false
-      entryPoint = ["sh", "-ec"]
-      command    = [local.tls_init_command]
-      mountPoints = [
-        { sourceVolume = "tls", containerPath = local.tls_dir, readOnly = false },
-      ]
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.this.name
-          awslogs-region        = local.region
-          awslogs-stream-prefix = "tls-init"
-        }
-      }
-    },
-    {
-      name      = "apigw"
-      image     = "${aws_ecr_repository.this.repository_url}:${var.image_tag}"
-      essential = true
-      dependsOn = [
-        { containerName = "tls-init", condition = "SUCCESS" },
-      ]
-      # Above the 30 s connection drain that follows SIGTERM.
-      stopTimeout = 45
-      environment = [
-        { name = local.api_environment, value = var.api_id },
-        { name = "APIGW_STAGE", value = var.stage_name },
-        { name = "APIGW_LISTEN", value = "0.0.0.0:${local.api_port}" },
-        { name = "APIGW_ADMIN_LISTEN", value = "0.0.0.0:${local.admin_port}" },
-        { name = "APIGW_TLS_CERT", value = "${local.tls_dir}/tls.crt" },
-        { name = "APIGW_TLS_KEY", value = "${local.tls_dir}/tls.key" },
-        { name = "APIGW_CONFIG_CACHE", value = "/var/cache/apigw/config.json" },
-        { name = "AWS_REGION", value = local.region },
-      ]
-      portMappings = [
-        { containerPort = local.api_port, protocol = "tcp" },
-        { containerPort = local.admin_port, protocol = "tcp" },
-      ]
-      mountPoints = [
-        { sourceVolume = "tls", containerPath = local.tls_dir, readOnly = true },
-      ]
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.this.name
-          awslogs-region        = local.region
-          awslogs-stream-prefix = "apigw"
-        }
-      }
-    },
-  ])
+  container_definitions = jsonencode(local.container_definitions)
 }
 
 resource "aws_ecs_service" "this" {

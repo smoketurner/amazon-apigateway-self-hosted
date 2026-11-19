@@ -35,7 +35,7 @@ data "aws_iam_policy_document" "gateway" {
     content {
       sid       = "InvokeFunctions"
       actions   = ["lambda:InvokeFunction"]
-      resources = concat(var.lambda_function_arns, [for arn in var.lambda_function_arns : "${arn}:*"])
+      resources = local.invocable_function_arns
     }
   }
 

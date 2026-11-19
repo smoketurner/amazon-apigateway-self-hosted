@@ -20,7 +20,19 @@ locals {
   })
 
   # The ECS gateway brings its own network unless it is given subnets.
-  create_ecs_network = var.enable_ecs_gateway && length(var.ecs_gateway_subnet_ids) == 0
+  create_ecs_network             = var.enable_ecs_gateway && length(var.ecs_gateway_subnet_ids) == 0
+  ecs_network_availability_zones = slice(data.aws_availability_zones.available.names, 0, 2)
+  ecs_gateway_vpc_id             = local.create_ecs_network ? module.ecs_network[0].vpc_id : var.vpc_id
+  ecs_gateway_subnet_ids         = local.create_ecs_network ? module.ecs_network[0].public_subnet_ids : var.ecs_gateway_subnet_ids
+
+  # Only this output, not the whole module: the gateway's task definition
+  # depends on the REST API, which depends on the integration role.
+  ecs_gateway_role_arns = var.enable_ecs_gateway ? [module.ecs_gateway[0].task_role_arn] : []
+
+  lambda_function_arns = [
+    module.lambda_backends.echo_function_arn,
+    module.lambda_backends.authorizer_function_arn,
+  ]
 
   vpc_link = var.enable_vpc_link ? {
     id       = module.vpc_link[0].vpc_link_id

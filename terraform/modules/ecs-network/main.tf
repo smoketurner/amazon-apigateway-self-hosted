@@ -20,11 +20,11 @@ resource "aws_internet_gateway" "this" {
 }
 
 resource "aws_subnet" "public" {
-  for_each = { for index, zone in var.availability_zones : zone => index }
+  for_each = local.subnet_cidrs
 
   vpc_id            = aws_vpc.this.id
   availability_zone = each.key
-  cidr_block        = cidrsubnet(var.cidr_block, 2, each.value)
+  cidr_block        = each.value
 
   tags = {
     Name = "${local.name}-public-${each.key}"
