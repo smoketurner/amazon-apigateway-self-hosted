@@ -278,8 +278,10 @@ string and does not hold one answers `400` `{"message": "Could not process paylo
 
 Known differences that remain:
 
-- `apigw` resolves `.` and `..` segments in the URL it sends to an HTTP backend; API Gateway
-  sends them as they are.
+- A request whose backend URL would have a `.` or `..` path segment (written plainly or as
+  `%2e`) is refused with `400` `{"message":"Bad Request"}` and never reaches the backend. API
+  Gateway sends such segments as they are; `apigw` does not, so that a client cannot reach a
+  backend path outside the one the route names.
 - API Gateway answers `403` to a request whose `Host` is not the API's. `apigw` does the same
   for hosts outside `--allowed-host`, but serves any host when the flag is not given: it has no
   name of its own to compare with.

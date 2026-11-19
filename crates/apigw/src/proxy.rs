@@ -16,6 +16,34 @@ use crate::model::{ApiKind, Protection, RoutePath};
 use crate::pipeline::RequestContext;
 use crate::route::Route;
 
+/// Why no backend URL could be made for a request.
+#[derive(Debug, PartialEq, Eq)]
+enum UrlError {
+    /// The integration's URI is not a URL once its placeholders are filled.
+    Invalid(String),
+    /// The path has a `.` or `..` segment. A URL parser would resolve it, so
+    /// the backend would be asked for another path than the one the route
+    /// names; API Gateway sends such segments as they are, which this
+    /// gateway's HTTP client cannot. The request is refused instead.
+    DotSegment,
+}
+
+impl UrlError {
+    /// Whether the path of `url` has a `.` or `..` segment, written plainly
+    /// or with `%2e`.
+    fn has_dot_segment(url: &str) -> bool {
+        let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+        let Some((_, path)) = after_scheme.split_once('/') else {
+            return false;
+        };
+        let path = path.split(['?', '#']).next().unwrap_or_default();
+        path.split('/').any(|segment| {
+            let segment = segment.to_ascii_lowercase().replace("%2e", ".");
+            segment == "." || segment == ".."
+        })
+    }
+}
+
 /// Whether an integration request carries the client's query string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QueryHandling {
@@ -138,7 +166,11 @@ impl HttpProxy {
         } = outgoing;
         let mut url = match self.url_for(&route.path, ctx, query, overrides) {
             Ok(url) => url,
-            Err(err) => {
+            Err(UrlError::DotSegment) => {
+                tracing::warn!(route = %route.key, "refusing a backend URL with a . or .. path segment");
+                return Err(GatewayError::InvalidRequest);
+            }
+            Err(UrlError::Invalid(err)) => {
                 tracing::error!(route = %route.key, uri = self.uri, %err, "invalid integration URI");
                 return Err(GatewayError::ApiConfiguration);
             }
@@ -372,14 +404,17 @@ impl HttpProxy {
         ctx: &RequestContext,
         handling: QueryHandling,
         overrides: &RequestOverrides,
-    ) -> Result<reqwest::Url, String> {
+    ) -> Result<reqwest::Url, UrlError> {
         let url = match self.private {
             Some(PrivateRouting::RequestPath) => self.request_path_url(ctx),
-            Some(PrivateRouting::HostHeader(_)) | None => {
-                self.fill_placeholders(route_path, ctx, overrides)?
-            }
+            Some(PrivateRouting::HostHeader(_)) | None => self
+                .fill_placeholders(route_path, ctx, overrides)
+                .map_err(UrlError::Invalid)?,
         };
-        let mut url = reqwest::Url::parse(&url).map_err(|e| e.to_string())?;
+        if UrlError::has_dot_segment(&url) {
+            return Err(UrlError::DotSegment);
+        }
+        let mut url = reqwest::Url::parse(&url).map_err(|e| UrlError::Invalid(e.to_string()))?;
         let mut query = QueryBuilder(url.query().map_or_default(str::to_owned));
         let rest = ctx.api.kind == ApiKind::Rest;
         if handling == QueryHandling::Forward {
@@ -618,7 +653,7 @@ mod tests {
             &self,
             route_path: &RoutePath,
             ctx: &RequestContext,
-        ) -> Result<reqwest::Url, String> {
+        ) -> Result<reqwest::Url, UrlError> {
             self.url_for(
                 route_path,
                 ctx,
@@ -670,6 +705,62 @@ mod tests {
             throttle: None,
             cache: None,
         }
+    }
+
+    #[test]
+    fn dot_segments_are_found_however_they_are_written() {
+        for url in [
+            "http://up/a/../b",
+            "http://up/..",
+            "http://up/a/.",
+            "http://up/./a",
+            "http://up/a/%2e%2E/b",
+            "http://up/a/.%2e/b?q=1",
+            "https://up:8443/a/%2E#f",
+            "http://up//../a",
+        ] {
+            assert!(UrlError::has_dot_segment(url), "{url}");
+        }
+        for url in [
+            "http://up",
+            "http://up/",
+            "http://up/a.b/c..d/.e/f.",
+            "http://up/.../a",
+            "http://up/a?q=../x",
+            "http://up/a#../x",
+            "http://up/a%2f..%2fb",
+            "http://up.example/..a",
+        ] {
+            assert!(!UrlError::has_dot_segment(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn a_backend_url_with_a_dot_segment_is_refused_not_resolved() {
+        let target = proxy("http://up/base/{proxy}");
+        let path = route("/x/{proxy+}", &target).path;
+        for sent in ["../admin", "a/../../admin", "a/./b", "%2e%2e/admin", ".."] {
+            let ctx = incoming(&[("proxy", sent)], None);
+            assert_eq!(
+                target.proxy_url(&path, &ctx),
+                Err(UrlError::DotSegment),
+                "{sent}"
+            );
+        }
+        let ctx = incoming(&[("proxy", "a/b..c/.d")], None);
+        assert_eq!(
+            target.proxy_url(&path, &ctx).unwrap().as_str(),
+            "http://up/base/a/b..c/.d"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_for_a_dot_segment_never_reaches_the_backend() {
+        let addr = upstream().await;
+        let target = proxy(&format!("http://{addr}/echo/{{proxy}}"));
+        let request = incoming(&[("proxy", "a/../../secret")], None);
+        let refused = send(target, "/x/{proxy+}", request).await;
+        assert!(matches!(refused, Err(GatewayError::InvalidRequest)));
     }
 
     #[test]
