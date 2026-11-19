@@ -219,6 +219,19 @@ pub(crate) struct Config {
     #[arg(long, env = "APIGW_VALKEY_CA_CERT", requires = "valkey_url")]
     pub(crate) valkey_ca_cert: Option<PathBuf>,
 
+    /// Serve only requests whose `Host` is one of these names (repeatable; a
+    /// port in the header is ignored) and answer `403` to the rest, as API
+    /// Gateway does for a host that is not the API's. Without it every host
+    /// is served. `--domain-name` does its own matching.
+    #[arg(
+        long = "allowed-host",
+        env = "APIGW_ALLOWED_HOSTS",
+        value_delimiter = ',',
+        value_name = "NAME",
+        conflicts_with = "domain_names"
+    )]
+    pub(crate) allowed_hosts: Vec<String>,
+
     /// Address for `/healthz` and `/routes`. Disabled when unset.
     #[arg(long, env = "APIGW_ADMIN_LISTEN")]
     pub(crate) admin_listen: Option<SocketAddr>,

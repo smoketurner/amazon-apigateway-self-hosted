@@ -437,7 +437,7 @@ impl ParamSource {
                 let values = self.values(ctx);
                 (!values.is_empty()).then(|| values.join(","))
             }
-            Self::Header(ref name) => ctx.header_str(name).map(str::to_owned),
+            Self::Header(ref name) => ctx.header_text(name),
             Self::Body => Some(ctx.body_text().into_owned()).filter(|body| !body.is_empty()),
             Self::BodyPath(ref expression) => ctx.body_json_path(expression),
             Self::Context(ref path) => ctx.context_value(path),
@@ -461,8 +461,7 @@ impl ParamSource {
                 .headers
                 .get_all(name.as_str())
                 .iter()
-                .filter_map(|value| value.to_str().ok())
-                .map(str::to_owned)
+                .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
                 .collect(),
             Self::Path(_)
             | Self::Query(_)
@@ -715,6 +714,17 @@ mod tests {
             "o=x+y%20z&q",
             "HTTP APIs forward it as sent"
         );
+    }
+
+    #[test]
+    fn a_mapped_header_that_is_not_ascii_keeps_its_value() {
+        let mut ctx = incoming(&[], None);
+        ctx.headers.insert(
+            "x-from-client",
+            HeaderValue::from_bytes("café".as_bytes()).unwrap(),
+        );
+        let source = ParamSource::Header("x-from-client".to_owned());
+        assert_eq!(source.resolve(&ctx).as_deref(), Some("café"));
     }
 
     #[test]

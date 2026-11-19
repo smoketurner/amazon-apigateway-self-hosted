@@ -1,0 +1,19 @@
+apiVersion: v2
+name: apigw
+description: Self-hosted gateway that serves an existing Amazon API Gateway's routes
+type: application
+# Placeholders: the release workflow packages the chart with
+# `helm package --version <release> --app-version <release>`.
+version: 0.0.0
+appVersion: "0.0.0"
+kubeVersion: ">=1.29.0-0"
+home: https://github.com/smoketurner/amazon-apigateway-self-hosted
+sources:
+  - https://github.com/smoketurner/amazon-apigateway-self-hosted
+keywords:
+  - api-gateway
+  - aws
+  - gateway
+annotations:
+  org.opencontainers.image.source: https://github.com/smoketurner/amazon-apigateway-self-hosted
+  org.opencontainers.image.licenses: Apache-2.0 OR MIT

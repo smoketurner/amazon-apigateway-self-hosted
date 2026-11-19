@@ -282,6 +282,27 @@ impl EventSpelling {
         }
     }
 
+    /// A header value as the event carries it. A REST API does not decode a
+    /// value that is not ASCII: each byte above 127 becomes the character
+    /// U+FF00 plus the byte (measured: the two bytes of `é` arrive as
+    /// `\u{ffc3}\u{ffa9}`).
+    fn value(self, bytes: &[u8]) -> String {
+        match self {
+            Self::Rest if !bytes.is_ascii() => bytes
+                .iter()
+                .map(|&byte| {
+                    if byte.is_ascii() {
+                        char::from(byte)
+                    } else {
+                        char::from_u32(0xFF00 | u32::from(byte))
+                            .unwrap_or(char::REPLACEMENT_CHARACTER)
+                    }
+                })
+                .collect(),
+            Self::Rest | Self::HttpV1 | Self::Lower => String::from_utf8_lossy(bytes).into_owned(),
+        }
+    }
+
     /// How the lower-case header `name` appears in the event.
     fn name<'n>(self, name: &'n str, sent: &'n HeaderCase) -> Cow<'n, str> {
         match (self, self.fixed(name)) {
@@ -460,10 +481,7 @@ impl<'a> ProxyEvent<'a> {
                 continue;
             }
             let name = spelling.name(name.as_str(), &self.ctx.header_case);
-            headers.push(
-                name.into_owned(),
-                String::from_utf8_lossy(value.as_bytes()).into_owned(),
-            );
+            headers.push(name.into_owned(), spelling.value(value.as_bytes()));
         }
         self.push_gateway_headers(&mut headers, spelling);
         headers
@@ -882,6 +900,25 @@ mod tests {
         let (own, sent) = trace.split_once(';').unwrap();
         assert!(own.starts_with("Self=1-"), "{trace}");
         assert_eq!(sent, "Root=1-67891233-abcdef012345678912345678;Sampled=1");
+    }
+
+    /// Measured against a deployed REST API with `X-Custom: café`.
+    #[test]
+    fn rest_events_do_not_decode_header_values_that_are_not_ascii() {
+        let mut ctx = incoming(b"");
+        ctx.headers.insert(
+            "x-custom",
+            HeaderValue::from_bytes("café".as_bytes()).unwrap(),
+        );
+        assert_eq!(
+            event(&ctx, PayloadVersion::V1)["headers"]["x-custom"],
+            "caf\u{ffc3}\u{ffa9}"
+        );
+        ctx.api.kind = ApiKind::Http;
+        assert_eq!(
+            event(&ctx, PayloadVersion::V2)["headers"]["x-custom"],
+            "café"
+        );
     }
 
     #[test]

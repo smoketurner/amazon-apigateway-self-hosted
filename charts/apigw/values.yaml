@@ -1,0 +1,139 @@
+# Values for the apigw chart. Every apigw flag has an APIGW_* environment
+# variable (README.md); anything without a value here goes in `extraEnv`.
+
+image:
+  repository: ghcr.io/smoketurner/amazon-apigateway-self-hosted
+  # Defaults to the chart's appVersion.
+  tag: ""
+  # Set by the release workflow to the multi-arch index it pushed. When set, the
+  # pod pulls `repository@digest` and `tag` is ignored.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Also passed as APIGW_REPLICAS, which divides throttle limits between replicas
+# unless `valkey` shares them.
+replicaCount: 2
+
+# Exactly one of restApiId, httpApiId, domainNames, or openapiFile.
+api:
+  # REST API (v1) to mirror. Requires `stage`.
+  restApiId: ""
+  # HTTP API (v2) to mirror. Requires `stage`.
+  httpApiId: ""
+  # Custom domain names whose mapped APIs are served. Excludes `stage`,
+  # `basePath`, and the cache.
+  domainNames: []
+  # Path of an OpenAPI export mounted with `extraVolumes`; `type` is `rest` or `http`.
+  openapiFile: ""
+  type: rest
+  stage: ""
+  basePath: ""
+  # name: value pairs, set as APIGW_STAGE_VARIABLE_<name>.
+  stageVariables: {}
+
+# apigw resolves AWS credentials and region the way the AWS CLI and SDKs do:
+# environment variables, shared config and credentials files, a profile, SSO,
+# credential_process, a web identity token, then container and instance
+# metadata. Nothing here is required; set what your environment uses.
+aws:
+  region: ""
+  profile: ""
+  # Paths of a shared config and credentials file, set as AWS_CONFIG_FILE and
+  # AWS_SHARED_CREDENTIALS_FILE when not empty. Mount the files with
+  # `extraVolumes` and `extraVolumeMounts`.
+  configFile: ""
+  sharedCredentialsFile: ""
+  # Secret whose keys are environment variable names, for example
+  # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN.
+  existingSecret: ""
+  # Projects a service account token and sets AWS_ROLE_ARN and
+  # AWS_WEB_IDENTITY_TOKEN_FILE, for a role that trusts the cluster's OIDC issuer.
+  webIdentity:
+    roleArn: ""
+    audience: sts.amazonaws.com
+    expirationSeconds: 3600
+
+# Every listener is TLS. Name a `kubernetes.io/tls` Secret, or have cert-manager
+# issue one. The files are re-read when they change.
+tls:
+  existingSecret: ""
+  certManager:
+    enabled: false
+    issuerRef:
+      name: ""
+      kind: ClusterIssuer
+      group: cert-manager.io
+    # Defaults to the Service's in-cluster names.
+    dnsNames: []
+
+# Last-known-good API definition, used when AWS is unreachable at startup. An
+# emptyDir survives container restarts but not rescheduling; name a claim to
+# keep it longer. Not used with `api.domainNames`.
+cache:
+  enabled: true
+  existingClaim: ""
+
+# Secret holding a `rediss://` URL that shares throttle, quota, and authorizer
+# cache state between replicas.
+valkey:
+  existingSecret: ""
+  secretKey: url
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
+service:
+  type: ClusterIP
+  port: 443
+  annotations: {}
+
+# The admin listener (/healthz, /routes) is used by the probes and is never
+# added to the Service: /routes lists every backend target.
+adminPort: 9443
+containerPort: 8443
+
+podDisruptionBudget:
+  enabled: false
+  maxUnavailable: 1
+
+istio:
+  # A DestinationRule telling the mesh to originate TLS to the pod.
+  destinationRule:
+    enabled: false
+    # Defaults to <service>.<namespace>.svc; must be a name on the certificate.
+    sni: ""
+
+resources: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+
+# Above the 30 s connection drain.
+terminationGracePeriodSeconds: 45
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+extraArgs: []
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []

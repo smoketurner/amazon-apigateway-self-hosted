@@ -2,6 +2,10 @@
 /target
 **/*.rs.bk
 
+# Release build staging (make binary, nfpm, Dockerfile.release)
+/dist/
+/staging/
+
 # Secrets / environment
 .env
 .env.*

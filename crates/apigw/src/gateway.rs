@@ -19,7 +19,7 @@ use crate::cache::CacheScope;
 use crate::canary::Release;
 use crate::cors::Cors;
 use crate::gateway_response::{Failure, GatewayResponses};
-use crate::incomplete_signature::UnclaimedAuthorization;
+use crate::incomplete_signature::UnclaimedSignature;
 use crate::integration::StageVariables;
 use crate::limits::LimitExceeded;
 use crate::model::{ApiKind, Protection, ResponseType};
@@ -191,8 +191,10 @@ impl ApiContext {
         // A REST API reads an `Authorization` header no route claims as a
         // failed attempt at Signature Version 4.
         let failure = match (self.kind, error) {
-            (ApiKind::Rest, GatewayError::NoRoute) => UnclaimedAuthorization::of(&context.headers)
-                .map(|unclaimed| unclaimed.failure(&context.headers)),
+            (ApiKind::Rest, GatewayError::NoRoute) => {
+                UnclaimedSignature::of(&context.headers, &context.query)
+                    .map(|unclaimed| unclaimed.failure(&context.headers, context.received))
+            }
             _ => None,
         }
         .unwrap_or_else(|| error.failure(self.kind));

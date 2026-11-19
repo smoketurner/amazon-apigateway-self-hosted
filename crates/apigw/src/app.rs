@@ -34,7 +34,7 @@ use crate::listener::{self, ConnLimits, Edge, Tls};
 use crate::model::{ApiModel, IntegrationOverrides, StageSettings};
 use crate::observability::{Observability, StageObserver};
 use crate::payload::PayloadSettings;
-use crate::router::{self, BasePath, LoadSummary, Loaded, RouteSummary};
+use crate::router::{self, AllowedHosts, BasePath, LoadSummary, Loaded, RouteSummary};
 use crate::source::{Fetch, Fetcher, Snapshot, Source, SourceError};
 use crate::state::{StateBackend, Valkey};
 use crate::usage::{AwsUsageSource, Pacing, UsageChecker, UsageReader, UsageStore};
@@ -587,7 +587,7 @@ async fn serve_apis(
         let routes = runtime.loaded();
         tasks.spawn(async move { runtime.stop().await });
         return Ok((
-            router::dispatcher(routes.clone()),
+            router::dispatcher(routes.clone(), AllowedHosts::only(&config.allowed_hosts)),
             router::admin(routes, Arc::clone(aws)),
         ));
     }
@@ -936,7 +936,7 @@ mod tests {
         let task =
             tokio::spawn(refresher.run(Duration::from_millis(50), current, shutdown.clone()));
 
-        let app = router::dispatcher(routes.clone());
+        let app = router::dispatcher(routes.clone(), AllowedHosts::any());
         let status = |app: Router| async move {
             use tower::ServiceExt as _;
             let request = axum::http::Request::builder()
@@ -1153,7 +1153,7 @@ mod tests {
                 })
                 .unwrap();
             let (_tx, rx) = watch::channel(Arc::new(loaded));
-            let app = router::dispatcher(rx);
+            let app = router::dispatcher(rx, AllowedHosts::any());
             for _ in 0..requests {
                 let request = Request::builder()
                     .uri("/pets")

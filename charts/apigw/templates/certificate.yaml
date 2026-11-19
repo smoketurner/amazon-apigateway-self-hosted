@@ -1,0 +1,22 @@
+{{- if .Values.tls.certManager.enabled }}
+{{- $fullname := include "apigw.fullname" . }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "apigw.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "apigw.tlsSecretName" . }}
+  dnsNames:
+    {{- if .Values.tls.certManager.dnsNames }}
+    {{- toYaml .Values.tls.certManager.dnsNames | nindent 4 }}
+    {{- else }}
+    - {{ $fullname }}.{{ .Release.Namespace }}.svc
+    - {{ $fullname }}.{{ .Release.Namespace }}.svc.cluster.local
+    {{- end }}
+  issuerRef:
+    name: {{ required "tls.certManager.issuerRef.name is required when tls.certManager.enabled" .Values.tls.certManager.issuerRef.name }}
+    kind: {{ .Values.tls.certManager.issuerRef.kind }}
+    group: {{ .Values.tls.certManager.issuerRef.group }}
+{{- end }}

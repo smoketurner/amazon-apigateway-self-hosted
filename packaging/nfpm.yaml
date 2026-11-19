@@ -1,0 +1,69 @@
+# The .rpm and .deb packages published to packages.smoketurner.com, built by
+# reusable-build.yml's linux-packages job from the static musl binary it
+# unpacks into staging/. The binary links nothing at runtime, so neither
+# package declares dependencies. nfpm expands the ${...} variables from the
+# environment; an empty GPG_KEY_FILE (a dry run without the signing key)
+# leaves the RPM unsigned. Run nfpm from the repository root.
+name: apigw
+arch: "${ARCH}"
+platform: linux
+version: "${VERSION}"
+section: net
+priority: optional
+maintainer: "Smoke Turner <packages@smoketurner.com>"
+description: "Self-hosted gateway that serves an existing Amazon API Gateway's routes"
+vendor: "Smoke Turner, LLC"
+homepage: "https://github.com/smoketurner/amazon-apigateway-self-hosted"
+license: "Apache-2.0 OR MIT"
+
+rpm:
+  signature:
+    key_file: "${GPG_KEY_FILE}"
+
+contents:
+  - src: ./staging/apigw
+    dst: /usr/bin/apigw
+    file_info:
+      mode: 0755
+  - src: ./packaging/apigw.service
+    dst: /usr/lib/systemd/system/apigw.service
+    file_info:
+      mode: 0644
+  - dst: /etc/apigw
+    type: dir
+    file_info:
+      mode: 0755
+  # May hold credentials (a Valkey URL, AWS keys): readable by the service only.
+  - src: ./packaging/apigw.env
+    dst: /etc/apigw/apigw.env
+    type: config|noreplace
+    file_info:
+      mode: 0640
+      owner: root
+      group: apigw
+  - dst: /etc/apigw/tls
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: apigw
+  - src: ./LICENSE-APACHE
+    dst: /usr/share/doc/apigw/LICENSE-APACHE
+  - src: ./LICENSE-MIT
+    dst: /usr/share/doc/apigw/LICENSE-MIT
+
+# rpm and dpkg pass different arguments to these scripts (an install count
+# against an action name), so only the user-creating preinstall is shared.
+overrides:
+  rpm:
+    scripts:
+      preinstall: ./packaging/scripts/preinstall.sh
+      postinstall: ./packaging/rpm/postinstall.sh
+      preremove: ./packaging/rpm/preremove.sh
+      postremove: ./packaging/rpm/postremove.sh
+  deb:
+    scripts:
+      preinstall: ./packaging/scripts/preinstall.sh
+      postinstall: ./packaging/deb/postinstall.sh
+      preremove: ./packaging/deb/preremove.sh
+      postremove: ./packaging/deb/postremove.sh
