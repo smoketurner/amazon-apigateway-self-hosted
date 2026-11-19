@@ -20,8 +20,6 @@ locals {
   # Above the 30 s connection drain that follows SIGTERM.
   stop_timeout_seconds = 45
 
-  api_environment = var.api_kind == "rest" ? "APIGW_REST_API_ID" : "APIGW_HTTP_API_ID"
-
   # apigw has no plaintext listener, so the task makes itself a certificate
   # before the gateway starts. 65532 is the image's nonroot user.
   tls_init_command = join(" && ", [
@@ -30,18 +28,82 @@ locals {
     "chown 65532:65532 ${local.tls_dir}/tls.key ${local.tls_dir}/tls.crt",
   ])
 
-  log_configuration = {
-    for container in ["tls-init", "apigw"] : container => {
-      logDriver = "awslogs"
-      options = {
-        awslogs-group         = aws_cloudwatch_log_group.this.name
-        awslogs-region        = local.region
-        awslogs-stream-prefix = container
-      }
+  tls_init_log_configuration = {
+    logDriver = "awslogs"
+    options = {
+      awslogs-group         = aws_cloudwatch_log_group.this.name
+      awslogs-region        = local.region
+      awslogs-stream-prefix = "tls-init"
     }
   }
 
-  container_definitions = [
+  # Every API the task mirrors: the one it was created for under the name
+  # "apigw", then the additional ones as "apigw-<name>".
+  apis = merge(
+    {
+      apigw = {
+        kind       = var.api_kind
+        id         = var.api_id
+        api_port   = local.api_port
+        admin_port = local.admin_port
+      }
+    },
+    {
+      for name, api in var.additional_apis : "apigw-${name}" => {
+        kind       = api.kind
+        id         = api.id
+        api_port   = api.api_port
+        admin_port = api.admin_port
+      }
+    },
+  )
+
+  # The ports of the additional APIs, which the security group opens to the
+  # same addresses as the first one's.
+  additional_ingress = {
+    for pair in setproduct(var.allowed_cidrs, flatten([for api in values(var.additional_apis) : [api.api_port, api.admin_port]])) :
+    "${pair[0]}-${pair[1]}" => { cidr = pair[0], port = pair[1] }
+  }
+
+  gateway_containers = [
+    for name, api in local.apis : {
+      name      = name
+      image     = local.image
+      essential = true
+      dependsOn = [
+        { containerName = "tls-init", condition = "SUCCESS" },
+      ]
+      stopTimeout = local.stop_timeout_seconds
+      environment = [
+        { name = api.kind == "rest" ? "APIGW_REST_API_ID" : "APIGW_HTTP_API_ID", value = api.id },
+        { name = "APIGW_STAGE", value = var.stage_name },
+        { name = "APIGW_BASE_PATH", value = var.base_path },
+        { name = "APIGW_LISTEN", value = "0.0.0.0:${api.api_port}" },
+        { name = "APIGW_ADMIN_LISTEN", value = "0.0.0.0:${api.admin_port}" },
+        { name = "APIGW_TLS_CERT", value = "${local.tls_dir}/tls.crt" },
+        { name = "APIGW_TLS_KEY", value = "${local.tls_dir}/tls.key" },
+        { name = "APIGW_CONFIG_CACHE", value = "/var/cache/apigw/config.json" },
+        { name = "AWS_REGION", value = local.region },
+      ]
+      portMappings = [
+        { containerPort = api.api_port, protocol = "tcp" },
+        { containerPort = api.admin_port, protocol = "tcp" },
+      ]
+      mountPoints = [
+        { sourceVolume = "tls", containerPath = local.tls_dir, readOnly = true },
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.this.name
+          awslogs-region        = local.region
+          awslogs-stream-prefix = name
+        }
+      }
+    }
+  ]
+
+  container_definitions = concat([
     {
       name       = "tls-init"
       image      = local.tls_init_image
@@ -51,35 +113,7 @@ locals {
       mountPoints = [
         { sourceVolume = "tls", containerPath = local.tls_dir, readOnly = false },
       ]
-      logConfiguration = local.log_configuration["tls-init"]
-    },
-    {
-      name      = "apigw"
-      image     = local.image
-      essential = true
-      dependsOn = [
-        { containerName = "tls-init", condition = "SUCCESS" },
-      ]
-      stopTimeout = local.stop_timeout_seconds
-      environment = [
-        { name = local.api_environment, value = var.api_id },
-        { name = "APIGW_STAGE", value = var.stage_name },
-        { name = "APIGW_BASE_PATH", value = var.base_path },
-        { name = "APIGW_LISTEN", value = "0.0.0.0:${local.api_port}" },
-        { name = "APIGW_ADMIN_LISTEN", value = "0.0.0.0:${local.admin_port}" },
-        { name = "APIGW_TLS_CERT", value = "${local.tls_dir}/tls.crt" },
-        { name = "APIGW_TLS_KEY", value = "${local.tls_dir}/tls.key" },
-        { name = "APIGW_CONFIG_CACHE", value = "/var/cache/apigw/config.json" },
-        { name = "AWS_REGION", value = local.region },
-      ]
-      portMappings = [
-        { containerPort = local.api_port, protocol = "tcp" },
-        { containerPort = local.admin_port, protocol = "tcp" },
-      ]
-      mountPoints = [
-        { sourceVolume = "tls", containerPath = local.tls_dir, readOnly = true },
-      ]
-      logConfiguration = local.log_configuration["apigw"]
-    },
-  ]
+      logConfiguration = local.tls_init_log_configuration
+    }
+  ], local.gateway_containers)
 }

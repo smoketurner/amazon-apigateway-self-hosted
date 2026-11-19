@@ -49,6 +49,23 @@ variable "stage_name" {
   type        = string
 }
 
+variable "additional_apis" {
+  description = "More APIs to mirror from the same task, by a short name. One apigw process mirrors one API, so each runs as its own container, on its own ports, from the same image and under the same task role."
+  type = map(object({
+    kind                = string
+    id                  = string
+    api_port            = number
+    admin_port          = number
+    gateway_policy_json = string
+  }))
+  default = {}
+
+  validation {
+    condition     = alltrue([for api in values(var.additional_apis) : contains(["rest", "http"], api.kind)])
+    error_message = "Each additional API's kind must be rest or http."
+  }
+}
+
 variable "base_path" {
   description = "Path prefix the gateway serves the API under, such as /prod to match an execute-api URL. Empty serves it at the root."
   type        = string

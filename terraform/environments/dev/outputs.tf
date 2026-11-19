@@ -76,6 +76,7 @@ output "ecs_gateway" {
     service_name   = module.ecs_gateway[0].service_name
     task_role_arn  = module.ecs_gateway[0].task_role_arn
     log_group_name = module.ecs_gateway[0].log_group_name
+    ports          = module.ecs_gateway[0].ports
   } : null
 }
 

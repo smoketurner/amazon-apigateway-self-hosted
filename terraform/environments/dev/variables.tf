@@ -158,3 +158,14 @@ variable "lambda_gateway_image_tag" {
   type        = string
   default     = null
 }
+
+variable "enable_ecs_gateway_http" {
+  description = "Also mirror the reference HTTP API from the ECS gateway's task, as a second apigw container on ports 8444 (API) and 9444 (admin). Requires enable_ecs_gateway."
+  type        = bool
+  default     = false
+
+  validation {
+    condition     = !var.enable_ecs_gateway_http || var.enable_ecs_gateway
+    error_message = "enable_ecs_gateway_http requires enable_ecs_gateway: it adds a container to that task."
+  }
+}
