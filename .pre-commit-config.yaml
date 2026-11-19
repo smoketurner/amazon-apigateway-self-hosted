@@ -16,6 +16,8 @@ repos:
       - id: check-added-large-files
         args: [--maxkb=1024]
       - id: check-yaml
+        # Helm templates are Go templates, not YAML, until rendered.
+        exclude: ^charts/[^/]+/templates/
       - id: check-toml
       - id: detect-private-key
       - id: mixed-line-ending

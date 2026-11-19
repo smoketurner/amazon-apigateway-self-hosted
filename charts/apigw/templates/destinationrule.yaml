@@ -1,0 +1,15 @@
+{{- if .Values.istio.destinationRule.enabled }}
+{{- $host := printf "%s.%s.svc" (include "apigw.fullname" .) .Release.Namespace }}
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: {{ include "apigw.fullname" . }}
+  labels:
+    {{- include "apigw.labels" . | nindent 4 }}
+spec:
+  host: {{ $host }}.cluster.local
+  trafficPolicy:
+    tls:
+      mode: SIMPLE
+      sni: {{ default $host .Values.istio.destinationRule.sni }}
+{{- end }}

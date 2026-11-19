@@ -1,0 +1,208 @@
+{{- include "apigw.validateSource" . }}
+{{- $cache := and .Values.cache.enabled (not .Values.api.domainNames) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "apigw.fullname" . }}
+  labels:
+    {{- include "apigw.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "apigw.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "apigw.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "apigw.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: apigw
+          image: {{ include "apigw.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.extraArgs }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            - name: APIGW_LISTEN
+              value: "0.0.0.0:{{ .Values.containerPort }}"
+            - name: APIGW_ADMIN_LISTEN
+              value: "0.0.0.0:{{ .Values.adminPort }}"
+            - name: APIGW_TLS_CERT
+              value: /etc/apigw/tls/tls.crt
+            - name: APIGW_TLS_KEY
+              value: /etc/apigw/tls/tls.key
+            - name: APIGW_REPLICAS
+              value: {{ .Values.replicaCount | quote }}
+            {{- with .Values.api.restApiId }}
+            - name: APIGW_REST_API_ID
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.api.httpApiId }}
+            - name: APIGW_HTTP_API_ID
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.api.domainNames }}
+            - name: APIGW_DOMAIN_NAMES
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.api.openapiFile }}
+            - name: APIGW_OPENAPI_FILE
+              value: {{ . | quote }}
+            - name: APIGW_API_TYPE
+              value: {{ $.Values.api.type | quote }}
+            {{- end }}
+            {{- with .Values.api.stage }}
+            - name: APIGW_STAGE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.api.basePath }}
+            - name: APIGW_BASE_PATH
+              value: {{ . | quote }}
+            {{- end }}
+            {{- range $name, $value := .Values.api.stageVariables }}
+            - name: APIGW_STAGE_VARIABLE_{{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- if $cache }}
+            - name: APIGW_CONFIG_CACHE
+              value: /var/cache/apigw/config.json
+            {{- end }}
+            {{- with .Values.valkey.existingSecret }}
+            - name: APIGW_VALKEY_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: {{ $.Values.valkey.secretKey }}
+            {{- end }}
+            {{- with .Values.aws.region }}
+            - name: AWS_REGION
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.aws.profile }}
+            - name: AWS_PROFILE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.aws.configFile }}
+            - name: AWS_CONFIG_FILE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.aws.sharedCredentialsFile }}
+            - name: AWS_SHARED_CREDENTIALS_FILE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.aws.webIdentity.roleArn }}
+            - name: AWS_ROLE_ARN
+              value: {{ . | quote }}
+            - name: AWS_WEB_IDENTITY_TOKEN_FILE
+              value: /var/run/secrets/aws/token
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.aws.existingSecret }}
+          envFrom:
+            - secretRef:
+                name: {{ . }}
+          {{- end }}
+          ports:
+            - name: https
+              containerPort: {{ .Values.containerPort }}
+              protocol: TCP
+            - name: admin
+              containerPort: {{ .Values.adminPort }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: admin
+              scheme: HTTPS
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: admin
+              scheme: HTTPS
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/apigw/tls
+              readOnly: true
+            {{- if $cache }}
+            - name: cache
+              mountPath: /var/cache/apigw
+            {{- end }}
+            {{- if .Values.aws.webIdentity.roleArn }}
+            - name: aws-token
+              mountPath: /var/run/secrets/aws
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ include "apigw.tlsSecretName" . }}
+        {{- if $cache }}
+        - name: cache
+          {{- if .Values.cache.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.cache.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+        {{- if .Values.aws.webIdentity.roleArn }}
+        - name: aws-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: {{ .Values.aws.webIdentity.audience | quote }}
+                  expirationSeconds: {{ .Values.aws.webIdentity.expirationSeconds }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
