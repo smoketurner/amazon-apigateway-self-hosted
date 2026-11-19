@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use axum::body::Body;
-use axum::http::header;
+use axum::http::{HeaderMap, header};
 use axum::response::Response;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -182,8 +182,78 @@ impl LambdaProxy {
     }
 }
 
-/// A request body as proxy events carry it: valid UTF-8 as text, anything else
-/// base64-encoded.
+/// Whether an HTTP API hands a body of this `Content-Type` to a function as
+/// text. Everything else, and a body with no type, arrives base64-encoded.
+///
+/// Measured on a deployed API with some 130 types: text is `text/` followed
+/// by letters, digits, `+`, and `-`; `application/` followed by one of a few
+/// names, or by letters, digits, and `-` and then `+json` or `+xml`. At most
+/// one parameter may follow, as `;name=value` with optional spaces before the
+/// name, and a `charset` has to be `utf-8` or `us-ascii`. Case does not
+/// matter, and of several comma-separated types the last one counts.
+struct TextMediaType;
+
+impl TextMediaType {
+    const APPLICATION: [&str; 8] = [
+        "json",
+        "xml",
+        "javascript",
+        "x-javascript",
+        "ecmascript",
+        "x-ecmascript",
+        "graphql",
+        "x-yaml",
+    ];
+
+    fn request_is_text(headers: &HeaderMap) -> bool {
+        headers
+            .get_all(header::CONTENT_TYPE)
+            .iter()
+            .next_back()
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(Self::matches)
+    }
+
+    fn matches(content_type: &str) -> bool {
+        let last = content_type.rsplit(',').next().unwrap_or_default();
+        let last = last.trim_matches([' ', '\t']).to_ascii_lowercase();
+        let (essence, parameter) = match last.split_once(';') {
+            Some((essence, parameter)) => (essence, Some(parameter)),
+            None => (last.as_str(), None),
+        };
+        if parameter.is_some_and(|parameter| !Self::parameter_allows_text(parameter)) {
+            return false;
+        }
+        let word = |text: &str, extra: &[u8]| {
+            text.bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || extra.contains(&byte))
+        };
+        match essence.split_once('/') {
+            Some(("text", subtype)) => !subtype.is_empty() && word(subtype, b"+-"),
+            Some(("application", subtype)) => {
+                Self::APPLICATION.contains(&subtype)
+                    || subtype
+                        .strip_suffix("+json")
+                        .or_else(|| subtype.strip_suffix("+xml"))
+                        .is_some_and(|prefix| word(prefix, b"-"))
+            }
+            Some(_) | None => false,
+        }
+    }
+
+    /// `parameter` is what follows the `;`, in lower case.
+    fn parameter_allows_text(parameter: &str) -> bool {
+        let Some((name, value)) = parameter.trim_start_matches(' ').split_once('=') else {
+            return false;
+        };
+        if name.is_empty() || value.is_empty() || value.contains([';', ' ']) {
+            return false;
+        }
+        name != "charset" || matches!(value.trim_matches('"'), "utf-8" | "us-ascii")
+    }
+}
+
+/// A request body as proxy events carry it.
 struct EventBody {
     body: Value,
     is_base64: bool,
@@ -191,13 +261,14 @@ struct EventBody {
 
 impl EventBody {
     /// REST APIs send a body as base64 when its `Content-Type` is one of the API's
-    /// binary media types and as text otherwise; HTTP APIs base64-encode what
-    /// is not valid UTF-8.
+    /// binary media types and as text otherwise; HTTP APIs send it as text
+    /// when its `Content-Type` is one they take for text.
     fn for_request(ctx: &RequestContext) -> Self {
-        match ctx.api.kind {
-            ApiKind::Rest => Self::declared(&ctx.body, ctx.payload.request_is_binary(&ctx.headers)),
-            ApiKind::Http => Self::new(&ctx.body),
-        }
+        let binary = match ctx.api.kind {
+            ApiKind::Rest => ctx.payload.request_is_binary(&ctx.headers),
+            ApiKind::Http => !TextMediaType::request_is_text(&ctx.headers),
+        };
+        Self::declared(&ctx.body, binary)
     }
 
     fn declared(body: &[u8], binary: bool) -> Self {
@@ -243,7 +314,7 @@ enum EventSpelling {
     /// `Authorization`.
     Rest,
     /// HTTP API payload 1.0: the client's spelling, but `Host`, `User-Agent`,
-    /// `Cookie`, and `Content-Length`, and a lower-case `accept`.
+    /// `Cookie`, `Content-Length`, and `Content-Type`, and a lower-case `accept`.
     HttpV1,
     /// HTTP API payload 2.0: lower case.
     Lower,
@@ -276,6 +347,7 @@ impl EventSpelling {
             Self::HttpV1 => always.or(match name {
                 "cookie" => Some("Cookie"),
                 "content-length" => Some("Content-Length"),
+                "content-type" => Some("Content-Type"),
                 "accept" => Some("accept"),
                 _ => None,
             }),
@@ -606,7 +678,7 @@ impl<'a> ProxyEvent<'a> {
             if let Some(authorizer) = ctx.authorizer.event_value(PayloadVersion::V1) {
                 request_context.insert("authorizer".to_owned(), authorizer);
             }
-            if let Some(ref deployment_id) = ctx.api.deployment_id {
+            if let (false, Some(deployment_id)) = (http_api, &ctx.api.deployment_id) {
                 request_context.insert("deploymentId".to_owned(), json!(deployment_id));
             }
             if http_api {
@@ -1417,5 +1489,142 @@ mod tests {
         assert!(v1["requestContext"]["identity"].get("clientCert").is_none());
         let v2 = event(&ctx, PayloadVersion::V2);
         assert!(v2["requestContext"].get("authentication").is_none());
+    }
+
+    /// Every type here was posted to a deployed HTTP API, which answered with
+    /// the `isBase64Encoded` shown.
+    #[test]
+    fn http_api_bodies_are_text_only_for_the_types_api_gateway_takes_for_text() {
+        let text = [
+            "text/plain",
+            "TEXT/HTML",
+            "text/csv; charset=utf-8",
+            "text/event-stream",
+            "text/x1",
+            "text/a+b",
+            "text/yaml",
+            "text/plain; format=flowed",
+            "text/html; Charset=UTF-8",
+            "application/json",
+            "APPLICATION/JSON",
+            " application/json",
+            "application/xml",
+            "application/javascript",
+            "application/x-javascript",
+            "application/ecmascript",
+            "application/x-ecmascript",
+            "application/graphql",
+            "application/x-yaml",
+            "application/soap+xml",
+            "application/problem+json",
+            "application/a-b+json",
+            "application/ab1+json",
+            "application/A-B+JSON",
+            "application/+json",
+            "application/foo+xml",
+            "application/graphql-response+json",
+            "application/json; charset=utf-8",
+            "application/json;charset=utf-8",
+            "application/json;  charset=utf-8",
+            "application/json; charset=\"utf-8\"",
+            "application/json; CHARSET=utf-8",
+            "application/json; charset=us-ascii",
+            "application/json; foo=bar",
+            "application/json; boundary=x",
+            "application/soap+xml; action=x",
+            "application/json, text/plain",
+            "application/pdf, application/json",
+        ];
+        for content_type in text {
+            assert!(TextMediaType::matches(content_type), "{content_type:?}");
+        }
+        let binary = [
+            "",
+            "foo",
+            "text",
+            "text/",
+            "text/*",
+            "*/*",
+            "text/a.b",
+            "text/x-foo_bar",
+            "text/vnd.foo",
+            "text/plain;x",
+            "text/plain; charset=iso-8859-1",
+            "text/plain; charset=x",
+            "application/octet-stream",
+            "application/x-www-form-urlencoded",
+            "application/x-www-form-urlencoded; charset=utf-8",
+            "multipart/form-data; boundary=x",
+            "image/png",
+            "image/svg+xml",
+            "image/foo+json",
+            "foo/bar+json",
+            "application/vnd.api+json",
+            "application/vnd.foo+xml",
+            "application/a.b+json",
+            "application/a_b+json",
+            "application/json+foo",
+            "application/foo+json+bar",
+            "application/foo+yaml",
+            "application/yaml",
+            "application/x-json",
+            "application/x-xml",
+            "application/x-graphql",
+            "application/ndjson",
+            "application/jsonx",
+            "application/xml-dtd",
+            "application/typescript",
+            "application/html",
+            "application/json;",
+            "application/json;x",
+            "application/json; foo",
+            "application/json; foo=",
+            "application/json ; charset=utf-8",
+            "application/json x",
+            "application/json,",
+            "application/json,x",
+            "application/json; foo=bar, x",
+            "application/json; foo=bar; baz=q",
+            "application/json; charset=utf-8; x=y",
+            "application/json; x=y; charset=utf-8",
+            "application/json; charset=utf8",
+            "application/json; charset=UTF-16",
+            "application/xml;charset=utf-16",
+        ];
+        for content_type in binary {
+            assert!(!TextMediaType::matches(content_type), "{content_type:?}");
+        }
+    }
+
+    #[test]
+    fn an_http_api_body_with_no_type_or_a_binary_one_is_base64() {
+        let mut ctx = incoming(b"hello");
+        ctx.api.kind = ApiKind::Http;
+        ctx.headers.remove(header::CONTENT_TYPE);
+        let untyped = EventBody::for_request(&ctx);
+        assert_eq!((untyped.body, untyped.is_base64), (json!("aGVsbG8="), true));
+        ctx.headers.insert(
+            header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded".parse().unwrap(),
+        );
+        assert!(EventBody::for_request(&ctx).is_base64);
+        ctx.headers
+            .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+        let text = EventBody::for_request(&ctx);
+        assert_eq!((text.body, text.is_base64), (json!("hello"), false));
+        ctx.body = Bytes::from_static(&[0xff, 0xfe]);
+        let lossy = EventBody::for_request(&ctx);
+        assert_eq!(
+            (lossy.body, lossy.is_base64),
+            (json!("\u{fffd}\u{fffd}"), false),
+            "text that is not UTF-8 is not encoded either"
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn any_content_type_is_classified(content_type in ".{0,60}") {
+            proptest::prop_assert!(content_type.contains('/') || !TextMediaType::matches(&content_type));
+        }
     }
 }

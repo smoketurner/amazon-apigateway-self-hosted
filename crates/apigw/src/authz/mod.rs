@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 
-pub(crate) use jwt::{IssuerEndpoint, KeyStore};
+pub(crate) use jwt::{Challenge, IssuerEndpoint, KeyStore};
 pub(crate) use policy::MethodArn;
 pub(crate) use resource_policy::{ResourcePolicies, RoutePolicy};
 
@@ -49,6 +49,9 @@ pub(crate) enum Denial {
     /// No credentials, credentials in the wrong shape, or an authorizer that
     /// said so: 401.
     Unauthorized,
+    /// An HTTP API JWT authorizer found no token or refused the one it got:
+    /// 401, with a `WWW-Authenticate` header saying why.
+    Challenged(Challenge),
     /// The authorizer's policy denies this method explicitly: 403.
     ExplicitDeny,
     /// The authorizer's policy does not allow this method: 403.
@@ -73,6 +76,9 @@ impl Denial {
     pub(crate) fn failure(&self, kind: ApiKind) -> Failure {
         match (self, kind) {
             (Self::Unauthorized, _) => Failure::new(ResponseType::Unauthorized),
+            (Self::Challenged(challenge), _) => {
+                Failure::new(ResponseType::Unauthorized).with_challenge(challenge.clone())
+            }
             (Self::ExplicitDeny, ApiKind::Rest) => Failure::new(ResponseType::AccessDenied)
                 .with_message(
                     "User is not authorized to access this resource with an explicit deny in an identity-based policy",

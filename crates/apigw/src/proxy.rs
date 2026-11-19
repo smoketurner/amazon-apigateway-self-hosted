@@ -145,14 +145,23 @@ impl HttpProxy {
         };
         let method = self.method.clone().unwrap_or_else(|| ctx.method.clone());
         self.request_mapping.apply(ctx, &mut headers, &mut url);
-        // A REST API tells the backend a body-less request has no body, for
-        // every method but GET and HEAD.
-        if ctx.api.kind == ApiKind::Rest
-            && body.is_empty()
-            && method != Method::GET
-            && method != Method::HEAD
-        {
+        // Measured: a REST API tells the backend a body-less request has no
+        // body for every method but GET and HEAD, an HTTP API for every
+        // method; and an HTTP API calls a request that names no type a form
+        // unless it is a GET.
+        let reads = method == Method::GET || method == Method::HEAD;
+        let says_empty = match ctx.api.kind {
+            ApiKind::Rest => !reads,
+            ApiKind::Http => true,
+        };
+        if body.is_empty() && says_empty {
             headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
+        }
+        if ctx.api.kind == ApiKind::Http && !reads && !headers.contains_key(header::CONTENT_TYPE) {
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/x-www-form-urlencoded"),
+            );
         }
         ctx.integration.transfer_mode = Some(self.transfer);
         let (client, url) = self.client_for(client, route, url, &mut headers).await?;
@@ -245,7 +254,7 @@ impl HttpProxy {
     /// The headers sent to the backend. REST APIs follow API Gateway's header
     /// table and add the headers API Gateway adds; HTTP APIs send what the
     /// client sent minus hop-by-hop headers, translate `X-Forwarded-*` into
-    /// `Forwarded`, and give body-less requests a `Content-Type`.
+    /// `Forwarded`, and name themselves in `Via`.
     fn request_headers(route: &Route, ctx: &RequestContext) -> HeaderMap {
         let mut headers = match ctx.api.kind {
             ApiKind::Rest => {
@@ -308,9 +317,9 @@ impl HttpProxy {
         }
     }
 
-    /// HTTP APIs translate `X-Forwarded-*` into `Forwarded`, and add a
-    /// `Content-Type` to requests with no body. The documentation does not say
-    /// which type; `application/octet-stream` is the neutral choice.
+    /// HTTP APIs translate `X-Forwarded-*` into `Forwarded`, and put
+    /// `HTTP/1.1 AmazonAPIGateway` in place of the first `Via` the client sent
+    /// (measured: later `Via` headers pass through).
     ///
     /// <https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-known-issues.html>
     fn add_http_api_headers(headers: &mut HeaderMap, ctx: &RequestContext) {
@@ -318,11 +327,18 @@ impl HttpProxy {
         if let Some(value) = forwarded.render(ctx.domain_name()) {
             headers.insert(header::FORWARDED, value);
         }
-        if ctx.body.is_empty() && !headers.contains_key(header::CONTENT_TYPE) {
-            headers.insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/octet-stream"),
-            );
+        let later: Vec<HeaderValue> = headers
+            .get_all(header::VIA)
+            .iter()
+            .skip(1)
+            .cloned()
+            .collect();
+        headers.insert(
+            header::VIA,
+            HeaderValue::from_static("HTTP/1.1 AmazonAPIGateway"),
+        );
+        for value in later {
+            headers.append(header::VIA, value);
         }
     }
 
@@ -1088,7 +1104,9 @@ mod tests {
         );
         assert!(headers.get("x-forwarded-for").is_none());
         assert!(headers.get("x-forwarded-proto").is_none());
-        assert_eq!(headers["content-type"], "application/octet-stream");
+        assert!(headers.get("content-type").is_none(), "a GET names no type");
+        assert_eq!(headers["content-length"], "0");
+        assert_eq!(headers["via"], "HTTP/1.1 AmazonAPIGateway");
         assert_eq!(
             headers["expect"], "100-continue",
             "HTTP APIs have no header table"

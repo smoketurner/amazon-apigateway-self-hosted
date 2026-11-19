@@ -14,6 +14,7 @@ use axum::http::{HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::Response;
 use serde_json::json;
 
+use crate::authz::Challenge;
 use crate::integration::ParamSource;
 use crate::model::{ApiKind, GatewayResponseSpec, ResponseType};
 use crate::pipeline::RequestContext;
@@ -234,6 +235,8 @@ pub(crate) struct Failure {
     spaced: bool,
     /// The `x-amzn-ErrorType` value, when it is not the response type's own.
     error_type: Option<&'static str>,
+    /// The `WWW-Authenticate` header an HTTP API JWT authorizer's refusal carries.
+    challenge: Option<Challenge>,
 }
 
 impl Failure {
@@ -261,6 +264,7 @@ impl Failure {
             validation: None,
             spaced: response_type.message_string_is_spaced(),
             error_type: None,
+            challenge: None,
         }
     }
 
@@ -273,6 +277,7 @@ impl Failure {
             validation: None,
             spaced: false,
             error_type: None,
+            challenge: None,
         }
     }
 
@@ -294,6 +299,13 @@ impl Failure {
     #[must_use]
     pub(crate) const fn with_error_type(mut self, error_type: &'static str) -> Self {
         self.error_type = Some(error_type);
+        self
+    }
+
+    /// Says in `WWW-Authenticate` why an HTTP API refused a token.
+    #[must_use]
+    pub(crate) fn with_challenge(mut self, challenge: Challenge) -> Self {
+        self.challenge = Some(challenge);
         self
     }
 
@@ -521,7 +533,13 @@ impl GatewayResponses {
     /// fallback type also applies to a customized type that sets none.
     pub(crate) fn render(&self, failure: &Failure, request: &RequestContext) -> Response {
         if request.api.kind == ApiKind::Http {
-            return Self::plain(failure.status, &failure.message);
+            let mut response = Self::plain(failure.status, &failure.message);
+            if let Some(challenge) = failure.challenge.clone() {
+                response
+                    .headers_mut()
+                    .insert(header::WWW_AUTHENTICATE, challenge.into_header());
+            }
+            return response;
         }
         if failure.response_type() == Some(ResponseType::RequestTooLarge) {
             return Self::request_too_large(request);

@@ -255,11 +255,15 @@ impl Flavor {
 /// `X-Forwarded-*` headers into a standard `Forwarded` header and will append the
 /// egress IP, Host, and protocol." The egress address is not knowable outside
 /// AWS, so no `by` parameter is added.
+///
+/// Measured on a deployed API: the header is one element,
+/// `by=...;for=a,for=b;host=...;proto=https`, with each address as it was
+/// sent (an IPv6 address is neither bracketed nor quoted) and the host the
+/// request was made to. A `Forwarded` or `X-Forwarded-Host` header from the
+/// client is discarded.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Forwarded {
-    prior: Vec<String>,
     clients: Vec<String>,
-    host: Option<String>,
 }
 
 impl Forwarded {
@@ -273,70 +277,37 @@ impl Forwarded {
                 .filter_map(|value| value.to_str().ok().map(str::to_owned))
                 .collect()
         };
-        let prior = values(headers, "forwarded");
+        headers.remove("forwarded");
         let clients = values(headers, "x-forwarded-for")
             .iter()
             .flat_map(|list| list.split(','))
             .map(|node| node.trim().to_owned())
             .filter(|node| !node.is_empty())
             .collect();
-        let host = values(headers, "x-forwarded-host").into_iter().next();
+        headers.remove("x-forwarded-host");
         headers.remove("x-forwarded-proto");
         headers.remove("x-forwarded-port");
-        Self {
-            prior,
-            clients,
-            host,
-        }
+        Self { clients }
     }
 
-    /// The translated header: earlier `Forwarded` elements, one `for=` element
-    /// per client address, and a closing element naming the host and protocol.
-    /// The gateway only serves TLS, so the protocol is `https`.
+    /// The translated header: one `for=` per address the request came through,
+    /// then the host it was made to and the protocol. The gateway only serves
+    /// TLS, so the protocol is `https`.
     pub(crate) fn render(&self, own_host: &str) -> Option<HeaderValue> {
-        let mut elements = self.prior.clone();
-        elements.extend(
-            self.clients
+        let mut parts = Vec::with_capacity(3);
+        if !self.clients.is_empty() {
+            let clients: Vec<String> = self
+                .clients
                 .iter()
-                .map(|node| format!("for={}", Self::node(node))),
-        );
-        let host = self.host.as_deref().unwrap_or(own_host);
-        let closing = if host.is_empty() {
-            "proto=https".to_owned()
-        } else {
-            format!("host={};proto=https", Self::quote_if_needed(host))
-        };
-        if self.clients.is_empty() {
-            elements.push(closing);
-        } else if let Some(last) = elements.last_mut() {
-            last.push(';');
-            last.push_str(&closing);
+                .map(|node| format!("for={node}"))
+                .collect();
+            parts.push(clients.join(","));
         }
-        HeaderValue::try_from(elements.join(", ")).ok()
-    }
-
-    /// A node identifier: IPv6 addresses are bracketed and quoted, ports and
-    /// obfuscated identifiers quoted as RFC 7239 requires.
-    fn node(node: &str) -> String {
-        if node.contains(':')
-            && !node.starts_with('[')
-            && node.parse::<std::net::Ipv6Addr>().is_ok()
-        {
-            format!("\"[{node}]\"")
-        } else {
-            Self::quote_if_needed(node)
+        if !own_host.is_empty() {
+            parts.push(format!("host={own_host}"));
         }
-    }
-
-    fn quote_if_needed(value: &str) -> String {
-        let token = value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte));
-        if token {
-            value.to_owned()
-        } else {
-            format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
-        }
+        parts.push("proto=https".to_owned());
+        HeaderValue::try_from(parts.join(";")).ok()
     }
 }
 
@@ -545,36 +516,32 @@ www-authenticate DDD RRR";
             ("x-forwarded-proto", "http"),
             ("x-forwarded-port", "8080"),
             ("x-forwarded-host", "public.example.com"),
+            ("forwarded", "for=192.0.2.60;proto=http"),
             ("x-keep", "1"),
         ]);
         let forwarded = Forwarded::take_from(&mut headers);
-        assert_eq!(headers.len(), 1, "every X-Forwarded-* header is removed");
+        assert_eq!(
+            headers.len(),
+            1,
+            "Forwarded and every X-Forwarded-* header are removed"
+        );
         assert_eq!(
             forwarded.render("api.example.com").unwrap(),
-            "for=203.0.113.7, for=198.51.100.2;host=public.example.com;proto=https"
+            "for=203.0.113.7,for=198.51.100.2;host=api.example.com;proto=https"
         );
 
-        let mut headers = map(&[("x-forwarded-for", "2001:db8::1")]);
+        let mut headers = map(&[("x-forwarded-for", "2001:db8::1, unknown")]);
         assert_eq!(
             Forwarded::take_from(&mut headers)
-                .render("api.example.com:8443")
+                .render("api.example.com")
                 .unwrap(),
-            "for=\"[2001:db8::1]\";host=\"api.example.com:8443\";proto=https"
+            "for=2001:db8::1,for=unknown;host=api.example.com;proto=https"
         );
 
         let mut headers = HeaderMap::new();
         assert_eq!(
             Forwarded::take_from(&mut headers).render("").unwrap(),
             "proto=https"
-        );
-
-        let mut headers = map(&[
-            ("forwarded", "for=192.0.2.60;proto=http"),
-            ("x-forwarded-for", "203.0.113.7"),
-        ]);
-        assert_eq!(
-            Forwarded::take_from(&mut headers).render("h").unwrap(),
-            "for=192.0.2.60;proto=http, for=203.0.113.7;host=h;proto=https"
         );
     }
 
