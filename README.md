@@ -19,32 +19,21 @@ Management's
 
 ## What it serves
 
-| API Gateway feature | Behavior in `apigw` |
-|---|---|
-| Resource paths, `{param}`, greedy `{proxy+}`, `ANY`, HTTP API `$default` | Routed exactly as API Gateway routes them |
-| `HTTP_PROXY` integrations | Forwarded, streaming the response; `requestParameters` path/query/header mappings and `timeoutInMillis` honored |
-| `AWS_PROXY` (Lambda) integrations | Invoked with the API Gateway proxy event, payload format 1.0 or 2.0, including qualified ARNs and aliases; REST payload 1.0 keeps the client's header case; 6 MB request/response limit (`502`) |
-| REST response streaming (`responseTransferMode: STREAM`) | Lambda via `InvokeWithResponseStream` (`.../response-streaming-invocations` URIs, metadata + 8 null bytes + payload), and `HTTP_PROXY`; up to 15 minutes, 5 minute idle limit |
-| `HTTP` (non-proxy) and `MOCK` integrations | The request is mapped by `requestParameters` and a Velocity request template chosen by `Content-Type` (`passthroughBehavior` and `415` when none applies, `contentHandling`), sent to the backend, and the integration response is selected by `selectionPattern`, mapped by `responseParameters`, and rendered with a response template chosen by `Accept` (`$context.requestOverride`/`responseOverride` honored). Client headers and query string reach an `HTTP` backend only when mapped |
-| Stage variables | Read from the stage and substituted into integration URIs; overridable locally |
-| Lambda authorizers | `TOKEN` and `REQUEST` (REST), `REQUEST` with payload 1.0/2.0 and simple responses (HTTP): invoked, cached by identity source, and the returned policy evaluated per method; `--insecure-skip-authorization` skips them |
-| Cognito user pool authorizers (REST), JWT authorizers (REST and HTTP) | Tokens are verified against the issuer's published keys, fetched over HTTPS (the gateway needs outbound access to the identity provider); claims and scopes are checked as API Gateway checks them; `--insecure-skip-authorization` skips them |
-| API keys and usage plans | REST APIs: a method that requires a key admits only an enabled key that belongs to a usage plan of the stage (`403 Forbidden` otherwise); the plan's throttles (plan-wide and per method) and day/week/month quotas count the key (`429`). Keys come from the `x-api-key` header or, with key source `AUTHORIZER`, from the Lambda authorizer's `usageIdentifierKey`. Key values are held only as SHA-256 hashes. `--insecure-skip-authorization` skips the check; HTTP APIs and `--openapi-file` sources cannot check keys and answer `403` |
-| IAM (`AWS_IAM`) auth | Cannot be verified outside AWS. REST answers `403 Missing Authentication Token`, HTTP `403 Forbidden`, unless `--insecure-skip-authorization` is set |
-| Resource policies | Evaluated in two phases as API Gateway evaluates them: an explicit `Deny` ends the request before authentication, then the policy is combined with the authorizer's decision per AWS's outcome tables. `aws:SourceIp` uses the trusted client address (see `--trusted-proxies`). Never skipped by `--insecure-skip-authorization`; a policy that cannot be read refuses every route with `403` |
-| Request validators and models | REST APIs: required query string and header parameters (present and not blank) answer `400` `BAD_REQUEST_PARAMETERS`, and request bodies are checked against the method's JSON Schema draft 4 model, with `$ref`s resolved against the API's own models, answering `400` `BAD_REQUEST_BODY`. Customized gateway responses apply, and `$context.error.validationErrorString` lists what the body violated. Never skipped by `--insecure-skip-authorization`; a route whose model cannot be compiled answers `501` ([differences](docs/parity.md#request-validation)) |
-| `AWS` service integrations | SQS, SNS, DynamoDB, Step Functions, Kinesis, EventBridge, and S3 (`action/` and `path/` URIs) and non-proxy Lambda (including `X-Amz-Invocation-Type: Event` and `selectionPattern` on the function's `errorMessage`), through the same request and response templates as `HTTP`; requests are signed with SigV4 using the integration's `credentials` role (or the gateway's own with `--integration-credentials=gateway`). `--aws-endpoint SERVICE=URL` sends a service to an emulator |
-| HTTP API integration subtypes | `SQS-SendMessage`, `SQS-ReceiveMessage`, `SQS-DeleteMessage`, `SQS-PurgeQueue`, `EventBridge-PutEvents`, `StepFunctions-StartExecution`, `StepFunctions-StartSyncExecution`, `StepFunctions-StopExecution`, `Kinesis-PutRecord`, and `AppConfig-GetConfiguration`, with parameters mapped from the request; the service's response is returned as it is |
-| VPC links (`HTTP_PROXY`) | Served from an in-cluster URL with `--vpc-link`; a link with no mapping answers `501` with the reason on `/routes` |
-| Unknown route | REST: `403 {"message":"Missing Authentication Token"}`; HTTP: `404 {"message":"Not Found"}` |
+- **Routing:** resource paths, `{param}`, greedy `{proxy+}`, `ANY`, and the HTTP API `$default`
+  route, matched as API Gateway matches them.
+- **Integrations:** `HTTP_PROXY`, `HTTP`, `MOCK`, Lambda (`AWS_PROXY`, payload 1.0 and 2.0,
+  response streaming), AWS service integrations, and VPC links mapped to in-cluster URLs.
+- **Mapping:** Velocity request and response templates, parameter mappings, stage variables,
+  and gateway responses.
+- **Authorization:** Lambda authorizers, Cognito and JWT authorizers, API keys and usage plans,
+  resource policies, and request validators. Protected routes answer `401`/`403` unless the
+  check passes; `AWS_IAM` cannot be verified outside AWS and is refused.
+- **Stage features:** throttling, response caching, canary releases, custom domains with
+  mutual TLS, access and execution logs, metrics, and X-Ray.
 
-The full feature matrix, with an issue link for every gap, is in [docs/parity.md](docs/parity.md).
-
-`/routes` on the admin listener lists, per route, its integration, the role it runs as, its
-protections, and any problems.
-
-Every response carries a request ID (`x-amzn-requestid` for REST APIs, `apigw-requestid` for
-HTTP APIs).
+Anything that cannot be served faithfully answers `501` and is reported on `/routes`, never
+approximated. [docs/parity.md](docs/parity.md) has the full feature matrix for REST and HTTP
+APIs, including every known difference from API Gateway.
 
 ## Quick start
 
@@ -55,257 +44,46 @@ apigw \
   --tls-cert /etc/apigw/tls/tls.crt --tls-key /etc/apigw/tls/tls.key
 ```
 
-Every flag has an environment variable (`apigw --help` lists them). The main ones:
+Install it with Helm, the `.rpm` or `.deb` package, or the container image:
+[docs/deployment.md](docs/deployment.md). It uses the standard AWS credential chain; the IAM
+permissions it needs are listed [there](docs/deployment.md#aws-permissions).
+
+The flags most deployments set (each has an environment variable; `apigw --help` lists all):
 
 | Flag | Env | Default | Purpose |
 |---|---|---|---|
 | `--rest-api-id` + `--stage` | `APIGW_REST_API_ID`, `APIGW_STAGE` | | Mirror a REST API stage |
-| `--http-api-id` + `--stage` | `APIGW_HTTP_API_ID`, `APIGW_STAGE` | | Mirror an HTTP API stage (the deployed configuration) |
-| `--openapi-file` + `--api-type` | `APIGW_OPENAPI_FILE` | `rest` | Serve an export from disk (no AWS calls for config) |
-| `--tls-cert`, `--tls-key` | `APIGW_TLS_CERT`, `APIGW_TLS_KEY` | required | PEM files; reloaded automatically when they change |
+| `--http-api-id` + `--stage` | `APIGW_HTTP_API_ID`, `APIGW_STAGE` | | Mirror an HTTP API stage |
+| `--domain-name` | `APIGW_DOMAIN_NAMES` | | Serve every API mapped to a custom domain instead of one API |
+| `--openapi-file` + `--api-type` | `APIGW_OPENAPI_FILE` | `rest` | Serve an export from disk, with no AWS calls for configuration |
+| `--tls-cert`, `--tls-key` | `APIGW_TLS_CERT`, `APIGW_TLS_KEY` | required | PEM files, reloaded when they change |
 | `--listen` | `APIGW_LISTEN` | `0.0.0.0:8443` | API traffic |
-| `--allowed-host` | `APIGW_ALLOWED_HOSTS` | any | Serve only these `Host` names (repeatable) and answer `403` to the rest, as API Gateway does for a host that is not the API's |
 | `--admin-listen` | `APIGW_ADMIN_LISTEN` | off | `/healthz` and `/routes` (also TLS) |
 | `--base-path` | `APIGW_BASE_PATH` | none | Serve under `/prod` etc., like an `execute-api` URL |
-| `--refresh-seconds` | `APIGW_REFRESH_SECONDS` | `60` | Re-download interval; `0` disables |
+| `--refresh-seconds` | `APIGW_REFRESH_SECONDS` | `60` | How often to check API Gateway for changes; `0` disables |
 | `--config-cache` | `APIGW_CONFIG_CACHE` | none | Last-known-good definition, used when AWS is unreachable at startup |
-| `--stage-variable NAME=VALUE` | `APIGW_STAGE_VARIABLE_<NAME>` | | Override a stage variable |
-| `--integration-overrides` | `APIGW_INTEGRATION_OVERRIDES` | none | Re-point individual routes (below) |
-| `--valkey-url` | `APIGW_VALKEY_URL` | unset | Valkey (or Redis-compatible) server holding throttle, usage-plan quota, and authorizer-cache state, so every replica counts against the same limits and `--replicas` no longer divides them. Use `rediss://`; `redis://` is accepted with a warning. Credentials in the URL are never logged. Unset keeps per-replica in-memory state |
-| `--valkey-ca-cert` | `APIGW_VALKEY_CA_CERT` | unset | PEM root certificate to trust for a `rediss://` server the system roots do not cover |
-| `--usage-refresh-seconds` | `APIGW_USAGE_REFRESH_SECONDS` | `60` | Seconds between reads of API keys, usage plans, and their associations (0 reads once); reads are paced for the account's control-plane limit |
-| `--insecure-skip-authorization` | `APIGW_INSECURE_SKIP_AUTHORIZATION` | off | Serve authorizer, API key, and IAM routes without checking credentials |
-| `--integration-credentials` | `APIGW_INTEGRATION_CREDENTIALS` | `assume` | `assume` runs integrations as their `credentials` role; `gateway` uses the gateway's own credentials |
-| `--vpc-link CONNECTION_ID=URL` | `APIGW_VPC_LINKS` | none | Serve a VPC link's integrations from an in-cluster URL (repeatable; [VPC links](docs/deployment.md#vpc-links)) |
-| `--issuer-endpoint ISSUER=URL` | `APIGW_ISSUER_ENDPOINTS` | none | Fetch a token issuer's signing keys from URL instead of from the issuer (an in-cluster mirror of the identity provider); plain `http` URLs are allowed and logged as a warning |
-| `--lambda-endpoint FUNCTION=URL` | `APIGW_LAMBDA_ENDPOINTS` | none | Invoke a function at a URL speaking Lambda's Invoke protocol (e.g. the Runtime Interface Emulator in-cluster) |
-| `--trusted-proxies` | `APIGW_TRUSTED_PROXIES` | none | Comma-separated CIDRs or addresses of proxies whose `X-Forwarded-For` and `X-Forwarded-Client-Cert` are believed ([Client IP](docs/deployment.md#client-ip)) |
-| `--trusted-proxy-hops` | `APIGW_TRUSTED_PROXY_HOPS` | `1` | Proxies between the client and `apigw`, counting the one that connects to it |
-| `--replicas` | `APIGW_REPLICAS` | `1` | Gateway replicas serving the API; throttle rates and bursts are divided by this because each replica keeps its own buckets ([parity](docs/parity.md#throttling-caching-and-releases)) |
-| `--proxy-protocol` | `APIGW_PROXY_PROTOCOL` | off | Require a PROXY protocol v2 header on `--listen`, from `--trusted-proxies` only |
-| `--access-logs` | `APIGW_ACCESS_LOGS` | `aws` | `aws` writes to the stage's access log destination, `stdout` writes lines to standard output, `off` writes none ([Observability](#observability)) |
-| `--execution-logs` | `APIGW_EXECUTION_LOGS` | `aws` | Same choices, for `loggingLevel`/`dataTraceEnabled` execution logs |
-| `--metrics-log-group` | `APIGW_METRICS_LOG_GROUP` | none | CloudWatch Logs log group (must exist) that receives metrics as embedded metric format events; metrics are off when unset |
-| `--metrics-namespace` | `APIGW_METRICS_NAMESPACE` | `ApiGatewaySelfHosted` | CloudWatch namespace for the metrics (`AWS/` is reserved) |
-| `--tracing` | `APIGW_TRACING` | `aws` | `aws` sends X-Ray segments for stages with tracing enabled and propagates trace headers; `off` does neither |
-| `--xray-sampling-percent` | `APIGW_XRAY_SAMPLING_PERCENT` | `5` | Percentage of requests traced after the first request each second, when the caller made no sampling decision |
-| `--domain-name NAME` | `APIGW_DOMAIN_NAMES` | none | Serve every API mapped to this custom domain (repeatable or comma-separated; `*.example.com` allowed) instead of one API ([Custom domains](#custom-domains)) |
-| `--domain-cert-dir DIR` | `APIGW_DOMAIN_CERT_DIR` | none | `DIR/{domain}/tls.crt` and `tls.key` per domain, served by SNI and reloaded on change; without it `--tls-cert` serves every domain |
-| `--canary-export-stage` | `APIGW_CANARY_EXPORT_STAGE` | none | REST stage that holds the canary deployment of `--stage`, exported to build the canary release ([Canary releases](#canary-releases)) |
-| `--log-stream` | `APIGW_LOG_STREAM` | `{HOSTNAME}/{start time}/{suffix}` | Log stream this process writes to in every log group |
 
-Logs are JSON on stdout by default (`--log-format text` for humans); filter with `RUST_LOG`.
+[docs/configuration.md](docs/configuration.md) lists every flag.
 
-## Pointing routes at different targets
+## Staying current with API Gateway
 
-The paths always come from API Gateway. The targets can be changed locally, two ways.
+Every `--refresh-seconds` `apigw` reads the stage and compares its deployment and last change
+with what it is serving. When either differs it downloads the definition again, builds a new
+router, and swaps it in without a restart: requests in flight finish on the old router, new
+ones use the new one. A refresh that fails (AWS unreachable, an invalid definition, a bad
+override file) keeps the current routes serving.
 
-**Stage variables** are API Gateway's own per-environment mechanism. If an integration URI is
-`http://${stageVariables.petsHost}/pets/{id}`, set `APIGW_STAGE_VARIABLE_petsHost=pets.default.svc:8080`.
-
-**Integration overrides** replace a route's integration outright, keyed by route key, using
-the same shape as `x-amazon-apigateway-integration`. This can turn a Lambda route into an
-HTTP route:
-
-```json
-{
-  "GET /pets/{petId}": {
-    "type": "http_proxy",
-    "httpMethod": "GET",
-    "uri": "http://pets.default.svc:8080/pets/{petId}"
-  },
-  "ANY /orders/{proxy+}": {
-    "type": "http_proxy",
-    "uri": "http://orders.default.svc:8080/{proxy}"
-  }
-}
-```
-
-The file is re-read on every refresh. A key that names no route rejects the whole update (the
-previous routes keep serving), so a typo never goes unnoticed.
-
-## Custom domains
-
-`--domain-name api.example.com` replaces `--rest-api-id`/`--http-api-id`: the process serves every
-API stage mapped to that custom domain in API Gateway, reading the domain's API mappings (and, for
-domains in a routing rule mode, its routing rules) and keeping them current every
-`--refresh-seconds`. The request's `Host` selects the domain; unknown hosts and requests no mapping
-matches answer `403 {"message":"Forbidden"}`.
-
-- **API mappings** are matched as API Gateway documents: with only single-level keys a request
-  goes to the mapping named by its first path segment, else the `(none)` mapping; when any key has
-  several levels, the longest matching prefix wins (`/ordersandmore` goes to `orders`). The matched
-  key is removed from the path, so `/orders/shop/5/hats` reaches the API as `/hats`.
-- **Routing rules** (`ROUTING_RULE_ONLY`, `ROUTING_RULE_THEN_API_MAPPING`) are evaluated by
-  ascending priority: header conditions (name case-insensitive, value case-sensitive, a `*`
-  wildcard at the start and/or end), a base path condition, and `stripBasePath`. A rule or mapping
-  whose API fails to load answers 503 until it loads.
-- **`/ping` and `/sping`** are reserved on every domain and answer `200` with `healthy`.
-- **REST and HTTP APIs** can be mapped to the same domain. Mappings do not say which kind an API
-  is, so each API ID is looked up as a REST API first.
-- **Certificates:** a client that asks for a domain name (SNI) gets that domain's certificate from
-  `--domain-cert-dir`, exact names before wildcards; everything else gets `--tls-cert`.
-- **Not supported with `--domain-name`:** `--stage`, `--base-path`, `--integration-overrides`,
-  `--config-cache`, and `--canary-export-stage` (each API serves its stage's deployment; a
-  stage with a canary serves both releases as in single-API mode).
-
-`/routes` lists each domain's mode, mappings, whether it requires client certificates, and
-loaded APIs.
-
-**Mutual TLS.** A domain with a `mutualTlsAuthentication` truststore requires client certificates.
-The truststore (`truststoreUri`, an `s3://bucket/key` PEM bundle of CA certificates, at
-`truststoreVersion` when set) is read from S3 at startup and on every refresh, and a changed
-bundle takes effect for new connections. Clients must present a certificate chained to a CA in the
-bundle that is currently valid, with an algorithm rustls accepts (SHA-256 or stronger, RSA 2048 or
-stronger, ECDSA); revocation is not checked, as on API Gateway. A client that fails verification
-has its connection closed in the handshake (API Gateway answers 403). A domain whose truststore
-cannot be loaded refuses every connection until it can, and requests whose `Host` names a mutual
-TLS domain but whose connection did not present a verified certificate (for example a different
-SNI name) answer `403`. Mutual TLS is verified by this gateway's own handshake, so put it behind a
-TCP passthrough with PROXY protocol, not a proxy that terminates TLS; certificates a trusted
-proxy forwards in `X-Forwarded-Client-Cert` are reported as `clientCert` but never satisfy a
-domain's requirement.
-
-The presented certificate is available as `$context.identity.clientCert.clientCertPem`,
-`.subjectDN`, `.issuerDN`, `.serialNumber`, `.validity.notBefore`, and `.validity.notAfter`
-(DNs as `C=US,O=Acme,CN=client`, dates as `May 28 12:30:02 2019 GMT`), in access logs, and in
-Lambda events as `requestContext.identity.clientCert` (REST and payload 1.0) or
-`requestContext.authentication.clientCert` (payload 2.0).
-
-## Canary releases
-
-A REST stage with canary settings serves two releases. Each request goes to the canary with
-probability `percentTraffic` (chosen with aws-lc-rs randomness; if randomness is unavailable the
-request goes to production), and the canary's `stageVariableOverrides` apply to its routes on top of
-the stage's variables. `--stage-variable` overrides apply to both releases and win over the
-canary's, so a variable you override locally is the same in both. `$context.isCanaryRequest` is
-`true` or `false` on stages that have a canary. Canary requests are also logged to the
-`{access log group}/Canary` and `API-Gateway-Execution-Logs_{apiId}/{stage}/Canary` log groups
-(created if missing) and counted in a second metric series whose `Stage` is `{stage}/Canary`.
-A canary at 0 percent builds no second release.
-
-API Gateway cannot export a canary deployment, so by default the canary release has the stage's
-routes and differs only in stage variables. To serve the canary deployment's routes, deploy it to
-a second stage of the same API (for example with `create-deployment --stage-name canary-shadow`)
-and pass `--canary-export-stage canary-shadow`: that stage's export builds the canary release
-whenever either stage's deployment changes, and its own stage variables and settings are ignored.
-`/routes` reports the canary release, its routes, and where its structure came from. `useStageCache`
-applies to [response caching](#response-caching): a canary uses the stage cache only with it,
-and shares entries with production only when it runs the same deployment.
-
-## Response caching
-
-A REST stage with `cacheClusterEnabled` caches responses in the state backend (per replica, in
-memory, until a shared backend is configured), so no cache cluster is provisioned or billed.
-
-- **Which methods:** those whose method settings enable caching. As on API Gateway, the stage-wide
-  `*/*` setting enables `GET` methods only; other methods need their own setting.
-- **TTL:** the method setting's `cacheTtlInSeconds` (default 300, at most 3600; 0 turns caching off).
-- **Key:** the method plus the values of the integration's `cacheKeyParameters` (method request
-  headers, query string parameters, and path parameters, or integration request parameters mapped
-  from them); an absent value is its own entry, and parameters that are not in the key do not
-  separate entries. A method with no key parameters has one entry.
-- **What is cached:** successful (2xx) responses of at most 1,048,576 bytes (status, headers, and
-  body); the response is read before it is sent, so a cached route does not stream its first
-  megabyte.
-- **`Cache-Control: max-age=0`:** with `requireAuthorizationForCacheControl` (the default) the
-  client must be authorized to invalidate, which needs IAM verification this gateway cannot do, so
-  every such request is handled as unauthorized: `FAIL_WITH_403` answers `403`,
-  `SUCCEED_WITH_RESPONSE_HEADER` (the default) serves the request normally with the header
-  `Warning: 199 Cache-control headers were ignored because the caller was unauthorized.`, and
-  `SUCCEED_WITHOUT_RESPONSE_HEADER` serves it silently. With `requireAuthorizationForCacheControl`
-  off, any client's `max-age=0` request bypasses the cache and replaces the entry.
-- **Metrics:** `CacheHitCount` and `CacheMissCount` are published for requests that used the
-  cache ([Observability](#observability)).
-
-## Observability
-
-Everything below is configured on the API Gateway stage, as on API Gateway itself, and applies
-without a redeploy of this container when the stage changes.
-
-**Access logs.** The stage's access log format is a template of `$context.*` variables
-(`$context.requestId`, `$context.identity.sourceIp`, `$context.status`,
-`$context.responseLength`, `$context.responseLatency`, `$context.integrationLatency`, ...),
-so CLF, JSON, XML, and CSV formats all work. A variable with no value renders as `-`, and
-values are JSON-escaped, so JSON formats stay valid. `$context.responseLength` is the
-`Content-Length` of the response and is `-` for streamed responses of unknown length.
-The destination ARN decides where lines go: a CloudWatch Logs log group
-(`arn:aws:logs:...:log-group:NAME`, which must exist) or a Firehose delivery stream
-(`arn:aws:firehose:...:deliverystream/amazon-apigateway-NAME`, records are newline-terminated).
-Anything else, or a stage with no destination, writes to standard output. A batch the
-destination rejects is written to standard output too.
-
-**Log streams.** Each process writes to its own stream in every CloudWatch Logs log group:
-`{HOSTNAME}/{start time}/{8 hex characters}`, so pods never share a stream and streams sort by
-start time. `--log-stream` sets a fixed name.
-
-**Metrics.** CloudWatch Logs extracts the metrics from embedded metric format events, so they
-are published to the log group in `--metrics-log-group` under `--metrics-namespace`. REST
-APIs publish `Count`, `4XXError`, `5XXError`, `Latency`, and `IntegrationLatency` with
-dimensions `ApiName, Stage`; with `metricsEnabled` on a method (or `*/*`) they also publish
-`ApiName, Method, Resource, Stage`. HTTP APIs publish `Count`, `4xx`, `5xx`, `Latency`,
-`IntegrationLatency` with `ApiId, Stage`, and with detailed metrics `ApiId, Method, Resource,
-Stage`. One event per series is written each minute, so the statistics differ from
-`AWS/ApiGateway`: use `Sum` for `Count` and the error metrics (`Average` and `SampleCount` do
-not mean what they do there), and treat `Latency`/`IntegrationLatency` percentiles and maxima as
-estimates, because each minute publishes at most 100 sampled values.
-
-**Execution logs.** REST stages with `loggingLevel` `ERROR` or `INFO` write a request trace to
-`API-Gateway-Execution-Logs_{apiId}/{stage}` (created if missing). `dataTraceEnabled` adds the
-query string and request headers (`Authorization`, `X-Api-Key`, and `Cookie` values are
-redacted). Request and response bodies are not logged, and events are cut at 1 KB as in API
-Gateway. HTTP APIs have no execution logs.
-
-**X-Ray.** REST stages with tracing enabled send one segment per sampled request (named
-`{API name}/{stage}`, origin `AWS::ApiGateway::Stage`, with the request, the response status, and
-`error`/`throttle`/`fault` flags) with `PutTraceSegments`. The trace comes from the caller's
-`X-Amzn-Trace-Id` or W3C `traceparent` when present, including its sampling decision, and is
-otherwise started here and sampled by X-Ray's default rule (the first request each second, then
-`--xray-sampling-percent`); X-Ray's sampling rules are not fetched. Integrations receive
-`X-Amzn-Trace-Id: Root=...;Parent={this gateway's segment};Sampled=...` (HTTP backends and
-Lambda, per call) and, for HTTP backends, `traceparent`. The segment has no subsegment for the
-integration call, and API Gateway's passive mode (segments only when a caller traced) is not
-reproduced. A stage without tracing leaves trace headers untouched.
-
-**Delivery.** Each destination has a bounded queue (10,000 events). When it is full the newest
-events are dropped and counted in a warning, so a slow destination never slows requests. Queues
-are flushed every 5 seconds, when a batch is full, and at shutdown.
-
-## Refresh and failure behavior
-
-- A refresh that fails (AWS unreachable, invalid definition, bad override file) keeps the
-  current routes and logs the error once per distinct bad input.
-- A successful download is written to `--config-cache`. At startup, if API Gateway is
-  unreachable, `apigw` starts from that cache.
-- Requests in flight finish on the router they started with; new requests use the new one.
-
-## AWS permissions
-
-`apigw` uses the standard AWS credential chain (environment, shared config/profile,
-`credential_process`, web identity). It needs:
-
-| Action | Resource | For |
-|---|---|---|
-| `apigateway:GET` | `arn:aws:apigateway:<region>::/restapis/<id>/stages/<stage>/exports/oas30`, `.../restapis/<id>/stages/<stage>` | REST APIs |
-| `apigateway:GET` | `arn:aws:apigateway:<region>::/restapis/<id>/resources` | `$context.resourceId` and `requestContext.resourceId` of a REST API; optional, they are empty without it |
-| `apigateway:GET` | the same two resources for the stage named by `--canary-export-stage` | canary releases from a shadow stage |
-| `apigateway:GET` | `arn:aws:apigateway:<region>::/usageplans`, `.../usageplans/*/keys`, `.../apikeys` | API keys and usage plans of a REST API stage |
-| `apigateway:GET` | `arn:aws:apigateway:<region>::/apis/<id>/exports/OAS30`, `.../apis/<id>/stages/<stage>` | HTTP APIs |
-| `apigateway:GET` | `arn:aws:apigateway:<region>::/v2/domainnames/<domain>`, `.../apimappings`, `.../routingrules`, `arn:aws:apigateway:<region>::/restapis/<id>` | `--domain-name` |
-| `s3:GetObject` | the truststore object of each mutual TLS domain (`s3:GetObjectVersion` when the domain pins a `truststoreVersion`) | mutual TLS |
-| `lambda:InvokeFunction` | each integrated function (and its aliases) and each Lambda authorizer function | `AWS_PROXY` and non-proxy `AWS` routes and Lambda authorizers; the same action covers `InvokeWithResponseStream` for streaming routes |
-| the service action the integration calls (`sqs:SendMessage`, `sqs:ReceiveMessage`, `sns:Publish`, `dynamodb:PutItem`, `dynamodb:GetItem`, `states:StartExecution`, `states:StartSyncExecution`, `kinesis:PutRecord`, `events:PutEvents`, `s3:GetObject`, `appconfig:GetConfiguration`, ...) | the queue, topic, table, state machine, stream, event bus, bucket, or configuration the route uses | REST `AWS` integrations and HTTP API integration subtypes; granted to each integration's `credentials` role, or to the gateway's own identity with `--integration-credentials=gateway` |
-| `sts:AssumeRole` | each integration `credentials` and each `authorizerCredentials` role | integrations and authorizers with a role, unless `--integration-credentials=gateway` |
-| `logs:CreateLogStream`, `logs:PutLogEvents` | each access log group, the metrics log group, and `arn:aws:logs:<region>:<account>:log-group:API-Gateway-Execution-Logs_<id>/<stage>:*` | access logs, metrics, execution logs |
-| `logs:CreateLogGroup` | `arn:aws:logs:<region>:<account>:log-group:API-Gateway-Execution-Logs_*`, and each access log group with `/Canary` appended | execution logs, and canary access logs (the only log groups the gateway creates) |
-| `xray:PutTraceSegments` | `*` | stages with tracing enabled |
-| `firehose:PutRecordBatch` | each access log delivery stream | access logs to Firehose |
+`/routes` on the admin listener lists, per route, its integration, the role it runs as, its
+protections, and any problems. Every response carries a request ID (`x-amzn-requestid` for REST
+APIs, `apigw-requestid` for HTTP APIs).
 
 ## Documentation
 
 | Doc | Covers |
 |---|---|
-| [docs/deployment.md](docs/deployment.md) | Installing with Helm, the `.rpm` and `.deb` packages, or the container image; Istio, certificates, credentials outside AWS |
+| [docs/deployment.md](docs/deployment.md) | Installing with Helm, the `.rpm` and `.deb` packages, or the container image; Istio, certificates, credentials and IAM permissions |
+| [docs/configuration.md](docs/configuration.md) | Every flag, stage variables and integration overrides, refresh and failure behavior |
+| [docs/operations.md](docs/operations.md) | Custom domains and mutual TLS, canary releases, response caching, logs, metrics, and tracing |
 | [docs/parity.md](docs/parity.md) | Feature matrix: what is supported, partial, planned, or not possible, for REST and HTTP APIs |
 | [docs/architecture.md](docs/architecture.md) | Modules, request flow, the accept loop, router swapping |
 | [docs/crypto.md](docs/crypto.md) | aws-lc-rs as the only crypto provider |

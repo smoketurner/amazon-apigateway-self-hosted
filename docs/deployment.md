@@ -31,7 +31,7 @@ The chart needs an API source and a certificate, and fails to render without the
   keys as environment variables; `aws.webIdentity.roleArn` projects a service account token
   and sets `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE`; `aws.configFile` and
   `aws.sharedCredentialsFile` (empty by default) point at files you mount with `extraVolumes`.
-- `replicaCount` is also passed as `--replicas`; `valkey.existingSecret` shares throttle state.
+- `replicaCount` is also passed as `--replicas`; `valkey.existingSecret` shares throttle, quota, and cache state between replicas.
 - `cache.existingClaim` keeps the last-known-good definition on a PersistentVolumeClaim
   instead of an `emptyDir`.
 - `istio.destinationRule.enabled` renders the DestinationRule shown under [Istio](#istio).
@@ -132,9 +132,31 @@ Off AWS there is no IRSA or EKS Pod Identity. Options, in order of preference:
    IAM OIDC provider, set `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE` to a projected
    service-account token.
 3. **Static access keys** from a Secret (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) —
-   simplest, but long-lived; scope the IAM user to the permissions in the README.
+   simplest, but long-lived; scope the IAM user to the [permissions below](#aws-permissions).
 
 Always set `AWS_REGION` to the API's region.
+
+## AWS permissions
+
+`apigw` uses the standard AWS credential chain (environment, shared config/profile,
+`credential_process`, web identity). It needs:
+
+| Action | Resource | For |
+|---|---|---|
+| `apigateway:GET` | `arn:aws:apigateway:<region>::/restapis/<id>/stages/<stage>/exports/oas30`, `.../restapis/<id>/stages/<stage>` | REST APIs |
+| `apigateway:GET` | `arn:aws:apigateway:<region>::/restapis/<id>/resources` | `$context.resourceId` and `requestContext.resourceId` of a REST API; optional, they are empty without it |
+| `apigateway:GET` | the same two resources for the stage named by `--canary-export-stage` | canary releases from a shadow stage |
+| `apigateway:GET` | `arn:aws:apigateway:<region>::/usageplans`, `.../usageplans/*/keys`, `.../apikeys` | API keys and usage plans of a REST API stage |
+| `apigateway:GET` | `arn:aws:apigateway:<region>::/apis/<id>/exports/OAS30`, `.../apis/<id>/stages/<stage>` | HTTP APIs |
+| `apigateway:GET` | `arn:aws:apigateway:<region>::/v2/domainnames/<domain>`, `.../apimappings`, `.../routingrules`, `arn:aws:apigateway:<region>::/restapis/<id>` | `--domain-name` |
+| `s3:GetObject` | the truststore object of each mutual TLS domain (`s3:GetObjectVersion` when the domain pins a `truststoreVersion`) | mutual TLS |
+| `lambda:InvokeFunction` | each integrated function (and its aliases) and each Lambda authorizer function | `AWS_PROXY` and non-proxy `AWS` routes and Lambda authorizers; the same action covers `InvokeWithResponseStream` for streaming routes |
+| the service action the integration calls (`sqs:SendMessage`, `sqs:ReceiveMessage`, `sns:Publish`, `dynamodb:PutItem`, `dynamodb:GetItem`, `states:StartExecution`, `states:StartSyncExecution`, `kinesis:PutRecord`, `events:PutEvents`, `s3:GetObject`, `appconfig:GetConfiguration`, ...) | the queue, topic, table, state machine, stream, event bus, bucket, or configuration the route uses | REST `AWS` integrations and HTTP API integration subtypes; granted to each integration's `credentials` role, or to the gateway's own identity with `--integration-credentials=gateway` |
+| `sts:AssumeRole` | each integration `credentials` and each `authorizerCredentials` role | integrations and authorizers with a role, unless `--integration-credentials=gateway` |
+| `logs:CreateLogStream`, `logs:PutLogEvents` | each access log group, the metrics log group, and `arn:aws:logs:<region>:<account>:log-group:API-Gateway-Execution-Logs_<id>/<stage>:*` | access logs, metrics, execution logs |
+| `logs:CreateLogGroup` | `arn:aws:logs:<region>:<account>:log-group:API-Gateway-Execution-Logs_*`, and each access log group with `/Canary` appended | execution logs, and canary access logs (the only log groups the gateway creates) |
+| `xray:PutTraceSegments` | `*` | stages with tracing enabled |
+| `firehose:PutRecordBatch` | each access log delivery stream | access logs to Firehose |
 
 ## Integration roles
 

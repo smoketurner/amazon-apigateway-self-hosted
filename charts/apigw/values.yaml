@@ -1,5 +1,5 @@
 # Values for the apigw chart. Every apigw flag has an APIGW_* environment
-# variable (README.md); anything without a value here goes in `extraEnv`.
+# variable (docs/configuration.md); anything without a value here goes in `extraEnv`.
 
 image:
   repository: ghcr.io/smoketurner/amazon-apigateway-self-hosted
