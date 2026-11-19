@@ -58,10 +58,14 @@ Never enable `native-tls`, `default-tls`, a `ring` feature, or the AWS SDK's
 feature fails `cargo deny check`. Double-check the resolved graph after wiring up TLS:
 
 ```bash
-cargo tree -i ring          # expect: "package ID specification ... did not match any packages"
-cargo tree -i openssl-sys   # expect: no match
-cargo tree -i aws-lc-rs     # expect: aws-lc-rs present, pulled by rustls
+cargo tree --target all -i ring          # expect: "nothing to print" (locked as an unused optional dependency)
+cargo tree --target all -i openssl-sys   # expect: "did not match any packages"
+cargo tree --target all -i aws-lc-rs     # expect: aws-lc-rs present, pulled by rustls
 ```
+
+Both answers for `ring` and `openssl-sys` mean the crate is not built. `ring` stays in
+`Cargo.lock` because `rustls-webpki` and `quinn-proto` list it as an optional dependency; the
+release gate therefore looks at what the command prints, not at its exit status.
 
 An empty result for `ring`/`openssl-sys` and a present `aws-lc-rs` confirms the single-
 provider setup. Make `cargo deny check` part of CI (it already is) so regressions are caught

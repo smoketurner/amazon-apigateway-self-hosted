@@ -98,8 +98,13 @@ jobs:
       - name: Crypto gates (aws-lc-rs only, no ring or OpenSSL)
         run: |
           set -euo pipefail
+          # A crate that is only in Cargo.lock as an unused optional dependency
+          # makes cargo tree print nothing and succeed; one that is not locked
+          # at all makes it fail. Only printed lines mean the crate is built.
           for crate in ring openssl-sys; do
-            if cargo tree --locked --invert "${crate}" > /dev/null 2>&1; then
+            users="$(cargo tree --locked --target all --invert "${crate}" 2> /dev/null || true)"
+            if [ -n "${users}" ]; then
+              echo "${users}"
               echo "::error::${crate} is in the dependency graph (docs/crypto.md)"
               exit 1
             fi
