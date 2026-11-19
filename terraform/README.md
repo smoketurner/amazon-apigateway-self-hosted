@@ -167,7 +167,7 @@ The gateway's logs are in the `log_group_name` from the `ecs_gateway` output. Se
 second point of comparison. `apigw` is a server with TLS-only listeners and Lambda delivers
 events, so the image (`modules/lambda-gateway/image`) adds two things beside it: the
 [Lambda Web Adapter](https://github.com/awslabs/aws-lambda-web-adapter), which turns events
-into HTTP requests, and `socat`, which bridges the adapter's plain HTTP on loopback to
+into HTTP requests, and nginx, which bridges the adapter's plain HTTP on loopback to
 `apigw`'s TLS listener, because the adapter cannot speak TLS to the application. `apigw`
 itself is unchanged.
 
@@ -180,9 +180,10 @@ as the API it mirrors; the admin listener is not exposed.
 What to expect when comparing it with the real API: status codes and bodies match, as on ECS,
 but the function URL remaps the gateway's own `x-amzn-RequestId`, `Date`, and `Content-Length`
 response headers to `x-amzn-Remapped-*` and adds its own, and it lower-cases request header
-names. Routes with an `HTTP_PROXY` integration answer `502` from the function URL itself even
-though `apigw` answered correctly (its log shows the real status): those responses already carry
-`x-amzn-Remapped-*` headers from the backend, which is the likely cause but is not confirmed.
+names. A response that already carries `x-amzn-Remapped-*` headers, as an `HTTP_PROXY`
+integration's does, made the function URL answer `502` although `apigw` had answered correctly,
+so the bridge removes those headers; they cannot be compared on this deployment. The bridge
+also answers a malformed escape in the path itself, with nginx's `400` page.
 
 The function needs its image to exist, so it takes two applies:
 

@@ -19,5 +19,4 @@ export APIGW_TRUSTED_PROXIES=127.0.0.1/32
 
 apigw &
 
-exec socat "TCP-LISTEN:${AWS_LWA_PORT},bind=127.0.0.1,fork,reuseaddr" \
-  OPENSSL:127.0.0.1:8443,verify=0
+exec nginx -e /dev/stderr -c /etc/apigw-bridge/nginx.conf
