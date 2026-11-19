@@ -50,7 +50,7 @@ To release:
 
 | Job | Does |
 |---|---|
-| `gates` | Fails unless the tag is a calendar version equal to the `apigw` crate version. Then fmt, clippy, tests, the parity replay, the crypto gates, `cargo-deny`, and the release notes: the commits since the previous tag, grouped by type with git-cliff (`cliff.toml`). There is no `CHANGELOG.md`. |
+| `gates` | Fails unless the tag is a calendar version equal to the `apigw` crate version. Then fmt, clippy, tests, the parity replay, the crypto gates, `cargo-deny`, and the release notes: the commits since the previous released tag, grouped by type with git-cliff (`cliff.toml`; a tag whose release never happened is listed under `ignore_tags`). There is no `CHANGELOG.md`. |
 | `build` | Calls `reusable-build.yml` (below). |
 | `publish` | Verifies each artifact's checksum, writes `SHA256SUMS`, and creates the GitHub release with every asset in one call. Releases are immutable, so nothing can be added later. |
 | `publish-packages` | Copies the `.rpm` and `.deb` files into `smoketurner/packages`, regenerates and signs the YUM and APT metadata, and pushes with a deploy key. That repository's own workflow syncs it to the bucket behind `packages.smoketurner.com`. If another project pushed first, the job starts again from the new commit, up to three times. |
