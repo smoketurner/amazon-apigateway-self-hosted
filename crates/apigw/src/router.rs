@@ -21,7 +21,7 @@ use crate::cache::CacheSettings;
 use crate::canary::{CanaryRelease, CanarySummary};
 use crate::domain::{DomainName, DomainRegistry, DomainSummary, Resolution};
 use crate::gateway::{ApiContext, Enforcement, GatewayError, RequestId};
-use crate::http_routes::{HttpRoutes, PathPattern};
+use crate::http_routes::{HttpRoutes, PathPattern, decoded_path};
 use crate::identity::ClientIdentity;
 use crate::integration::Integration;
 use crate::model::{ApiKind, ApiModel, MethodMatch, Protections, RouteKey, RoutePath};
@@ -198,7 +198,8 @@ struct HttpHandler {
 
 impl HttpHandler {
     async fn handle(&self, mut request: Request) -> Response {
-        let selection = self.routes.select(request.uri().path(), request.method());
+        let path = decoded_path(request.uri().path());
+        let selection = self.routes.select(&path, request.method());
         let pending =
             self.ctx
                 .observer

@@ -1982,6 +1982,10 @@ async fn rest_jwt_keys_are_cached_for_at_most_an_hour() {
     assert_eq!(first.jwks_hits(), 1);
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(3601)).await;
+    // The request below does real socket I/O. With the clock still paused the
+    // runtime auto-advances whenever it is idle waiting on that I/O, which
+    // fires the request's timeouts at random.
+    tokio::time::resume();
     assert_eq!(get_with(&h, "/orders", &token).await, StatusCode::OK);
     assert_eq!(
         first.jwks_hits(),

@@ -381,8 +381,17 @@ async fn an_allowing_token_authorizer_reaches_the_backend_with_its_context() {
         event["methodArn"],
         "arn:aws:execute-api:us-east-1:123456789012:abc/prod/GET/pets/7"
     );
+    let mut authorizer = h.backend_authorizer();
+    let latency = authorizer
+        .as_object_mut()
+        .unwrap()
+        .remove("integrationLatency");
+    assert!(
+        latency.is_some_and(|millis| millis.is_u64()),
+        "the time the function took, in milliseconds"
+    );
     assert_eq!(
-        h.backend_authorizer(),
+        authorizer,
         json!({"principalId": "user-1", "tenant": "acme", "n": "5", "flag": "true"}),
         "REST context values reach the backend as strings"
     );

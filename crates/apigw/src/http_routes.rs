@@ -66,8 +66,8 @@ impl PathPattern {
         self.0.iter().map(Segment::rank).collect()
     }
 
-    /// The path parameters if `path` matches. Parameters and greedy values
-    /// must be non-empty; a greedy value keeps its slashes.
+    /// The path parameters if `path` matches. A parameter must be non-empty;
+    /// a greedy value keeps its slashes and may be empty.
     fn captures(&self, path: &str) -> Option<Vec<(String, String)>> {
         let mut parts = path.strip_prefix('/')?.split('/');
         let mut captured = Vec::new();
@@ -83,9 +83,19 @@ impl PathPattern {
                     captured.push((name.clone(), value.to_owned()));
                 }
                 Segment::Greedy(name) => {
-                    let value = parts.by_ref().collect::<Vec<_>>().join("/");
-                    if value.is_empty() {
+                    // The slash before the greedy segment must be there, but
+                    // nothing need follow it: `/files/` gives an empty value
+                    // and `/files` does not match. That is measured for a
+                    // greedy segment under a prefix; a bare `/{proxy+}` keeps
+                    // needing a value, so `/` stays with `$default`.
+                    let first = parts.next()?;
+                    if first.is_empty() && self.0.len() == 1 {
                         return None;
+                    }
+                    let mut value = first.to_owned();
+                    for part in parts.by_ref() {
+                        value.push('/');
+                        value.push_str(part);
                     }
                     captured.push((name.clone(), value));
                     return Some(captured);
@@ -94,6 +104,36 @@ impl PathPattern {
         }
         parts.next().is_none().then_some(captured)
     }
+}
+
+/// A request path as an HTTP API reads it (measured against a deployed API):
+/// percent-decoded, with runs of slashes collapsed to one. Routing, path
+/// parameters, `rawPath`, and `$context.path` all use this form.
+pub(crate) fn decoded_path(sent: &str) -> String {
+    let mut bytes = Vec::with_capacity(sent.len());
+    let mut rest = sent.bytes();
+    while let Some(byte) = rest.next() {
+        let mut escape = rest.clone();
+        let decoded = match (byte, escape.next(), escape.next()) {
+            (b'%', Some(high), Some(low)) => char::from(high)
+                .to_digit(16)
+                .zip(char::from(low).to_digit(16))
+                .and_then(|(high, low)| u8::try_from((high << 4) | low).ok()),
+            _ => None,
+        };
+        let byte = match decoded {
+            Some(decoded) => {
+                rest = escape;
+                decoded
+            }
+            None => byte,
+        };
+        if byte == b'/' && bytes.last() == Some(&b'/') {
+            continue;
+        }
+        bytes.push(byte);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 #[derive(Debug)]
@@ -203,6 +243,22 @@ mod tests {
         table
     }
 
+    /// Measured against a deployed HTTP API.
+    #[test]
+    fn paths_are_decoded_and_their_slashes_collapsed() {
+        for (sent, read) in [
+            ("/lambda-v2/a%20b%2Fc/d", "/lambda-v2/a b/c/d"),
+            ("/lambda-v2/a//b/", "/lambda-v2/a/b/"),
+            ("//throttled", "/throttled"),
+            ("/a%2F%2Fb", "/a/b"),
+            ("/plain", "/plain"),
+            ("/bad%zz%2", "/bad%zz%2"),
+            ("/", "/"),
+        ] {
+            assert_eq!(decoded_path(sent), read, "{sent}");
+        }
+    }
+
     fn chosen(table: &HttpRoutes, method: &Method, path: &str) -> Option<String> {
         table
             .select(path, method)
@@ -290,7 +346,14 @@ mod tests {
         );
         assert!(table.select("/files/7", &Method::GET).is_none());
         assert!(table.select("/files//x", &Method::GET).is_none());
-        assert!(table.select("/files/7/", &Method::GET).is_none());
+        assert_eq!(
+            table.select("/files/7/", &Method::GET).unwrap().params,
+            vec![
+                ("id".to_owned(), "7".to_owned()),
+                ("rest".to_owned(), String::new())
+            ],
+            "a greedy value may be empty once its slash is there"
+        );
         assert_eq!(chosen(&table, &Method::GET, "/").as_deref(), Some("GET /"));
     }
 

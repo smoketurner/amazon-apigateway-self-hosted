@@ -97,9 +97,12 @@ impl ResponseType {
             Self::ApiConfigurationError => "ApiConfigurationException",
             Self::AuthorizerConfigurationError => "AuthorizerConfigurationException",
             Self::AuthorizerFailure => "AuthorizerFailureException",
-            Self::BadRequestBody | Self::BadRequestParameters | Self::Default4xx => {
-                "BadRequestException"
-            }
+            // `UnsupportedMediaType` too: a deployed API does not say
+            // `UnsupportedMediaTypeException`.
+            Self::BadRequestBody
+            | Self::BadRequestParameters
+            | Self::Default4xx
+            | Self::UnsupportedMediaType => "BadRequestException",
             Self::Default5xx => "InternalFailureException",
             Self::ExpiredToken => "ExpiredTokenException",
             Self::IntegrationFailure => "IntegrationFailureException",
@@ -112,7 +115,6 @@ impl ResponseType {
             Self::ResourceNotFound => "NotFoundException",
             Self::Throttled => "TooManyRequestsException",
             Self::Unauthorized => "UnauthorizedException",
-            Self::UnsupportedMediaType => "UnsupportedMediaTypeException",
             Self::WafFiltered => "WafFilteredException",
         }
     }

@@ -21,6 +21,7 @@ use uuid::Uuid;
 use crate::canary::Release;
 use crate::gateway::{ApiContext, RequestId};
 use crate::header_case::HeaderCase;
+use crate::http_routes::decoded_path;
 use crate::identity::ClientIdentity;
 use crate::integration::StageVariables;
 use crate::model::{ApiKind, PayloadVersion, ResponseTransferMode, RouteKey};
@@ -174,6 +175,18 @@ impl AuthorizerContext {
         &self.values
     }
 
+    /// Records how long the authorizer function took, which a REST API
+    /// reports as `$context.authorizer.integrationLatency` and in Lambda
+    /// proxy events, in milliseconds.
+    pub(crate) fn set_integration_latency(&mut self, latency: std::time::Duration) {
+        let millis = json!(u64::try_from(latency.as_millis()).unwrap_or(u64::MAX));
+        self.values
+            .insert("integrationLatency".to_owned(), millis.clone());
+        if let Some(ref mut event) = self.event {
+            event.insert("integrationLatency".to_owned(), millis);
+        }
+    }
+
     /// The value of `requestContext.authorizer` in a Lambda proxy event of this
     /// payload version, if an authorizer ran.
     pub(crate) fn event_value(&self, version: PayloadVersion) -> Option<Value> {
@@ -263,6 +276,8 @@ pub(crate) struct RequestContext {
     /// The path as the client sent it, including a stage prefix served with
     /// `--base-path` (`/prod/pets/7`): `$context.path`, and HTTP APIs' `rawPath`.
     pub(crate) full_path: String,
+    /// The path exactly as the client sent it, stage prefix and escapes included.
+    pub(crate) sent_path: String,
     pub(crate) query: QueryString,
     pub(crate) headers: HeaderMap,
     /// The client's spelling of header names, known for HTTP/1 requests.
@@ -383,10 +398,21 @@ impl RequestContext {
             tracing::warn!("request reached the pipeline without a client identity");
             ClientIdentity::unknown()
         });
-        let full_path = extensions
+        let sent_path = extensions
             .get::<OriginalUri>()
             .map_or_else(|| uri.path(), |original| original.0.path())
             .to_owned();
+        // An HTTP API works with the decoded path everywhere but in the
+        // payload 1.0 event's `path`; a REST API never decodes it.
+        let (path, full_path) = match api.kind {
+            ApiKind::Http => (decoded_path(uri.path()), decoded_path(&sent_path)),
+            ApiKind::Rest => (
+                extensions
+                    .remove::<ReportedPath>()
+                    .map_or_else(|| uri.path().to_owned(), |reported| reported.0),
+                sent_path.clone(),
+            ),
+        };
         let (route_key, resource_path) = match route {
             Some(route) => (route.key.clone(), route.path.to_string()),
             None => (RouteKey::from(""), uri.path().to_owned()),
@@ -404,10 +430,9 @@ impl RequestContext {
             request_id,
             received: jiff::Timestamp::now(),
             method,
-            path: extensions
-                .remove::<ReportedPath>()
-                .map_or_else(|| uri.path().to_owned(), |reported| reported.0),
+            path,
             full_path,
+            sent_path,
             query: QueryString::for_api(api.kind, uri.query()),
             headers,
             header_case,
@@ -603,6 +628,7 @@ pub(crate) mod tests {
             method: Method::POST,
             path: "/pets/7".to_owned(),
             full_path: "/prod/pets/7".to_owned(),
+            sent_path: "/prod/pets/7".to_owned(),
             query: QueryString::new(Some("q=1&q=2")),
             headers,
             header_case: HeaderCase::default(),

@@ -5,7 +5,7 @@
 //! it returns by identity source, and evaluates the returned policy against the
 //! method being called on every request, cached or not.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use serde::Deserialize;
@@ -232,13 +232,24 @@ impl LambdaAuthorizer {
         }
         let cache_key =
             (!self.ttl.is_zero() && !identity.is_empty()).then(|| self.cache_key(ctx, &identity));
+        let rest = ctx.api.kind == ApiKind::Rest;
         if let Some(ref key) = cache_key
             && let Some(cached) = self.cached(request.state, key).await
         {
-            return Ok(cached.authorize(&arn));
+            let mut authorized = cached.authorize(&arn);
+            if rest {
+                authorized.context.set_integration_latency(Duration::ZERO);
+            }
+            return Ok(authorized);
         }
+        let started = Instant::now();
         let answer = self.invoke(request, &identity, &arn).await?;
-        let authorized = answer.response.authorize(&arn);
+        let mut authorized = answer.response.authorize(&arn);
+        if rest {
+            authorized
+                .context
+                .set_integration_latency(started.elapsed());
+        }
         if let Some(key) = cache_key {
             self.remember(
                 request.state,

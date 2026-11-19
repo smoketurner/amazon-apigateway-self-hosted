@@ -17,6 +17,7 @@ use tokio::time::Instant as TokioInstant;
 use crate::authz::MethodArn;
 use crate::aws::AwsClients;
 use crate::gateway::GatewayError;
+use crate::header_case::HeaderCase;
 use crate::header_policy::{Flavor, IamAuthorization};
 use crate::integration::{LambdaProxy, StageVariables};
 use crate::lambda_response::{PreludeError, ProxyResponse, StreamBody, StreamPrelude};
@@ -236,7 +237,63 @@ impl EventBody {
     }
 }
 
-/// Headers a REST API writes into an event itself; what the client sent under
+/// How an event spells header names (measured against deployed APIs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventSpelling {
+    /// REST payload 1.0: the client's spelling, but `Host`, `User-Agent`, and
+    /// `Authorization`.
+    Rest,
+    /// HTTP API payload 1.0: the client's spelling, but `Host`, `User-Agent`,
+    /// `Cookie`, and `Content-Length`, and a lower-case `accept`.
+    HttpV1,
+    /// HTTP API payload 2.0: lower case.
+    Lower,
+}
+
+impl EventSpelling {
+    const fn of(kind: ApiKind, version: PayloadVersion) -> Self {
+        match (kind, version) {
+            (ApiKind::Rest, PayloadVersion::V1 | PayloadVersion::V2) => Self::Rest,
+            (ApiKind::Http, PayloadVersion::V1) => Self::HttpV1,
+            (ApiKind::Http, PayloadVersion::V2) => Self::Lower,
+        }
+    }
+
+    /// The fixed spelling this style gives the lower-case header `name`, if any.
+    fn fixed(self, name: &str) -> Option<&'static str> {
+        let always = match name {
+            "host" => Some("Host"),
+            "user-agent" => Some("User-Agent"),
+            "authorization" => Some("Authorization"),
+            "x-forwarded-for" => Some("X-Forwarded-For"),
+            "x-forwarded-port" => Some("X-Forwarded-Port"),
+            "x-forwarded-proto" => Some("X-Forwarded-Proto"),
+            "x-amzn-trace-id" => Some("X-Amzn-Trace-Id"),
+            _ => None,
+        };
+        match self {
+            Self::Lower => None,
+            Self::Rest => always,
+            Self::HttpV1 => always.or(match name {
+                "cookie" => Some("Cookie"),
+                "content-length" => Some("Content-Length"),
+                "accept" => Some("accept"),
+                _ => None,
+            }),
+        }
+    }
+
+    /// How the lower-case header `name` appears in the event.
+    fn name<'n>(self, name: &'n str, sent: &'n HeaderCase) -> Cow<'n, str> {
+        match (self, self.fixed(name)) {
+            (Self::Lower, _) => Cow::Borrowed(name),
+            (Self::Rest | Self::HttpV1, Some(fixed)) => Cow::Borrowed(fixed),
+            (Self::Rest | Self::HttpV1, None) => Cow::Borrowed(sent.spelling(name)),
+        }
+    }
+}
+
+/// Headers API Gateway writes into an event itself; what the client sent under
 /// these names is folded into the gateway's own values.
 const GATEWAY_EVENT_HEADERS: [&str; 4] = [
     "x-forwarded-for",
@@ -385,42 +442,45 @@ impl<'a> ProxyEvent<'a> {
         }
     }
 
-    /// Header names as the event spells them: REST payload 1.0 keeps the
-    /// client's case, everything else is lower case.
-    fn headers(&self) -> MultiValues {
-        let keep_case = self.ctx.api.kind == ApiKind::Rest;
+    /// The request's headers as the event names them.
+    fn headers(&self, version: PayloadVersion) -> MultiValues {
+        let spelling = EventSpelling::of(self.ctx.api.kind, version);
         let allowed = match self.header_table {
-            Some(iam) if keep_case => {
+            Some(iam) if spelling == EventSpelling::Rest => {
                 Cow::Owned(Flavor::Lambda.request_headers(&self.ctx.headers, iam))
             }
             Some(_) | None => Cow::Borrowed(&self.ctx.headers),
         };
         let mut headers = MultiValues::default();
         for (name, value) in allowed.iter() {
-            if keep_case && GATEWAY_EVENT_HEADERS.contains(&name.as_str()) {
+            if GATEWAY_EVENT_HEADERS.contains(&name.as_str()) {
                 continue;
             }
-            let name = if keep_case {
-                self.ctx.header_case.spelling(name.as_str())
-            } else {
-                name.as_str()
-            };
+            // An HTTP API reports the length it read, not what the client claimed.
+            if spelling != EventSpelling::Rest && name == header::CONTENT_LENGTH {
+                continue;
+            }
+            let name = spelling.name(name.as_str(), &self.ctx.header_case);
             headers.push(
-                name.to_owned(),
+                name.into_owned(),
                 String::from_utf8_lossy(value.as_bytes()).into_owned(),
             );
         }
-        if keep_case {
-            self.push_gateway_headers(&mut headers);
-        }
+        self.push_gateway_headers(&mut headers, spelling);
         headers
     }
 
-    /// The headers a REST API writes into an event itself, under these
-    /// spellings whatever the client sent: the forwarding chain, the port and
-    /// protocol the client connected to, and the trace header.
-    fn push_gateway_headers(&self, headers: &mut MultiValues) {
+    /// The headers API Gateway writes into an event itself, whatever the client
+    /// sent: the forwarding chain, the port and protocol the client connected
+    /// to, the trace header, and for HTTP APIs the body's length.
+    fn push_gateway_headers(&self, headers: &mut MultiValues, spelling: EventSpelling) {
         let ctx = self.ctx;
+        let mut push = |name: &str, value: String| {
+            headers.push(
+                spelling.name(name, &HeaderCase::default()).into_owned(),
+                value,
+            );
+        };
         let chain: Vec<&str> = ctx
             .headers
             .get_all("x-forwarded-for")
@@ -433,12 +493,15 @@ impl<'a> ProxyEvent<'a> {
             Some(chain.join(", "))
         };
         if let Some(forwarded_for) = forwarded_for {
-            headers.push("X-Forwarded-For".to_owned(), forwarded_for);
+            push("x-forwarded-for", forwarded_for);
         }
-        headers.push("X-Forwarded-Port".to_owned(), ctx.port().to_string());
-        headers.push("X-Forwarded-Proto".to_owned(), "https".to_owned());
+        push("x-forwarded-port", ctx.port().to_string());
+        push("x-forwarded-proto", "https".to_owned());
         if let Some(trace) = self.trace_header() {
-            headers.push("X-Amzn-Trace-Id".to_owned(), trace);
+            push("x-amzn-trace-id", trace);
+        }
+        if spelling != EventSpelling::Rest {
+            push("content-length", ctx.body.len().to_string());
         }
     }
 
@@ -502,12 +565,14 @@ impl<'a> ProxyEvent<'a> {
 
     fn v1(&self) -> Value {
         let ctx = self.ctx;
-        let (headers, multi_headers) = self.headers().single_and_multi();
+        let (headers, multi_headers) = self.headers(PayloadVersion::V1).single_and_multi();
         let (query, multi_query) = self.query().single_and_multi();
         let body = EventBody::for_request(ctx);
+        let http_api = ctx.api.kind == ApiKind::Http;
         let mut event = json!({
             "resource": ctx.resource_path,
-            "path": ctx.path,
+            // An HTTP API reports the path as sent, stage and escapes included.
+            "path": if http_api { &ctx.sent_path } else { &ctx.path },
             "httpMethod": ctx.method.as_str(),
             "headers": headers,
             "multiValueHeaders": multi_headers,
@@ -544,13 +609,23 @@ impl<'a> ProxyEvent<'a> {
             if let Some(ref deployment_id) = ctx.api.deployment_id {
                 request_context.insert("deploymentId".to_owned(), json!(deployment_id));
             }
+            if http_api {
+                // An HTTP API has no resources; the route stands in for one.
+                request_context.insert("resourceId".to_owned(), json!(ctx.route_key.as_str()));
+                if let Some(Value::Object(identity)) = request_context.get_mut("identity") {
+                    identity.insert("cognitoAmr".to_owned(), Value::Null);
+                }
+            }
+        }
+        if http_api && let Value::Object(ref mut fields) = event {
+            fields.insert("version".to_owned(), json!("1.0"));
         }
         event
     }
 
     fn v2(&self) -> Value {
         let ctx = self.ctx;
-        let mut headers = self.headers();
+        let mut headers = self.headers(PayloadVersion::V2);
         let cookies: Vec<String> = headers
             .0
             .remove(header::COOKIE.as_str())
@@ -746,15 +821,32 @@ mod tests {
         assert_eq!(rest["headers"]["Host"], "api.example.com");
         assert!(rest["headers"].get("content-type").is_none());
         assert_eq!(
-            rest["headers"]["user-agent"], "curl/8",
+            rest["headers"]["User-Agent"], "curl/8",
+            "API Gateway spells this one itself"
+        );
+        ctx.headers
+            .insert("x-unrecorded", HeaderValue::from_static("1"));
+        assert_eq!(
+            event(&ctx, PayloadVersion::V1)["headers"]["x-unrecorded"],
+            "1",
             "unrecorded names stay lower case"
         );
 
         ctx.api.kind = ApiKind::Http;
         let http = event(&ctx, PayloadVersion::V1);
-        assert_eq!(http["headers"]["content-type"], "text/plain");
+        assert_eq!(
+            http["headers"]["Content-Type"], "text/plain",
+            "payload 1.0 keeps the client's spelling on an HTTP API too"
+        );
+        assert_eq!(http["headers"]["Content-Length"], "0");
+        assert_eq!(http["version"], "1.0");
+        assert_eq!(http["requestContext"]["resourceId"], "POST /pets/{petId}");
+        assert!(http["requestContext"]["identity"]["cognitoAmr"].is_null());
         let v2 = event(&ctx, PayloadVersion::V2);
         assert_eq!(v2["headers"]["content-type"], "text/plain");
+        assert_eq!(v2["headers"]["content-length"], "0");
+        assert_eq!(v2["headers"]["x-forwarded-proto"], "https");
+        assert!(v2["headers"].get("Host").is_none());
     }
 
     /// Measured against a deployed REST API: the event names the forwarding
@@ -843,11 +935,11 @@ mod tests {
         assert!(table["headers"].get("expect").is_none());
         assert!(table["headers"].get("content-md5").is_none());
         assert_eq!(table["headers"]["via"], "1.1 proxy");
-        assert_eq!(table["headers"]["authorization"], "Bearer t");
+        assert_eq!(table["headers"]["Authorization"], "Bearer t");
         let iam = ProxyEvent::new(&ctx, &vars)
             .with_header_table(IamAuthorization::Used)
             .render(PayloadVersion::V1);
-        assert!(iam["headers"].get("authorization").is_none());
+        assert!(iam["headers"].get("Authorization").is_none());
         let unfiltered = ProxyEvent::new(&ctx, &vars).render(PayloadVersion::V1);
         assert_eq!(unfiltered["headers"]["expect"], "100-continue");
     }
