@@ -1,0 +1,15 @@
+{
+  "name": "http-jwt-authorizer-hmac",
+  "source": "recorded",
+  "api": "http",
+  "response": {
+    "status": 401,
+    "headers": {
+      "apigw-requestid": "[masked]",
+      "content-type": "application/json",
+      "date": "[masked]",
+      "www-authenticate": "Bearer scope=\"\" error=\"invalid_token\" error_description=\"signing method HS256 is invalid\""
+    },
+    "body": "{\"message\":\"Unauthorized\"}"
+  }
+}

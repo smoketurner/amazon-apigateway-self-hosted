@@ -93,6 +93,8 @@ pub(super) enum TokenError {
     KeyAlgorithm(SigningAlgorithm),
     #[error("the signature is not valid: {0}")]
     Signature(String),
+    #[error("the token's {0} is not a whole number")]
+    Time(&'static str),
     #[error("the token has expired or has no expiry")]
     Expired,
     #[error("the token is not valid yet")]
@@ -139,13 +141,10 @@ impl Claims {
 
     /// A time claim, in seconds since the epoch. A claim that is present but
     /// not a whole number makes the token unacceptable.
-    fn time(&self, name: &str) -> Result<Option<i64>, TokenError> {
+    fn time(&self, name: &'static str) -> Result<Option<i64>, TokenError> {
         match self.0.get(name) {
             None => Ok(None),
-            Some(value) => value
-                .as_i64()
-                .map(Some)
-                .ok_or_else(|| TokenError::Malformed(format!("{name} is not a whole number"))),
+            Some(value) => value.as_i64().map(Some).ok_or(TokenError::Time(name)),
         }
     }
 
@@ -249,8 +248,17 @@ impl<'a> Compact<'a> {
         };
         let header: Header = serde_json::from_slice(&json(header, "header")?)
             .map_err(|e| TokenError::Malformed(format!("header: {e}")))?;
-        let payload: Map<String, Value> = serde_json::from_slice(&json(payload, "payload")?)
-            .map_err(|e| TokenError::Malformed(format!("payload: {e}")))?;
+        // As API Gateway reads them: the first JSON value counts, and `null`
+        // is a token with no claims. Either way the signature decides.
+        let payload = json(payload, "payload")?;
+        let payload = match serde_json::Deserializer::from_slice(&payload)
+            .into_iter::<Option<Map<String, Value>>>()
+            .next()
+        {
+            Some(Ok(claims)) => claims.unwrap_or_default(),
+            Some(Err(e)) => return Err(TokenError::Malformed(format!("payload: {e}"))),
+            None => return Err(TokenError::Malformed("payload: empty".to_owned())),
+        };
         Ok(Self {
             signing_input,
             signature,
@@ -271,20 +279,26 @@ impl Verifier<'_> {
     /// Checks the token's algorithm, key, and signature. The claims it returns
     /// are authentic but not yet checked for time, audience, or scope.
     ///
-    /// The issuer is read from the unverified payload only to choose which
-    /// configured issuer's keys to use; the key must still verify the token.
+    /// The issuer in the unverified payload is used only to choose which
+    /// configured issuer's keys to use; the key must still verify the token,
+    /// and the verified claims must name that issuer.
     pub(super) async fn verify(&self, token: &str) -> Result<Claims, TokenError> {
         let compact = Compact::parse(token)?;
         let algorithm = SigningAlgorithm::from_name(&compact.header.alg)
             .filter(|alg| self.algorithms.contains(alg))
             .ok_or_else(|| TokenError::Algorithm(compact.header.alg.clone()))?;
         let kid = compact.header.kid.as_deref().ok_or(TokenError::NoKeyId)?;
-        let issuer = compact
-            .payload
-            .get("iss")
-            .and_then(Value::as_str)
-            .and_then(|iss| self.issuers.iter().find(|c| c.issuer.as_str() == iss))
-            .ok_or(TokenError::Issuer)?;
+        let named = compact.payload.get("iss").and_then(Value::as_str);
+        // With one issuer its keys are tried whatever the token says, as API
+        // Gateway does, and the issuer is compared once the signature holds;
+        // with several the token's `iss` has to pick whose keys to use.
+        let issuer = match self.issuers {
+            [only] => only,
+            several => several
+                .iter()
+                .find(|c| named == Some(c.issuer.as_str()))
+                .ok_or(TokenError::Issuer)?,
+        };
         let jwk = self
             .keys
             .key(&issuer.issuer, issuer.location, issuer.max_age, kid)
@@ -292,9 +306,14 @@ impl Verifier<'_> {
         if !algorithm.allowed_by(&jwk) {
             return Err(TokenError::KeyAlgorithm(algorithm));
         }
-        match algorithm.library() {
+        let claims = match algorithm.library() {
             Some(library) => Self::verify_with_library(token, &jwk, library),
             None => Self::verify_p521(&compact, &jwk),
+        }?;
+        if claims.text("iss") == Some(issuer.issuer.as_str()) {
+            Ok(claims)
+        } else {
+            Err(TokenError::Issuer)
         }
     }
 
@@ -367,6 +386,26 @@ mod tests {
             }
         }
         Claims::from_map(map).check_times(NOW, 0)
+    }
+
+    #[test]
+    fn claims_are_the_first_json_value_and_null_is_none() {
+        let token = |payload: &str| {
+            format!(
+                "{}.{}.c2ln",
+                URL_SAFE_NO_PAD.encode(r#"{"alg":"RS256","kid":"k"}"#),
+                URL_SAFE_NO_PAD.encode(payload)
+            )
+        };
+        let claims = |payload: &str| Compact::parse(&token(payload)).map(|c| c.payload);
+        assert_eq!(claims("null").unwrap(), Map::new());
+        assert_eq!(claims(r#"{"a":1} x"#).unwrap().get("a"), Some(&json!(1)));
+        for payload in ["", "[1]", r#""s""#, "{"] {
+            assert!(
+                matches!(claims(payload), Err(TokenError::Malformed(_))),
+                "{payload:?}"
+            );
+        }
     }
 
     #[test]

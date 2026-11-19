@@ -16,6 +16,34 @@ use crate::model::{ApiKind, Protection, RoutePath};
 use crate::pipeline::RequestContext;
 use crate::route::Route;
 
+/// Why no backend URL could be made for a request.
+#[derive(Debug, PartialEq, Eq)]
+enum UrlError {
+    /// The integration's URI is not a URL once its placeholders are filled.
+    Invalid(String),
+    /// The path has a `.` or `..` segment. A URL parser would resolve it, so
+    /// the backend would be asked for another path than the one the route
+    /// names; API Gateway sends such segments as they are, which this
+    /// gateway's HTTP client cannot. The request is refused instead.
+    DotSegment,
+}
+
+impl UrlError {
+    /// Whether the path of `url` has a `.` or `..` segment, written plainly
+    /// or with `%2e`.
+    fn has_dot_segment(url: &str) -> bool {
+        let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+        let Some((_, path)) = after_scheme.split_once('/') else {
+            return false;
+        };
+        let path = path.split(['?', '#']).next().unwrap_or_default();
+        path.split('/').any(|segment| {
+            let segment = segment.to_ascii_lowercase().replace("%2e", ".");
+            segment == "." || segment == ".."
+        })
+    }
+}
+
 /// Whether an integration request carries the client's query string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QueryHandling {
@@ -138,21 +166,34 @@ impl HttpProxy {
         } = outgoing;
         let mut url = match self.url_for(&route.path, ctx, query, overrides) {
             Ok(url) => url,
-            Err(err) => {
+            Err(UrlError::DotSegment) => {
+                tracing::warn!(route = %route.key, "refusing a backend URL with a . or .. path segment");
+                return Err(GatewayError::InvalidRequest);
+            }
+            Err(UrlError::Invalid(err)) => {
                 tracing::error!(route = %route.key, uri = self.uri, %err, "invalid integration URI");
                 return Err(GatewayError::ApiConfiguration);
             }
         };
         let method = self.method.clone().unwrap_or_else(|| ctx.method.clone());
         self.request_mapping.apply(ctx, &mut headers, &mut url);
-        // A REST API tells the backend a body-less request has no body, for
-        // every method but GET and HEAD.
-        if ctx.api.kind == ApiKind::Rest
-            && body.is_empty()
-            && method != Method::GET
-            && method != Method::HEAD
-        {
+        // Measured: a REST API tells the backend a body-less request has no
+        // body for every method but GET and HEAD, an HTTP API for every
+        // method; and an HTTP API calls a request that names no type a form
+        // unless it is a GET.
+        let reads = method == Method::GET || method == Method::HEAD;
+        let says_empty = match ctx.api.kind {
+            ApiKind::Rest => !reads,
+            ApiKind::Http => true,
+        };
+        if body.is_empty() && says_empty {
             headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
+        }
+        if ctx.api.kind == ApiKind::Http && !reads && !headers.contains_key(header::CONTENT_TYPE) {
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/x-www-form-urlencoded"),
+            );
         }
         ctx.integration.transfer_mode = Some(self.transfer);
         let (client, url) = self.client_for(client, route, url, &mut headers).await?;
@@ -245,7 +286,7 @@ impl HttpProxy {
     /// The headers sent to the backend. REST APIs follow API Gateway's header
     /// table and add the headers API Gateway adds; HTTP APIs send what the
     /// client sent minus hop-by-hop headers, translate `X-Forwarded-*` into
-    /// `Forwarded`, and give body-less requests a `Content-Type`.
+    /// `Forwarded`, and name themselves in `Via`.
     fn request_headers(route: &Route, ctx: &RequestContext) -> HeaderMap {
         let mut headers = match ctx.api.kind {
             ApiKind::Rest => {
@@ -308,9 +349,9 @@ impl HttpProxy {
         }
     }
 
-    /// HTTP APIs translate `X-Forwarded-*` into `Forwarded`, and add a
-    /// `Content-Type` to requests with no body. The documentation does not say
-    /// which type; `application/octet-stream` is the neutral choice.
+    /// HTTP APIs translate `X-Forwarded-*` into `Forwarded`, and put
+    /// `HTTP/1.1 AmazonAPIGateway` in place of the first `Via` the client sent
+    /// (measured: later `Via` headers pass through).
     ///
     /// <https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-known-issues.html>
     fn add_http_api_headers(headers: &mut HeaderMap, ctx: &RequestContext) {
@@ -318,11 +359,18 @@ impl HttpProxy {
         if let Some(value) = forwarded.render(ctx.domain_name()) {
             headers.insert(header::FORWARDED, value);
         }
-        if ctx.body.is_empty() && !headers.contains_key(header::CONTENT_TYPE) {
-            headers.insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/octet-stream"),
-            );
+        let later: Vec<HeaderValue> = headers
+            .get_all(header::VIA)
+            .iter()
+            .skip(1)
+            .cloned()
+            .collect();
+        headers.insert(
+            header::VIA,
+            HeaderValue::from_static("HTTP/1.1 AmazonAPIGateway"),
+        );
+        for value in later {
+            headers.append(header::VIA, value);
         }
     }
 
@@ -356,14 +404,17 @@ impl HttpProxy {
         ctx: &RequestContext,
         handling: QueryHandling,
         overrides: &RequestOverrides,
-    ) -> Result<reqwest::Url, String> {
+    ) -> Result<reqwest::Url, UrlError> {
         let url = match self.private {
             Some(PrivateRouting::RequestPath) => self.request_path_url(ctx),
-            Some(PrivateRouting::HostHeader(_)) | None => {
-                self.fill_placeholders(route_path, ctx, overrides)?
-            }
+            Some(PrivateRouting::HostHeader(_)) | None => self
+                .fill_placeholders(route_path, ctx, overrides)
+                .map_err(UrlError::Invalid)?,
         };
-        let mut url = reqwest::Url::parse(&url).map_err(|e| e.to_string())?;
+        if UrlError::has_dot_segment(&url) {
+            return Err(UrlError::DotSegment);
+        }
+        let mut url = reqwest::Url::parse(&url).map_err(|e| UrlError::Invalid(e.to_string()))?;
         let mut query = QueryBuilder(url.query().map_or_default(str::to_owned));
         let rest = ctx.api.kind == ApiKind::Rest;
         if handling == QueryHandling::Forward {
@@ -602,7 +653,7 @@ mod tests {
             &self,
             route_path: &RoutePath,
             ctx: &RequestContext,
-        ) -> Result<reqwest::Url, String> {
+        ) -> Result<reqwest::Url, UrlError> {
             self.url_for(
                 route_path,
                 ctx,
@@ -654,6 +705,62 @@ mod tests {
             throttle: None,
             cache: None,
         }
+    }
+
+    #[test]
+    fn dot_segments_are_found_however_they_are_written() {
+        for url in [
+            "http://up/a/../b",
+            "http://up/..",
+            "http://up/a/.",
+            "http://up/./a",
+            "http://up/a/%2e%2E/b",
+            "http://up/a/.%2e/b?q=1",
+            "https://up:8443/a/%2E#f",
+            "http://up//../a",
+        ] {
+            assert!(UrlError::has_dot_segment(url), "{url}");
+        }
+        for url in [
+            "http://up",
+            "http://up/",
+            "http://up/a.b/c..d/.e/f.",
+            "http://up/.../a",
+            "http://up/a?q=../x",
+            "http://up/a#../x",
+            "http://up/a%2f..%2fb",
+            "http://up.example/..a",
+        ] {
+            assert!(!UrlError::has_dot_segment(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn a_backend_url_with_a_dot_segment_is_refused_not_resolved() {
+        let target = proxy("http://up/base/{proxy}");
+        let path = route("/x/{proxy+}", &target).path;
+        for sent in ["../admin", "a/../../admin", "a/./b", "%2e%2e/admin", ".."] {
+            let ctx = incoming(&[("proxy", sent)], None);
+            assert_eq!(
+                target.proxy_url(&path, &ctx),
+                Err(UrlError::DotSegment),
+                "{sent}"
+            );
+        }
+        let ctx = incoming(&[("proxy", "a/b..c/.d")], None);
+        assert_eq!(
+            target.proxy_url(&path, &ctx).unwrap().as_str(),
+            "http://up/base/a/b..c/.d"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_for_a_dot_segment_never_reaches_the_backend() {
+        let addr = upstream().await;
+        let target = proxy(&format!("http://{addr}/echo/{{proxy}}"));
+        let request = incoming(&[("proxy", "a/../../secret")], None);
+        let refused = send(target, "/x/{proxy+}", request).await;
+        assert!(matches!(refused, Err(GatewayError::InvalidRequest)));
     }
 
     #[test]
@@ -1088,7 +1195,9 @@ mod tests {
         );
         assert!(headers.get("x-forwarded-for").is_none());
         assert!(headers.get("x-forwarded-proto").is_none());
-        assert_eq!(headers["content-type"], "application/octet-stream");
+        assert!(headers.get("content-type").is_none(), "a GET names no type");
+        assert_eq!(headers["content-length"], "0");
+        assert_eq!(headers["via"], "HTTP/1.1 AmazonAPIGateway");
         assert_eq!(
             headers["expect"], "100-continue",
             "HTTP APIs have no header table"

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::Router;
-use axum::extract::Request;
+use axum::extract::{OriginalUri, Request};
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
@@ -53,12 +53,25 @@ impl BasePath {
             return router;
         };
         let ctx = Arc::clone(ctx);
+        // The prefix followed by a slash is the API's root too, which a
+        // nested router does not match.
+        let root = format!("{prefix}/");
+        let api = router.clone();
         Router::new()
             .without_v07_checks()
             .nest(prefix, router)
             .fallback(move |mut request: Request| {
                 let ctx = Arc::clone(&ctx);
+                let api = api.clone();
+                let is_root = request.uri().path() == root;
                 async move {
+                    if is_root {
+                        let sent = request.uri().clone();
+                        if CustomDomain::rewrite_path(&mut request, "/").is_ok() {
+                            request.extensions_mut().insert(OriginalUri(sent));
+                            return api.oneshot(request).await.into_response();
+                        }
+                    }
                     let pending = ctx.observer.begin(&ctx, &mut request, None);
                     let response = ctx.reject(request, GatewayError::NoRoute);
                     ctx.observer.finish(pending, response)
@@ -368,11 +381,12 @@ pub(crate) fn build(
             methods: BTreeMap::new(),
             default,
         });
-        rest_path::serve(router.fallback(move |request: Request| {
+        router.fallback(move |request: Request| {
             let fallback = Arc::clone(&fallback);
             async move { fallback.handle(request).await }
-        }))
+        })
     };
+    let router = rest_path::serve(router, model.kind);
     (base.mount(router, ctx), summaries)
 }
 

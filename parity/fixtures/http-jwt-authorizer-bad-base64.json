@@ -1,0 +1,15 @@
+{
+  "name": "http-jwt-authorizer-bad-base64",
+  "source": "recorded",
+  "api": "http",
+  "response": {
+    "status": 401,
+    "headers": {
+      "apigw-requestid": "[masked]",
+      "content-type": "application/json",
+      "date": "[masked]",
+      "www-authenticate": "Bearer scope=\"\" error=\"invalid_token\" error_description=\"illegal base64 data at input byte 1\""
+    },
+    "body": "{\"message\":\"Unauthorized\"}"
+  }
+}

@@ -280,14 +280,18 @@ impl GatewayError {
                     .with_status(StatusCode::BAD_GATEWAY)
                     .with_error_type("InternalServerErrorException")
             }
-            (
-                Self::IntegrationFailure
-                | Self::IntegrationUnreachable
-                | Self::MalformedIntegrationResponse,
-                ApiKind::Http,
-            ) => Failure::new(ResponseType::IntegrationFailure)
-                .with_status(StatusCode::BAD_GATEWAY)
-                .with_message("Internal server error"),
+            // A deployed HTTP API answers a function error, or a response it
+            // can make nothing of, with a 500 worded this way.
+            (Self::IntegrationFailure | Self::MalformedIntegrationResponse, ApiKind::Http) => {
+                Failure::new(ResponseType::IntegrationFailure)
+                    .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .with_message("Internal Server Error")
+            }
+            (Self::IntegrationUnreachable, ApiKind::Http) => {
+                Failure::new(ResponseType::IntegrationFailure)
+                    .with_status(StatusCode::BAD_GATEWAY)
+                    .with_message("Internal server error")
+            }
             (Self::IntegrationUnreachable, ApiKind::Rest) => {
                 Failure::new(ResponseType::IntegrationFailure)
             }

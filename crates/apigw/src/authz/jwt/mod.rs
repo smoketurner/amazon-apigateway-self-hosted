@@ -7,6 +7,7 @@
 //! <https://docs.aws.amazon.com/apigateway/latest/developerguide/rest-api-jwt-authorizer.html>,
 //! and <https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-enable-cognito-user-pool.html>.
 
+mod challenge;
 mod claims;
 mod keys;
 mod rest;
@@ -18,6 +19,7 @@ mod tests;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+pub(crate) use challenge::Challenge;
 pub(crate) use keys::{IssuerEndpoint, KeyStore};
 
 use self::claims::ClaimStyle;
@@ -51,6 +53,37 @@ impl Flavor {
         match *self {
             Self::Rest(_) => CLOCK_SKEW_SECONDS,
             Self::Http { .. } | Self::Cognito { .. } => 0,
+        }
+    }
+
+    /// The token in an identity source's value. An HTTP API takes one
+    /// `Bearer ` off the front, spelled exactly so, and reads the rest as it
+    /// is; the REST authorizers take the scheme in any case.
+    fn token<'a>(&self, value: &'a str) -> &'a str {
+        match *self {
+            Self::Http { .. } => value.strip_prefix("Bearer ").unwrap_or(value),
+            Self::Cognito { .. } | Self::Rest(_) => match value.split_once(' ') {
+                Some((scheme, token)) if scheme.eq_ignore_ascii_case("bearer") => token.trim(),
+                Some(_) | None => value,
+            },
+        }
+    }
+
+    /// The answer to a request that carries no token.
+    fn no_token(&self) -> Denial {
+        match *self {
+            Self::Http { .. } => Denial::Challenged(Challenge::bare()),
+            Self::Cognito { .. } | Self::Rest(_) => Denial::Unauthorized,
+        }
+    }
+
+    /// The answer to a `token` refused for `error` on a route asking for
+    /// `scopes`.
+    fn reject(&self, scopes: &[String], token: &str, error: &TokenError) -> Denial {
+        tracing::debug!(%error, "token rejected");
+        match *self {
+            Self::Http { .. } => Denial::Challenged(Challenge::refused(scopes, token, error)),
+            Self::Cognito { .. } | Self::Rest(_) => Denial::Unauthorized,
         }
     }
 }
@@ -245,22 +278,23 @@ impl JwtAuthorizer {
         let identity = self
             .sources
             .extract(ctx, &ctx.stage_variables)
-            .ok_or(Denial::Unauthorized)?;
-        let token = identity.first().map_or("", |value| Self::bearer(value));
+            .ok_or_else(|| self.flavor.no_token())?;
+        let token = identity
+            .first()
+            .map_or("", |value| self.flavor.token(value));
+        let reject = |error: &TokenError| self.flavor.reject(required, token, error);
         let verifier = Verifier {
             keys: request.keys,
             issuers: &self.issuers,
             algorithms: &self.algorithms,
         };
-        let claims = verifier.verify(token).await.map_err(|e| Self::reject(&e))?;
+        let claims = verifier.verify(token).await.map_err(|e| reject(&e))?;
         claims
             .check_times(ctx.received.as_second(), self.flavor.clock_skew())
-            .map_err(|e| Self::reject(&e))?;
+            .map_err(|e| reject(&e))?;
         match self.flavor {
             Flavor::Http { ref audiences } => {
-                claims
-                    .check_audience(audiences)
-                    .map_err(|e| Self::reject(&e))?;
+                claims.check_audience(audiences).map_err(|e| reject(&e))?;
                 if !claims.grants_any(required) {
                     return Err(Denial::InsufficientScope);
                 }
@@ -282,19 +316,6 @@ impl JwtAuthorizer {
                 ))
             }
         }
-    }
-
-    /// The token without an optional `Bearer ` prefix.
-    fn bearer(value: &str) -> &str {
-        match value.split_once(' ') {
-            Some((scheme, token)) if scheme.eq_ignore_ascii_case("bearer") => token.trim(),
-            Some(_) | None => value,
-        }
-    }
-
-    fn reject(error: &TokenError) -> Denial {
-        tracing::debug!(%error, "token rejected");
-        Denial::Unauthorized
     }
 
     /// A user pool token is an ID token when the route asks for no scopes and
