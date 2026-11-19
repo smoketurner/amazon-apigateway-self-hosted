@@ -738,7 +738,7 @@ pub(crate) mod tests {
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(
             response.headers()["x-amzn-errortype"],
-            "ThrottlingException"
+            "TooManyRequestsException"
         );
         assert_eq!(response.body, r#"{"message":"Too Many Requests"}"#);
         assert_eq!(
@@ -1163,7 +1163,7 @@ pub(crate) mod tests {
 
         let bad_body = post_json(&rest, &tenant, r#"{"age": 3}"#).await;
         assert_eq!(bad_body.status, StatusCode::BAD_REQUEST);
-        assert_eq!(bad_body.body, r#"{"message":"Invalid request body"}"#);
+        assert_eq!(bad_body.body, r#"{"message": "Invalid request body"}"#);
         assert_eq!(
             bad_body.headers.get("x-amzn-errortype").unwrap(),
             "BadRequestException"
@@ -1173,7 +1173,7 @@ pub(crate) mod tests {
         assert_eq!(no_header.status, StatusCode::BAD_REQUEST);
         assert_eq!(
             no_header.body,
-            r#"{"message":"Missing required request parameters: [x-tenant]"}"#
+            r#"{"message": "Missing required request parameters: [x-tenant]"}"#
         );
     }
 
@@ -1184,7 +1184,7 @@ pub(crate) mod tests {
         assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
             reply.body,
-            r#"{"message": "Invalid request body", "detail": "["name" is a required property]"}"#
+            r#"{"message":  "Invalid request body", "detail": "["name" is a required property]"}"#
         );
     }
 

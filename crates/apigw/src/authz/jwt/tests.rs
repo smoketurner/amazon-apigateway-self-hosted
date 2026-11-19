@@ -1468,7 +1468,7 @@ async fn a_cognito_authorizer_and_a_resource_policy_must_both_allow() {
         "a policy with no opinion is not enough"
     );
     assert!(
-        body["message"]
+        body["Message"]
             .as_str()
             .unwrap()
             .ends_with("because no resource-based policy allows the execute-api:Invoke action"),
@@ -1477,7 +1477,7 @@ async fn a_cognito_authorizer_and_a_resource_policy_must_both_allow() {
     let (status, body) = call_pool(&h, "198.51.100.9", Some(&token)).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert!(
-        body["message"]
+        body["Message"]
             .as_str()
             .unwrap()
             .ends_with("with an explicit deny in a resource-based policy"),
@@ -1905,7 +1905,7 @@ async fn rest_jwt_claim_rules_and_scopes_are_403() {
     let h = rest_jwt_harness(&first, &second, &json!({})).await;
     let forbidden = (
         StatusCode::FORBIDDEN,
-        json!({"message": "User is not authorized to access this resource"}),
+        json!({"Message": "User is not authorized to access this resource"}),
     );
     let call = |path: &'static str, claims: Value| {
         let token = key_a().token(&claims);

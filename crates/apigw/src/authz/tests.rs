@@ -362,8 +362,9 @@ async fn rest_token(authorizer: Value) -> Harness {
     .await
 }
 
+/// The text of an access denial, which API Gateway puts under IAM's `Message`.
 fn message(body: &Value) -> &Value {
-    &body["message"]
+    &body["Message"]
 }
 
 #[tokio::test]

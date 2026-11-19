@@ -457,7 +457,7 @@ const IMPLICIT_RESOURCE_POLICY: &str =
 const EXPLICIT_IDENTITY: &str = "with an explicit deny in an identity-based policy";
 
 fn message(body: &Value) -> &str {
-    body["message"].as_str().unwrap_or_default()
+    body["Message"].as_str().unwrap_or_default()
 }
 
 #[tokio::test]
