@@ -256,8 +256,11 @@ jobs:
           db="$(mktemp -d)"
           rpm --dbpath "$db" --initdb
           rpmkeys --dbpath "$db" --import "${RUNNER_TEMP}/signing-key.pub.asc"
+          # The verbose form is for the log. Only the plain form prints the
+          # "digests signatures OK" summary line the check looks for.
+          rpmkeys --dbpath "$db" --checksig -v dist/*.rpm
           for rpm in dist/*.rpm; do
-            result="$(rpmkeys --dbpath "$db" --checksig -v "$rpm")"
+            result="$(rpmkeys --dbpath "$db" --checksig "$rpm")"
             echo "${result}"
             grep -q 'signatures OK' <<< "${result}"
           done
@@ -513,6 +516,15 @@ jobs:
             exit 1
           fi
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      # `helm registry login` above keeps its credentials to itself; the
+      # attestation is pushed with the ones docker/login-action stores.
+      - uses: docker/login-action@v4.8.0
+        if: inputs.publish
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Attest the pushed chart
         if: inputs.publish
