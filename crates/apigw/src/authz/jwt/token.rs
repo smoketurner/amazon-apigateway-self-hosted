@@ -248,8 +248,17 @@ impl<'a> Compact<'a> {
         };
         let header: Header = serde_json::from_slice(&json(header, "header")?)
             .map_err(|e| TokenError::Malformed(format!("header: {e}")))?;
-        let payload: Map<String, Value> = serde_json::from_slice(&json(payload, "payload")?)
-            .map_err(|e| TokenError::Malformed(format!("payload: {e}")))?;
+        // As API Gateway reads them: the first JSON value counts, and `null`
+        // is a token with no claims. Either way the signature decides.
+        let payload = json(payload, "payload")?;
+        let payload = match serde_json::Deserializer::from_slice(&payload)
+            .into_iter::<Option<Map<String, Value>>>()
+            .next()
+        {
+            Some(Ok(claims)) => claims.unwrap_or_default(),
+            Some(Err(e)) => return Err(TokenError::Malformed(format!("payload: {e}"))),
+            None => return Err(TokenError::Malformed("payload: empty".to_owned())),
+        };
         Ok(Self {
             signing_input,
             signature,
@@ -377,6 +386,26 @@ mod tests {
             }
         }
         Claims::from_map(map).check_times(NOW, 0)
+    }
+
+    #[test]
+    fn claims_are_the_first_json_value_and_null_is_none() {
+        let token = |payload: &str| {
+            format!(
+                "{}.{}.c2ln",
+                URL_SAFE_NO_PAD.encode(r#"{"alg":"RS256","kid":"k"}"#),
+                URL_SAFE_NO_PAD.encode(payload)
+            )
+        };
+        let claims = |payload: &str| Compact::parse(&token(payload)).map(|c| c.payload);
+        assert_eq!(claims("null").unwrap(), Map::new());
+        assert_eq!(claims(r#"{"a":1} x"#).unwrap().get("a"), Some(&json!(1)));
+        for payload in ["", "[1]", r#""s""#, "{"] {
+            assert!(
+                matches!(claims(payload), Err(TokenError::Malformed(_))),
+                "{payload:?}"
+            );
+        }
     }
 
     #[test]
