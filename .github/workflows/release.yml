@@ -113,17 +113,25 @@ jobs:
         with:
           command: check
 
-      # The release notes: the commits since the previous tag grouped by type
-      # (cliff.toml). Rendered here because this job has the checkout;
-      # `publish` only downloads.
-      - name: Render the commits since the previous tag
+      # The release notes: the commits since the previous released tag grouped
+      # by type (cliff.toml). Rendered here because this job has the checkout;
+      # `publish` only downloads. The whole history is rendered and the newest
+      # section kept, because `--latest` does not honor cliff.toml's
+      # `ignore_tags` (a tag whose release never happened).
+      - name: Render the commits since the previous release
         if: github.ref_type == 'tag'
         uses: orhun/git-cliff-action@v4.9.1
         with:
           config: cliff.toml
-          args: --latest --strip header
+          args: --strip header
         env:
-          OUTPUT: notes.md
+          OUTPUT: history.md
+      - name: Keep the newest release's section
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          awk '/^## /{sections++} sections < 2' history.md > notes.md
+          test -s notes.md
       - name: Upload the release notes
         if: github.ref_type == 'tag'
         uses: actions/upload-artifact@v7.0.2
