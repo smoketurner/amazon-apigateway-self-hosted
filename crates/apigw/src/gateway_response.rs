@@ -299,12 +299,49 @@ impl Failure {
         self
     }
 
+    /// What the request violated as `$context.error.validationErrorString`
+    /// renders it: escaped like a Java string literal, with everything outside
+    /// ASCII as `\uXXXX` UTF-16 code units.
+    fn validation_error_string(&self) -> Option<String> {
+        let violations = self.validation.as_deref()?;
+        let mut escaped = String::with_capacity(violations.len());
+        for character in violations.chars() {
+            match character {
+                '"' => escaped.push_str("\\\""),
+                '\\' => escaped.push_str("\\\\"),
+                '\u{8}' => escaped.push_str("\\b"),
+                '\t' => escaped.push_str("\\t"),
+                '\n' => escaped.push_str("\\n"),
+                '\u{c}' => escaped.push_str("\\f"),
+                '\r' => escaped.push_str("\\r"),
+                ' '..='\u{7f}' => escaped.push(character),
+                other => escaped.push_str(&unicode_escape(other)),
+            }
+        }
+        Some(escaped)
+    }
+
     pub(crate) fn response_type(&self) -> Option<ResponseType> {
         match self.origin {
             Origin::Aws(response_type) => Some(response_type),
             Origin::Gateway => None,
         }
     }
+}
+
+/// `character` as Java escapes it: `\uXXXX` in upper-case hexadecimal for each
+/// of its UTF-16 code units.
+pub(crate) fn unicode_escape(character: char) -> String {
+    let mut units = [0_u16; 2];
+    let mut escaped = String::new();
+    for unit in character.encode_utf16(&mut units) {
+        escaped.push_str("\\u");
+        for shift in [12_u32, 8, 4, 0] {
+            let digit = u32::from(*unit).checked_shr(shift).unwrap_or(0) & 0xf;
+            escaped.extend(char::from_digit(digit, 16).map(|digit| digit.to_ascii_uppercase()));
+        }
+    }
+    escaped
 }
 
 /// A gateway response body template. Gateway responses are not run through
@@ -537,7 +574,7 @@ impl GatewayResponses {
                 "message": failure.message,
                 "messageString": message_string,
                 "responseType": failure.response_type().map(ResponseType::as_str),
-                "validationErrorString": failure.validation,
+                "validationErrorString": failure.validation_error_string(),
             }),
         );
         let scope = TemplateScope { context, request };
@@ -957,15 +994,71 @@ mod tests {
             }
         }));
         let violated = Failure::new(ResponseType::BadRequestBody)
-            .with_validation_error(r#"["name" is a required property]"#);
+            .with_validation_error("[Unknown error parsing request body]");
         assert_eq!(
             body(responses.render(&violated, &rest_request())).await,
-            r#"{"v": "["name" is a required property]"}"#
+            r#"{"v": "[Unknown error parsing request body]"}"#
         );
         let plain = Failure::new(ResponseType::BadRequestBody);
         assert_eq!(
             body(responses.render(&plain, &rest_request())).await,
             r#"{"v": ""}"#
+        );
+    }
+
+    /// Every expected body is what the reference REST API answered.
+    #[tokio::test]
+    async fn validation_error_string_is_escaped_as_api_gateway_escapes_it() {
+        let responses = responses(&json!({
+            "BAD_REQUEST_BODY": {
+                "responseTemplates": {"application/json": "{\"message\":$context.error.validationErrorString,\"type\":\"$context.error.responseType\"}"}
+            }
+        }));
+        for (violations, expected) in [
+            (
+                r#"[object has missing required properties (["name"])]"#,
+                r#"{"message":[object has missing required properties ([\"name\"])],"type":"BAD_REQUEST_BODY"}"#,
+            ),
+            (
+                r#"[instance type (integer) does not match any allowed primitive type (allowed: ["string"])]"#,
+                r#"{"message":[instance type (integer) does not match any allowed primitive type (allowed: [\"string\"])],"type":"BAD_REQUEST_BODY"}"#,
+            ),
+            (
+                "[Unknown error parsing request body]",
+                r#"{"message":[Unknown error parsing request body],"type":"BAD_REQUEST_BODY"}"#,
+            ),
+            (
+                r#"[object instance has properties which are not allowed by the schema: ["ex\"tra"]]"#,
+                r#"{"message":[object instance has properties which are not allowed by the schema: [\"ex\\\"tra\"]],"type":"BAD_REQUEST_BODY"}"#,
+            ),
+            (
+                r#"[object instance has properties which are not allowed by the schema: ["ex\ntra"]]"#,
+                r#"{"message":[object instance has properties which are not allowed by the schema: [\"ex\\ntra\"]],"type":"BAD_REQUEST_BODY"}"#,
+            ),
+            (
+                "[object instance has properties which are not allowed by the schema: [\"ex'tra/\u{e9}\u{2603}\u{7f}\u{85}\"]]",
+                "{\"message\":[object instance has properties which are not allowed by the schema: [\\\"ex'tra/\\u00E9\\u2603\u{7f}\\u0085\\\"]],\"type\":\"BAD_REQUEST_BODY\"}",
+            ),
+            (
+                "[object instance has properties which are not allowed by the schema: [\"\u{1f600}\",\"\u{fffd}\"]]",
+                "{\"message\":[object instance has properties which are not allowed by the schema: [\\\"\\uD83D\\uDE00\\\",\\\"\\uFFFD\\\"]],\"type\":\"BAD_REQUEST_BODY\"}",
+            ),
+        ] {
+            let violated =
+                Failure::new(ResponseType::BadRequestBody).with_validation_error(violations);
+            assert_eq!(
+                body(responses.render(&violated, &rest_request())).await,
+                expected,
+                "{violations}"
+            );
+        }
+        // Not measured: raw control characters, which the validator's own
+        // messages never carry unescaped except inside a quoted string value.
+        let control =
+            Failure::new(ResponseType::BadRequestBody).with_validation_error("a\tb\u{1}c");
+        assert_eq!(
+            body(responses.render(&control, &rest_request())).await,
+            r#"{"message":a\tb\u0001c,"type":"BAD_REQUEST_BODY"}"#
         );
     }
 

@@ -34,9 +34,13 @@ All notable changes to this project are documented here. The format follows
   parameters: [...]`, and request bodies are validated against the method's JSON Schema draft 4 model
   for the request's content type (`$default` otherwise), resolving `$ref`s against the API's models,
   answering `400` `BAD_REQUEST_BODY`. API-customized gateway responses apply, and
-  `$context.error.validationErrorString` is available to their templates. A route whose model
-  cannot be compiled answers `501`. Adds the `jsonschema` dependency without its HTTP and file
-  reference resolvers.
+  `$context.error.validationErrorString` is available to their templates with API Gateway's own
+  wording, message order, and escaping (for example
+  `[object has missing required properties ([\"name\"])]`, and
+  `[Unknown error parsing request body]` for a body that is not JSON). A route whose model cannot
+  be compiled answers `501`. Models are checked by a validator that follows the Java
+  `json-schema-validator` library API Gateway uses; `pattern` goes through the `jsonschema-regex`
+  and `fancy-regex` dependencies.
 - Non-proxy REST integrations: `HTTP` and `MOCK` integrations run `requestParameters`, a Velocity
   request template chosen by `Content-Type` (`passthroughBehavior`, `415 Unsupported Media Type`,
   `contentHandling` by `binaryMediaTypes`), the backend call, `selectionPattern` selection, and

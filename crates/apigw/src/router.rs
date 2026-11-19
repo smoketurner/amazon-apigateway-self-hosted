@@ -1187,7 +1187,7 @@ pub(crate) mod tests {
         assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
             reply.body,
-            r#"{"message":  "Invalid request body", "detail": "["name" is a required property]"}"#
+            r#"{"message":  "Invalid request body", "detail": "[object has missing required properties ([\"name\"])]"}"#
         );
     }
 

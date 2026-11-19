@@ -11,18 +11,18 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use jsonschema::Validator;
-use serde_json::{Value, json};
+use serde_json::{Deserializer, Value, json};
 
 use crate::gateway_response::Failure;
 use crate::model::{ApiModel, Operation, ParameterLocation, ParameterSpec, ResponseType};
 use crate::pipeline::RequestContext;
+use crate::validation::report::ValidationErrorString;
+use crate::validation::schema::BodySchema;
 
-/// How many schema violations a `$context.error.validationErrorString` lists.
-const MAX_REPORTED_ERRORS: usize = 10;
-/// The longest `validationErrorString`, so a violation that quotes a large
-/// value of the request cannot make the response large.
-const MAX_ERROR_CHARS: usize = 1024;
+mod number;
+mod report;
+mod schema;
+
 /// Bodies larger than this are parsed and checked off the async threads.
 const INLINE_BODY_BYTES: usize = 64 * 1024;
 /// The content type assumed for a request that names none.
@@ -75,18 +75,15 @@ impl RequestValidators {
         RouteValidation::Checks(Arc::new(RequestChecks { required, models }))
     }
 
-    /// A draft 4 validator for `schema`, with the API's models reachable at
+    /// The compiled `schema`, with the API's models reachable at
     /// `#/components/schemas/{name}` so `$ref`s into them resolve.
-    fn body_model(&self, schema: &Value) -> Result<Validator, String> {
+    fn body_model(&self, schema: &Value) -> Result<BodySchema, String> {
         let Value::Object(fields) = schema else {
             return Err("a model must be a JSON object".to_owned());
         };
         let mut root = fields.clone();
         root.insert("components".to_owned(), json!({"schemas": self.models}));
-        jsonschema::draft4::options()
-            .should_validate_formats(false)
-            .build(&Value::Object(root))
-            .map_err(|error| error.to_string())
+        BodySchema::compile(&Value::Object(root))
     }
 }
 
@@ -172,7 +169,7 @@ impl RequiredParameter {
 pub(crate) struct RequestChecks {
     required: Vec<RequiredParameter>,
     /// Body models by lowercase media type, or [`DEFAULT_MODEL`].
-    models: BTreeMap<String, Arc<Validator>>,
+    models: BTreeMap<String, Arc<BodySchema>>,
 }
 
 impl RequestChecks {
@@ -196,7 +193,7 @@ impl RequestChecks {
 
     /// The model for the request's content type: its own, else `$default`.
     /// A content type with neither is not validated.
-    fn model_for(&self, ctx: &RequestContext) -> Option<&Arc<Validator>> {
+    fn model_for(&self, ctx: &RequestContext) -> Option<&Arc<BodySchema>> {
         let content_type = ctx
             .header_str("content-type")
             .and_then(|value| value.split(';').next())
@@ -218,7 +215,7 @@ impl RequestChecks {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     tracing::error!(%error, "request body validation did not finish");
-                    Err("the request could not be validated".to_owned())
+                    Err(ValidationErrorString::unparseable())
                 }
             }
         } else {
@@ -231,36 +228,26 @@ impl RequestChecks {
 }
 
 /// A compiled body model applied to a request body.
-struct BodyModel<'a>(&'a Validator);
+struct BodyModel<'a>(&'a BodySchema);
 
 impl BodyModel<'_> {
-    /// `Err` carries the `validationErrorString`.
-    fn check(&self, body: &Bytes) -> Result<(), String> {
-        let instance: Value = serde_json::from_slice(body)
-            .map_err(|error| Self::bracketed(std::iter::once(error.to_string())))?;
-        let violations: Vec<String> = self
-            .0
-            .iter_errors(&instance)
-            .take(MAX_REPORTED_ERRORS)
-            .map(|violation| violation.to_string())
-            .collect();
-        if violations.is_empty() {
-            Ok(())
-        } else {
-            Err(Self::bracketed(violations))
-        }
+    fn check(&self, body: &Bytes) -> Result<(), ValidationErrorString> {
+        let Some(instance) = Self::parse(body) else {
+            return Err(ValidationErrorString::unparseable());
+        };
+        self.0.report(&instance).into_result()
     }
 
-    fn bracketed(violations: impl IntoIterator<Item = String>) -> String {
-        let joined = violations.into_iter().collect::<Vec<_>>().join(", ");
-        let mut text: String = format!("[{joined}]")
-            .chars()
-            .take(MAX_ERROR_CHARS)
-            .collect();
-        if !text.ends_with(']') {
-            text.push_str("...]");
-        }
-        text
+    /// The body as API Gateway reads it: bytes that are not UTF-8 become
+    /// U+FFFD, a byte order mark is skipped, and only the first JSON value
+    /// counts, whatever follows it.
+    fn parse(body: &Bytes) -> Option<Value> {
+        let text = String::from_utf8_lossy(body);
+        let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+        Deserializer::from_str(text)
+            .into_iter::<Value>()
+            .next()?
+            .ok()
     }
 }
 

@@ -220,10 +220,32 @@ Known differences that remain:
 
 Differences from API Gateway's validators:
 
-- `$context.error.validationErrorString` carries this gateway's schema violation messages (for
-  example `["name" is a required property]`), not API Gateway's wording, and is limited to ten
-  violations and 1,024 characters. The default `BAD_REQUEST_BODY` response does not include it.
-- `pattern` uses Rust regular expression syntax rather than Java's, and `format` is not enforced.
+`$context.error.validationErrorString` reads as API Gateway's does. API Gateway validates with the
+Java `json-schema-validator` library, and this gateway follows that library's evaluation: the same
+message texts (for example `[object has missing required properties (["name"])]`), a member or
+element looked into only while nothing has failed yet, one message for a failed
+`allOf`/`anyOf`/`oneOf`/`not`, a `format attribute "..." not supported` warning beside the errors,
+the distinct messages in the order of a Java `HashSet`, numbers printed as Java prints them, and the
+text escaped like a Java string literal when a template renders it. A body that is not JSON, or is
+empty, reports `[Unknown error parsing request body]`; bytes that are not UTF-8 are read as U+FFFD
+and only the first JSON value of a body counts. `crates/apigw/tests/fixtures/rest-validation-errors.jsonl`
+holds 109 request bodies with the reference REST API's answers, all reproduced; keywords the
+reference model does not use (`enum`, `maximum`, `multipleOf`, `maxLength`, `pattern`, the array
+and property count keywords, `uniqueItems`, `dependencies`, `allOf`/`anyOf`/`oneOf`/`not`) follow the
+library's source and message catalog and are not measured.
+
+Differences from API Gateway's validators:
+
+- An integer outside the 64-bit range is read as a floating-point number, so it fails
+  `type: integer` and prints with an exponent; `-0` is likewise read as `-0.0`. A number too large
+  for a double (`1E400`) is an unreadable body here and a `500` at API Gateway.
+- An `integer` schema without a `format` is taken to have API Gateway's `int32`, which its
+  validator reports as not supported whenever such a value is checked in a failing request. The
+  export does not say whether a model was written that way or imported from OpenAPI.
+- A report longer than 1 MiB is cut off. The default `BAD_REQUEST_BODY` response does not include
+  the report.
+- `pattern` expressions are ECMAScript regular expressions translated to Rust's syntax, and a
+  `format` is not enforced.
 - An empty body, malformed JSON, and a body that is not valid JSON are all `Invalid request body`
   when a model applies to the request's content type; a request without `Content-Type` is treated as
   `application/json`.
