@@ -502,6 +502,15 @@ impl RequestContext {
         self.headers.get(name).and_then(|v| v.to_str().ok())
     }
 
+    /// A header's value as text, for passing on: unlike [`Self::header_str`]
+    /// it has a value for a header that is not ASCII, whose UTF-8 bytes reach
+    /// the backend as the client sent them.
+    pub(crate) fn header_text(&self, name: &str) -> Option<String> {
+        self.headers
+            .get(name)
+            .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
+    }
+
     pub(crate) fn source_ip(&self) -> Option<String> {
         self.identity.source_ip().ip().map(|ip| ip.to_string())
     }

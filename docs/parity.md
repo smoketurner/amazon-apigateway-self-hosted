@@ -222,6 +222,9 @@ also leaves `'` bare; `apigw` sends `%27`.
 - A response to `HEAD` from an integration repeats its length as `x-amzn-Remapped-Content-Length`.
 - An `HTTP_PROXY` backend receives the client's own `x-amzn-apigateway-api-id` when it sent one.
 - In a request template a body of `null` reads as `{}`; nulls inside a body are kept.
+- A header value that is not ASCII reaches an HTTP backend byte for byte, also through a
+  parameter mapping. In a REST Lambda event it is not decoded: each byte above 127 appears as the
+  character U+FF00 plus the byte.
 - `X-HTTP-Method-Override` is consumed: neither a Lambda event nor an HTTP backend sees it.
 - `TRACE` never reaches a REST API. The endpoint answers `405` with a small HTML page and, like the
   `400` for a malformed escape, no `x-amzn-RequestId` or `x-amz-apigw-id`.
@@ -240,8 +243,6 @@ Known differences that remain:
 
 - `apigw` resolves `.` and `..` segments in the URL it sends to an HTTP backend; API Gateway
   sends them as they are.
-- A header value that is not ASCII is not available to parameter mappings. API Gateway passes
-  its bytes on re-encoded.
 - API Gateway answers `403` to a request whose `Host` is not the API's; `apigw` serves any host
   unless `--domain-name` is used.
 - The incomplete-signature messages cover the `Authorization` header only: a `Date` header in
