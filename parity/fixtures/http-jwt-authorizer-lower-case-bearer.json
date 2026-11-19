@@ -1,0 +1,15 @@
+{
+  "name": "http-jwt-authorizer-lower-case-bearer",
+  "source": "recorded",
+  "api": "http",
+  "response": {
+    "status": 401,
+    "headers": {
+      "apigw-requestid": "[masked]",
+      "content-type": "application/json",
+      "date": "[masked]",
+      "www-authenticate": "Bearer scope=\"\" error=\"invalid_token\" error_description=\"tokenstring should not contain 'bearer '\""
+    },
+    "body": "{\"message\":\"Unauthorized\"}"
+  }
+}

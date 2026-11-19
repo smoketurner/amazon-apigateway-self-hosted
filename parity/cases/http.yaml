@@ -37,7 +37,72 @@ cases:
     api: http
     path: /authz/jwt
     compare:
+      headers: [content-type, www-authenticate]
+
+  # A refused token: WWW-Authenticate says why, in API Gateway's words
+  - name: http-jwt-authorizer-not-a-token
+    api: http
+    path: /authz/jwt
+    headers: {Authorization: garbage}
+    compare:
+      headers: [content-type, www-authenticate]
+
+  - name: http-jwt-authorizer-bad-base64
+    api: http
+    path: /authz/jwt
+    headers: {Authorization: Bearer a.b.c}
+    compare:
+      headers: [content-type, www-authenticate]
+
+  - name: http-jwt-authorizer-lower-case-bearer
+    api: http
+    path: /authz/jwt
+    headers: {Authorization: bearer a.b.c}
+    compare:
+      headers: [content-type, www-authenticate]
+
+  # {"alg":"HS256","typ":"JWT"}.{}.sig
+  - name: http-jwt-authorizer-hmac
+    api: http
+    path: /authz/jwt
+    headers: {Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.c2ln}
+    compare:
+      headers: [content-type, www-authenticate]
+
+  # {"alg":"RS256"}.{}.sig
+  - name: http-jwt-authorizer-no-key-id
+    api: http
+    path: /authz/jwt
+    headers: {Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.e30.c2ln}
+    compare:
+      headers: [content-type, www-authenticate]
+
+  # The challenge names the scopes the route asks for
+  - name: http-jwt-authorizer-scoped-not-a-token
+    api: http
+    path: /authz/jwt-scoped
+    headers: {Authorization: Bearer x}
+    compare:
+      headers: [content-type, www-authenticate]
+
+  # A backend request that names no type: none for a GET, a form otherwise.
+  # (The recorded echo keeps neither Via nor Content-Length.)
+  - name: http-http-proxy-get-without-a-type
+    api: http
+    path: /http-proxy/x
+    compare:
       headers: [content-type]
+      body: ignore
+      echo: {headers: [content-type]}
+
+  - name: http-http-proxy-post-without-a-type
+    api: http
+    method: POST
+    path: /http-proxy/x
+    compare:
+      headers: [content-type]
+      body: ignore
+      echo: {headers: [content-type]}
 
   - name: http-lambda-authorizer-missing-identity
     api: http
