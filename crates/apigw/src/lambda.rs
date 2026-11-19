@@ -22,7 +22,6 @@ use crate::header_policy::{Flavor, IamAuthorization};
 use crate::integration::{LambdaProxy, StageVariables};
 use crate::lambda_response::{PreludeError, ProxyResponse, StreamBody, StreamPrelude};
 use crate::model::{ApiKind, PayloadVersion, Protection, ResponseTransferMode};
-use crate::observability::TraceId;
 use crate::pipeline::RequestContext;
 use crate::route::Route;
 
@@ -497,29 +496,12 @@ impl<'a> ProxyEvent<'a> {
         }
         push("x-forwarded-port", ctx.port().to_string());
         push("x-forwarded-proto", "https".to_owned());
-        if let Some(trace) = self.trace_header() {
+        if let Some(trace) = ctx.started_trace_header() {
             push("x-amzn-trace-id", trace);
         }
         if spelling != EventSpelling::Rest {
             push("content-length", ctx.body.len().to_string());
         }
-    }
-
-    /// `X-Amzn-Trace-Id` as the event carries it. With tracing on, the request
-    /// was already stamped with this gateway's segment. Without it, API Gateway
-    /// still starts a trace: `Root=` alone, or `Self=` before whatever the
-    /// client sent.
-    fn trace_header(&self) -> Option<String> {
-        let ctx = self.ctx;
-        let sent = ctx.header_str("x-amzn-trace-id");
-        if ctx.trace.is_some() {
-            return sent.map(str::to_owned);
-        }
-        let started = TraceId::generate(ctx.received)?;
-        Some(match sent {
-            Some(sent) => format!("Self={started};{sent}"),
-            None => format!("Root={started}"),
-        })
     }
 
     fn query(&self) -> MultiValues {
@@ -593,7 +575,7 @@ impl<'a> ProxyEvent<'a> {
                 "requestId": ctx.request_id.to_string(),
                 "requestTime": ctx.request_time(),
                 "requestTimeEpoch": ctx.received.as_millisecond(),
-                "resourceId": null,
+                "resourceId": ctx.resource_id,
                 "resourcePath": ctx.resource_path,
                 "stage": ctx.api.stage_name(),
             },
@@ -900,6 +882,18 @@ mod tests {
         let (own, sent) = trace.split_once(';').unwrap();
         assert!(own.starts_with("Self=1-"), "{trace}");
         assert_eq!(sent, "Root=1-67891233-abcdef012345678912345678;Sampled=1");
+    }
+
+    #[test]
+    fn the_event_names_the_rest_resource_when_its_id_is_known() {
+        let mut ctx = incoming(b"");
+        assert!(event(&ctx, PayloadVersion::V1)["requestContext"]["resourceId"].is_null());
+        ctx.resource_id = Some("t7o32o".to_owned());
+        assert_eq!(
+            event(&ctx, PayloadVersion::V1)["requestContext"]["resourceId"],
+            "t7o32o"
+        );
+        assert_eq!(ctx.variables()["resourceId"], "t7o32o");
     }
 
     #[test]

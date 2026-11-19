@@ -620,6 +620,7 @@ pub(crate) mod tests {
             observer: StageObserver::disabled(),
             release: None,
             deployment_id: None,
+            resource_ids: Arc::default(),
             payload: Arc::default(),
             cache: CacheScope::Off,
         })
@@ -1801,6 +1802,7 @@ pub(crate) mod tests {
             observer: StageObserver::disabled(),
             release: None,
             deployment_id: None,
+            resource_ids: Arc::default(),
             payload: Arc::default(),
             cache: CacheScope::Off,
         });

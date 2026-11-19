@@ -229,6 +229,7 @@ impl Builder {
                     .and_then(|canary| canary.deployment_id.clone()),
                 Some(Release::Production) | None => snapshot.stamp.deployment_id.clone(),
             },
+            resource_ids: Arc::new(snapshot.resource_ids.clone()),
             payload: Arc::new(PayloadSettings::new(
                 &model.settings.binary_media_types,
                 model.settings.minimum_compression_size,
@@ -805,6 +806,7 @@ mod tests {
             },
             openapi: json!({"paths": {"/pets": {"get": {"x-amazon-apigateway-integration":
                 {"type": "http_proxy", "uri": "https://${stageVariables.host}/pets"}}}}}),
+            resource_ids: BTreeMap::new(),
             canary: None,
         }
     }

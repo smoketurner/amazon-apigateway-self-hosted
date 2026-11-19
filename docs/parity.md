@@ -196,9 +196,16 @@ also leaves `'` bare; `apigw` sends `%27`.
   `Content-Length` itself and lower-cases `accept`; payload 2.0 is lower case.
 - REST events leave out `Content-Length`; HTTP API events always carry it, `0` for no body.
 - REST `requestContext` has no `authorizer` key when no authorizer ran, carries
-  `authorizer.integrationLatency` when a Lambda authorizer did, and names the `deploymentId`.
+  `authorizer.integrationLatency` when a Lambda authorizer did, and names the `deploymentId` and,
+  when the gateway may call `GetResources`, the `resourceId`.
 - HTTP API payload 1.0 has `version: "1.0"`, the route key as `resourceId`, `identity.cognitoAmr`,
   and a `path` that is the path as sent, stage and escapes included.
+
+**Other**
+
+- A response API Gateway generates for a `HEAD` request has `content-length: 0`.
+- AWS service integrations receive the request's `X-Amzn-Trace-Id`, which Step Functions reports
+  back as `traceHeader`.
 
 **Request templates** read the body leniently: an empty body is `{}`, what follows the first JSON
 value is ignored, and a body that is not JSON is a string. A body that opens an object, array, or
@@ -206,15 +213,11 @@ string and does not hold one answers `400` `{"message": "Could not process paylo
 
 Known differences that remain:
 
-- `requestContext.resourceId` is `null` on REST events: an export does not carry resource IDs.
 - `X-Forwarded-For` holds the address `apigw` established for the client. API Gateway appends
   that address to whatever the client sent; `apigw` only keeps a client's value from a trusted
   proxy ([deployment.md](deployment.md#client-ip)).
 - `X-Forwarded-Port` is the port in the `Host` header, `443` when it names none. API Gateway
   always says `443`.
-- A `HEAD` request that fails gets `content-length: 0` from API Gateway and the body's length
-  from `apigw`.
-- Step Functions responses lack the `traceHeader` API Gateway's own trace adds.
 
 ## Request validation
 

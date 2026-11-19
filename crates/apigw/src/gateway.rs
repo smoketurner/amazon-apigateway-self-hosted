@@ -1,6 +1,7 @@
 //! Gateway-wide state and policy: what every route of one API shares, how
 //! unevaluated protections are enforced, and API Gateway's error responses.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use std::num::NonZeroU32;
@@ -165,6 +166,8 @@ pub(crate) struct ApiContext {
     pub(crate) release: Option<Release>,
     /// The deployment this release serves, when API Gateway named one.
     pub(crate) deployment_id: Option<String>,
+    /// The ID of each REST resource by its path, when they could be read.
+    pub(crate) resource_ids: Arc<BTreeMap<String, String>>,
     /// Binary media types and compression settings.
     pub(crate) payload: Arc<PayloadSettings>,
     /// Whether this release caches responses, and where.
