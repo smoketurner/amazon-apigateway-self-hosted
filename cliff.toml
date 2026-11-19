@@ -42,6 +42,9 @@ commit_parsers = [
 ]
 filter_commits = false
 tag_pattern = "v[0-9]+\\.[0-9]+\\.[0-9]+"
+# v2026.11.1 was tagged but its release run failed before publishing, so the
+# next release's notes start from the beginning rather than from that tag.
+ignore_tags = "^v2026\\.11\\.1$"
 topo_order = false
 sort_commits = "newest"
 
