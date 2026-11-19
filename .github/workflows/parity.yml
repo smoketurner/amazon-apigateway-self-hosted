@@ -1,16 +1,14 @@
 name: Parity
 
-# Nightly: re-record the reference APIs and open (or update) an issue when API Gateway's
+# Manual: re-record the reference APIs and open (or update) an issue when API Gateway's
 # behavior no longer matches the committed fixtures. Drift never fails the run; a run
 # fails only when recording itself fails.
 #
-# This only works once terraform/environments/dev is deployed and the repository variables and
-# secrets listed in terraform/README.md are set. Until PARITY_AWS_ROLE_ARN is set the job
-# is skipped.
+# There is no schedule: the reference stack is not kept deployed. Run this while
+# terraform/environments/dev is deployed and the repository variables and secrets listed
+# in terraform/README.md are set. Until PARITY_AWS_ROLE_ARN is set the job is skipped.
 
 on:
-  schedule:
-    - cron: "17 5 * * *"
   workflow_dispatch:
 
 concurrency:

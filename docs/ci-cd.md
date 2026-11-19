@@ -8,7 +8,7 @@
 - **`parity-replay` job** — builds `apigw` and `apigw-parity` and runs
   `apigw-parity replay`: it serves the recorded exports with `apigw` and diffs its answers
   against `parity/fixtures/`. Needs no AWS access. See [parity/README.md](../parity/README.md).
-- **`.github/workflows/parity.yml`** — nightly (and manual): assumes the GitHub OIDC role from
+- **`.github/workflows/parity.yml`** — manual: assumes the GitHub OIDC role from
   `terraform/environments/dev`, downloads the reference APIs' exports, runs `apigw-parity record`,
   and opens or updates a `parity-drift` issue when API Gateway no longer matches the committed
   fixtures. Drift never fails the run. It only works once the reference stack is deployed and

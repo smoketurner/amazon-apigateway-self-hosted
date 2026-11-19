@@ -48,7 +48,7 @@ the environment pins exact versions and configures the provider and backend.
 | Backends | Python echo Lambda (returns the event it received); the same echo behind a Lambda function URL that requires a shared-secret `x-echo-secret` header, used as the HTTP backend through the `echo_host` and `echo_secret` stage variables; a deterministic authorizer Lambda |
 | Identity | Cognito user pool, app client (`USER_PASSWORD_AUTH`), and a test user |
 | Service targets | SQS queue, DynamoDB table, Step Functions EXPRESS state machine, EventBridge bus (events are also written to a log group) |
-| CI | GitHub OIDC provider (unless you pass an existing one) and a read-only role for the nightly workflow |
+| CI | GitHub OIDC provider (unless you pass an existing one) and a read-only role for the parity workflow |
 
 Gateway responses are customized only for `BAD_REQUEST_BODY`, `BAD_REQUEST_PARAMETERS`,
 `THROTTLED`, and `DEFAULT_5XX`; the missing-token, unauthorized, and forbidden responses stay
@@ -100,7 +100,7 @@ Variables worth knowing (all in `environments/dev/variables.tf`):
 | `api_key_value` (sensitive) | Value of the usage-plan key for `/keyed` |
 | `cognito_test_password` (sensitive) | Password of the Cognito test user |
 | `echo_shared_secret` (sensitive) | Secret the echo function URL requires |
-| `github_ci_role_arn` | Role for the nightly workflow |
+| `github_ci_role_arn` | Role for the parity workflow |
 | `ecs_gateway` | ECR repository, cluster, service, task role, and log group of the ECS gateway; `null` unless enabled |
 | `lambda_gateway` | ECR repository, function URL, role, and log group of the Lambda gateway; `null` unless enabled |
 
@@ -209,7 +209,7 @@ terraform apply                       # creates the function and its URL
 curl "$(terraform output -json lambda_gateway | jq -r .function_url)ref/mock"
 ```
 
-## Nightly parity workflow
+## Parity workflow
 
 `.github/workflows/parity.yml` assumes the CI role with GitHub OIDC. Configure the repository
 with:

@@ -8,6 +8,10 @@ updates:
       prefix: "deps"
     cooldown:
       default-days: 7
+    ignore:
+      # The route pre-check has to run the same matchit as axum's router, so
+      # this moves only when axum's own matchit dependency does.
+      - dependency-name: "matchit"
     groups:
       rust-dependencies:
         patterns:
