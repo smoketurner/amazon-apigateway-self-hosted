@@ -286,6 +286,7 @@ are flushed every 5 seconds, when a batch is full, and at shutdown.
 | Action | Resource | For |
 |---|---|---|
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/restapis/<id>/stages/<stage>/exports/oas30`, `.../restapis/<id>/stages/<stage>` | REST APIs |
+| `apigateway:GET` | `arn:aws:apigateway:<region>::/restapis/<id>/resources` | `$context.resourceId` and `requestContext.resourceId` of a REST API; optional, they are empty without it |
 | `apigateway:GET` | the same two resources for the stage named by `--canary-export-stage` | canary releases from a shadow stage |
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/usageplans`, `.../usageplans/*/keys`, `.../apikeys` | API keys and usage plans of a REST API stage |
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/apis/<id>/exports/OAS30`, `.../apis/<id>/stages/<stage>` | HTTP APIs |

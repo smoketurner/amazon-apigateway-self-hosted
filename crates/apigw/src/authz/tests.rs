@@ -260,6 +260,7 @@ impl Harness {
             observer: StageObserver::disabled(),
             release: None,
             deployment_id: None,
+            resource_ids: Arc::default(),
             payload: Arc::default(),
             cache: CacheScope::Off,
             http: reqwest::Client::new(),

@@ -4,306 +4,11 @@
   "stage": "ref",
   "stage_variables": {},
   "openapi": {
-    "components": {
-      "securitySchemes": {
-        "jwt": {
-          "flows": {},
-          "type": "oauth2",
-          "x-amazon-apigateway-authorizer": {
-            "identitySource": "$request.header.Authorization",
-            "jwtConfiguration": {
-              "audience": [
-                "28pv53f24rnoao0usj605dakn2"
-              ],
-              "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_2nwDzvKWd"
-            },
-            "type": "jwt"
-          }
-        },
-        "lambda_iam": {
-          "in": "header",
-          "name": "x-auth",
-          "type": "apiKey",
-          "x-amazon-apigateway-authorizer": {
-            "authorizerCredentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
-            "authorizerPayloadFormatVersion": "1.0",
-            "authorizerResultTtlInSeconds": 0,
-            "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-authorizer/invocations",
-            "enableSimpleResponses": false,
-            "identitySource": "$request.header.x-auth",
-            "type": "request"
-          }
-        },
-        "lambda_simple": {
-          "in": "header",
-          "name": "x-auth",
-          "type": "apiKey",
-          "x-amazon-apigateway-authorizer": {
-            "authorizerCredentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
-            "authorizerPayloadFormatVersion": "2.0",
-            "authorizerResultTtlInSeconds": 0,
-            "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-authorizer/invocations",
-            "enableSimpleResponses": true,
-            "identitySource": "$request.header.x-auth",
-            "type": "request"
-          }
-        }
-      }
-    },
-    "info": {
-      "description": "HTTP API covering the in-scope features, used as the parity reference.",
-      "title": "apigw-ref-http",
-      "version": "2026-11-19 14:18:37UTC"
-    },
     "openapi": "3.0.1",
-    "paths": {
-      "/$default": {
-        "x-amazon-apigateway-any-method": {
-          "isDefaultRoute": true,
-          "x-amazon-apigateway-integration": {
-            "connectionType": "INTERNET",
-            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
-            "httpMethod": "POST",
-            "payloadFormatVersion": "2.0",
-            "type": "aws_proxy",
-            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations"
-          }
-        }
-      },
-      "/authz/jwt": {
-        "get": {
-          "responses": {
-            "default": {
-              "description": "Default response for GET /authz/jwt"
-            }
-          },
-          "security": [
-            {
-              "jwt": []
-            }
-          ],
-          "x-amazon-apigateway-integration": {
-            "connectionType": "INTERNET",
-            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
-            "httpMethod": "POST",
-            "payloadFormatVersion": "2.0",
-            "type": "aws_proxy",
-            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations"
-          }
-        }
-      },
-      "/authz/jwt-scoped": {
-        "get": {
-          "responses": {
-            "default": {
-              "description": "Default response for GET /authz/jwt-scoped"
-            }
-          },
-          "security": [
-            {
-              "jwt": [
-                "aws.cognito.signin.user.admin"
-              ]
-            }
-          ],
-          "x-amazon-apigateway-integration": {
-            "connectionType": "INTERNET",
-            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
-            "httpMethod": "POST",
-            "payloadFormatVersion": "2.0",
-            "type": "aws_proxy",
-            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations"
-          }
-        }
-      },
-      "/authz/lambda-iam": {
-        "get": {
-          "responses": {
-            "default": {
-              "description": "Default response for GET /authz/lambda-iam"
-            }
-          },
-          "security": [
-            {
-              "lambda_iam": []
-            }
-          ],
-          "x-amazon-apigateway-integration": {
-            "connectionType": "INTERNET",
-            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
-            "httpMethod": "POST",
-            "payloadFormatVersion": "2.0",
-            "type": "aws_proxy",
-            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations"
-          }
-        }
-      },
-      "/authz/lambda-simple": {
-        "get": {
-          "responses": {
-            "default": {
-              "description": "Default response for GET /authz/lambda-simple"
-            }
-          },
-          "security": [
-            {
-              "lambda_simple": []
-            }
-          ],
-          "x-amazon-apigateway-integration": {
-            "connectionType": "INTERNET",
-            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
-            "httpMethod": "POST",
-            "payloadFormatVersion": "2.0",
-            "type": "aws_proxy",
-            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations"
-          }
-        }
-      },
-      "/http-proxy/{proxy+}": {
-        "parameters": [
-          {
-            "description": "Generated path parameter for proxy+",
-            "in": "path",
-            "name": "proxy+",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "x-amazon-apigateway-any-method": {
-          "responses": {
-            "default": {
-              "description": "Default response for ANY /http-proxy/{proxy+}"
-            }
-          },
-          "x-amazon-apigateway-integration": {
-            "connectionType": "INTERNET",
-            "httpMethod": "ANY",
-            "payloadFormatVersion": "1.0",
-            "requestParameters": {
-              "overwrite:header.x-echo-secret": "[redacted]"
-            },
-            "timeoutInMillis": 5000,
-            "type": "http_proxy",
-            "uri": "https://${stageVariables.echo_host}/http-proxy/{proxy}"
-          }
-        }
-      },
-      "/lambda-v1/{proxy+}": {
-        "parameters": [
-          {
-            "description": "Generated path parameter for proxy+",
-            "in": "path",
-            "name": "proxy+",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "x-amazon-apigateway-any-method": {
-          "responses": {
-            "default": {
-              "description": "Default response for ANY /lambda-v1/{proxy+}"
-            }
-          },
-          "x-amazon-apigateway-integration": {
-            "connectionType": "INTERNET",
-            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
-            "httpMethod": "POST",
-            "payloadFormatVersion": "1.0",
-            "type": "aws_proxy",
-            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations"
-          }
-        }
-      },
-      "/lambda-v2/{proxy+}": {
-        "parameters": [
-          {
-            "description": "Generated path parameter for proxy+",
-            "in": "path",
-            "name": "proxy+",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "x-amazon-apigateway-any-method": {
-          "responses": {
-            "default": {
-              "description": "Default response for ANY /lambda-v2/{proxy+}"
-            }
-          },
-          "x-amazon-apigateway-integration": {
-            "connectionType": "INTERNET",
-            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
-            "httpMethod": "POST",
-            "payloadFormatVersion": "2.0",
-            "type": "aws_proxy",
-            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations"
-          }
-        }
-      },
-      "/mapped/{id}": {
-        "get": {
-          "responses": {
-            "default": {
-              "description": "Default response for GET /mapped/{id}"
-            }
-          },
-          "x-amazon-apigateway-integration": {
-            "connectionType": "INTERNET",
-            "httpMethod": "GET",
-            "payloadFormatVersion": "1.0",
-            "requestParameters": {
-              "append:header.x-appended": "$context.stage",
-              "append:querystring.appended": "$context.stage",
-              "overwrite:header.x-echo-secret": "[redacted]",
-              "overwrite:path": "/http-mapped/$request.path.id",
-              "overwrite:querystring.fixed": "literal"
-            },
-            "responseParameters": {
-              "200": {
-                "append:header.x-reference-response": "mapped"
-              }
-            },
-            "timeoutInMillis": 5000,
-            "type": "http_proxy",
-            "uri": "https://${stageVariables.echo_host}/http-mapped/{id}"
-          }
-        },
-        "parameters": [
-          {
-            "description": "Generated path parameter for id",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ]
-      },
-      "/throttled": {
-        "get": {
-          "responses": {
-            "default": {
-              "description": "Default response for GET /throttled"
-            }
-          },
-          "x-amazon-apigateway-integration": {
-            "connectionType": "INTERNET",
-            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
-            "httpMethod": "POST",
-            "payloadFormatVersion": "2.0",
-            "type": "aws_proxy",
-            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations"
-          }
-        }
-      }
+    "info": {
+      "title": "apigw-ref-http",
+      "description": "HTTP API covering the in-scope features, used as the parity reference.",
+      "version": "2026-11-19 14:18:37UTC"
     },
     "servers": [
       {
@@ -333,6 +38,301 @@
         "x-amazon-apigateway-tag-value": "terraform"
       }
     ],
+    "paths": {
+      "/$default": {
+        "x-amazon-apigateway-any-method": {
+          "isDefaultRoute": true,
+          "x-amazon-apigateway-integration": {
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "payloadFormatVersion": "2.0",
+            "type": "aws_proxy",
+            "httpMethod": "POST",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations",
+            "connectionType": "INTERNET"
+          }
+        }
+      },
+      "/http-proxy/{proxy+}": {
+        "parameters": [
+          {
+            "name": "proxy+",
+            "in": "path",
+            "description": "Generated path parameter for proxy+",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-amazon-apigateway-any-method": {
+          "responses": {
+            "default": {
+              "description": "Default response for ANY /http-proxy/{proxy+}"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "requestParameters": {
+              "overwrite:header.x-echo-secret": "[redacted]"
+            },
+            "payloadFormatVersion": "1.0",
+            "type": "http_proxy",
+            "httpMethod": "ANY",
+            "uri": "https://${stageVariables.echo_host}/http-proxy/{proxy}",
+            "connectionType": "INTERNET",
+            "timeoutInMillis": 5000
+          }
+        }
+      },
+      "/lambda-v1/{proxy+}": {
+        "parameters": [
+          {
+            "name": "proxy+",
+            "in": "path",
+            "description": "Generated path parameter for proxy+",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-amazon-apigateway-any-method": {
+          "responses": {
+            "default": {
+              "description": "Default response for ANY /lambda-v1/{proxy+}"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "payloadFormatVersion": "1.0",
+            "type": "aws_proxy",
+            "httpMethod": "POST",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations",
+            "connectionType": "INTERNET"
+          }
+        }
+      },
+      "/lambda-v2/{proxy+}": {
+        "parameters": [
+          {
+            "name": "proxy+",
+            "in": "path",
+            "description": "Generated path parameter for proxy+",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-amazon-apigateway-any-method": {
+          "responses": {
+            "default": {
+              "description": "Default response for ANY /lambda-v2/{proxy+}"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "payloadFormatVersion": "2.0",
+            "type": "aws_proxy",
+            "httpMethod": "POST",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations",
+            "connectionType": "INTERNET"
+          }
+        }
+      },
+      "/authz/jwt": {
+        "get": {
+          "responses": {
+            "default": {
+              "description": "Default response for GET /authz/jwt"
+            }
+          },
+          "security": [
+            {
+              "jwt": []
+            }
+          ],
+          "x-amazon-apigateway-integration": {
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "payloadFormatVersion": "2.0",
+            "type": "aws_proxy",
+            "httpMethod": "POST",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations",
+            "connectionType": "INTERNET"
+          }
+        }
+      },
+      "/authz/jwt-scoped": {
+        "get": {
+          "responses": {
+            "default": {
+              "description": "Default response for GET /authz/jwt-scoped"
+            }
+          },
+          "security": [
+            {
+              "jwt": [
+                "aws.cognito.signin.user.admin"
+              ]
+            }
+          ],
+          "x-amazon-apigateway-integration": {
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "payloadFormatVersion": "2.0",
+            "type": "aws_proxy",
+            "httpMethod": "POST",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations",
+            "connectionType": "INTERNET"
+          }
+        }
+      },
+      "/authz/lambda-iam": {
+        "get": {
+          "responses": {
+            "default": {
+              "description": "Default response for GET /authz/lambda-iam"
+            }
+          },
+          "security": [
+            {
+              "lambda_iam": []
+            }
+          ],
+          "x-amazon-apigateway-integration": {
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "payloadFormatVersion": "2.0",
+            "type": "aws_proxy",
+            "httpMethod": "POST",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations",
+            "connectionType": "INTERNET"
+          }
+        }
+      },
+      "/authz/lambda-simple": {
+        "get": {
+          "responses": {
+            "default": {
+              "description": "Default response for GET /authz/lambda-simple"
+            }
+          },
+          "security": [
+            {
+              "lambda_simple": []
+            }
+          ],
+          "x-amazon-apigateway-integration": {
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "payloadFormatVersion": "2.0",
+            "type": "aws_proxy",
+            "httpMethod": "POST",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations",
+            "connectionType": "INTERNET"
+          }
+        }
+      },
+      "/mapped/{id}": {
+        "get": {
+          "responses": {
+            "default": {
+              "description": "Default response for GET /mapped/{id}"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "responseParameters": {
+              "200": {
+                "append:header.x-reference-response": "mapped"
+              }
+            },
+            "requestParameters": {
+              "overwrite:header.x-echo-secret": "[redacted]",
+              "append:header.x-appended": "$context.stage",
+              "overwrite:querystring.fixed": "literal",
+              "overwrite:path": "/http-mapped/$request.path.id",
+              "append:querystring.appended": "$context.stage"
+            },
+            "payloadFormatVersion": "1.0",
+            "type": "http_proxy",
+            "httpMethod": "GET",
+            "uri": "https://${stageVariables.echo_host}/http-mapped/{id}",
+            "connectionType": "INTERNET",
+            "timeoutInMillis": 5000
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Generated path parameter for id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "/throttled": {
+        "get": {
+          "responses": {
+            "default": {
+              "description": "Default response for GET /throttled"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "payloadFormatVersion": "2.0",
+            "type": "aws_proxy",
+            "httpMethod": "POST",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations",
+            "connectionType": "INTERNET"
+          }
+        }
+      }
+    },
+    "components": {
+      "securitySchemes": {
+        "lambda_simple": {
+          "type": "apiKey",
+          "name": "x-auth",
+          "in": "header",
+          "x-amazon-apigateway-authorizer": {
+            "identitySource": "$request.header.x-auth",
+            "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-authorizer/invocations",
+            "authorizerCredentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "authorizerPayloadFormatVersion": "2.0",
+            "authorizerResultTtlInSeconds": 0,
+            "type": "request",
+            "enableSimpleResponses": true
+          }
+        },
+        "jwt": {
+          "type": "oauth2",
+          "flows": {},
+          "x-amazon-apigateway-authorizer": {
+            "identitySource": "$request.header.Authorization",
+            "jwtConfiguration": {
+              "audience": [
+                "28pv53f24rnoao0usj605dakn2"
+              ],
+              "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_2nwDzvKWd"
+            },
+            "type": "jwt"
+          }
+        },
+        "lambda_iam": {
+          "type": "apiKey",
+          "name": "x-auth",
+          "in": "header",
+          "x-amazon-apigateway-authorizer": {
+            "identitySource": "$request.header.x-auth",
+            "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-authorizer/invocations",
+            "authorizerCredentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "authorizerPayloadFormatVersion": "1.0",
+            "authorizerResultTtlInSeconds": 0,
+            "type": "request",
+            "enableSimpleResponses": false
+          }
+        }
+      }
+    },
     "x-amazon-apigateway-importexport-version": "1.0"
   }
 }

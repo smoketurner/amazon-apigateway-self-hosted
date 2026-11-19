@@ -211,6 +211,22 @@ impl Flavor {
                     None => continue,
                 },
             };
+            // Not in the documented table, but what a deployed API does for
+            // an `HTTP_PROXY` integration: the backend's request ID moves
+            // aside for the API's own, and its length is repeated.
+            if self == Self::HttpProxy && name.as_str() == "x-amzn-requestid" {
+                headers.append(
+                    HeaderName::from_static("x-amzn-remapped-x-amzn-requestid"),
+                    value,
+                );
+                continue;
+            }
+            if self == Self::HttpProxy && name == header::CONTENT_LENGTH {
+                headers.append(
+                    HeaderName::from_static("x-amzn-remapped-content-length"),
+                    value.clone(),
+                );
+            }
             match self.response_action(&name) {
                 Passthrough | Exception | Overwritten => {
                     headers.append(name, value);
@@ -339,6 +355,25 @@ impl fmt::Display for Flavor {
 #[expect(clippy::panic, reason = "tests fail loudly on unexpected cells")]
 mod tests {
     use super::*;
+
+    /// Measured against a deployed REST API with an `HTTP_PROXY` integration.
+    #[test]
+    fn http_proxy_responses_move_the_backends_request_id_and_repeat_its_length() {
+        let mut upstream = HeaderMap::new();
+        upstream.insert("x-amzn-requestid", HeaderValue::from_static("backend-id"));
+        upstream.insert("content-length", HeaderValue::from_static("1126"));
+        let mut proxied = upstream.clone();
+        Flavor::HttpProxy.remap_response(&mut proxied);
+        assert_eq!(proxied["x-amzn-remapped-x-amzn-requestid"], "backend-id");
+        assert!(!proxied.contains_key("x-amzn-requestid"));
+        assert_eq!(proxied["x-amzn-remapped-content-length"], "1126");
+        assert_eq!(proxied["content-length"], "1126");
+
+        let mut mapped = upstream;
+        Flavor::Http.remap_response(&mut mapped);
+        assert!(!mapped.contains_key("x-amzn-remapped-content-length"));
+        assert!(!mapped.contains_key("x-amzn-remapped-x-amzn-requestid"));
+    }
 
     /// The documentation's table, one line per header: request columns, then
     /// response columns, in `http`/`http_proxy`/`lambda` order. Each cell is

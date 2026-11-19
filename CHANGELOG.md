@@ -305,7 +305,10 @@ All notable changes to this project are documented here. The format follows
   routes ignore trailing and extra leading slashes and never percent-decode path parameters; HTTP
   APIs route on the decoded, slash-collapsed path; query strings to REST HTTP backends are escaped
   as API Gateway escapes them; a malformed `%` escape answers 400; and request templates read
-  empty, non-JSON, and broken-JSON bodies as API Gateway does instead of answering 500.
+  empty, non-JSON, and broken-JSON bodies as API Gateway does instead of answering 500. REST
+  responses carry `x-amz-apigw-id`, `X-Amzn-Trace-Id` after an integration, and the remapped
+  request ID and length of an `HTTP_PROXY` backend; a generated response to `HEAD` has no length;
+  and `$context.resourceId` is filled in when the gateway may call `GetResources`.
 
 - Resource policies and request validators were silently ignored because the REST export did
   not request them. The export now uses `extensions=apigateway,authorizers`; routes under a

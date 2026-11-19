@@ -72,7 +72,9 @@ impl HeaderPolicy {
     fn response(name: &str) -> HeaderAction {
         if Self::RESPONSE_DROPPED.contains(&name) {
             HeaderAction::Drop
-        } else if Self::RESPONSE_MASKED.contains(&name) {
+        } else if Self::RESPONSE_MASKED.contains(&name) || name.starts_with("x-amzn-remapped-") {
+            // A remapped header carries the backend's own value, which a
+            // replay's stand-in backend does not reproduce.
             HeaderAction::Mask
         } else {
             HeaderAction::Keep

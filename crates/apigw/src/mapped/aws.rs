@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use axum::http::{HeaderMap, Method, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, header};
 
 use crate::aws::RoleArn;
 use crate::aws_service::{ServiceCall, ServiceUri, UriTarget};
@@ -13,6 +13,8 @@ use crate::mapped::{BackendReply, BackendRequest};
 use crate::model::{ApiKind, IntegrationSpec};
 use crate::pipeline::RequestContext;
 use crate::request_parameters::RequestParameters;
+
+const TRACE_HEADER: HeaderName = HeaderName::from_static("x-amzn-trace-id");
 
 /// A compiled REST `AWS` integration to an AWS service.
 #[derive(Debug, Clone)]
@@ -80,6 +82,14 @@ impl AwsBackend {
             && !headers.contains_key(header::CONTENT_TYPE)
         {
             headers.insert(header::CONTENT_TYPE, content_type);
+        }
+        // The service sees the request's trace, as it does behind API Gateway
+        // (Step Functions reports it back as `traceHeader`).
+        if !headers.contains_key(TRACE_HEADER)
+            && let Some(trace) = ctx.started_trace_header()
+            && let Ok(trace) = HeaderValue::try_from(trace)
+        {
+            headers.insert(TRACE_HEADER, trace);
         }
         let call = ServiceCall {
             service: self.uri.service,

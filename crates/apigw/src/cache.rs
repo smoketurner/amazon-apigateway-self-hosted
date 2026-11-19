@@ -1036,6 +1036,7 @@ mod tests {
             observer: StageObserver::disabled(),
             release: None,
             deployment_id: None,
+            resource_ids: Arc::default(),
             cache: scope,
             payload: Arc::default(),
             http: reqwest::Client::new(),

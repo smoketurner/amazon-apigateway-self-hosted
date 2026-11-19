@@ -234,6 +234,11 @@ async fn request_template_and_parameter_mappings_shape_the_backend_request() {
     )
     .await;
     assert_eq!(reply.status, StatusCode::OK);
+    let trace = reply.headers["x-amzn-trace-id"].to_str().unwrap();
+    assert!(
+        trace.starts_with("Root=1-"),
+        "a REST API answers with the trace of a request an integration served: {trace}"
+    );
     let seen = reply.json();
     assert_eq!(seen["method"], "POST");
     assert_eq!(seen["query"], "owner=ada&page=2");

@@ -10,7 +10,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use axum::body::Body;
-use axum::http::{HeaderName, HeaderValue, StatusCode, header};
+use axum::http::{HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::Response;
 use serde_json::json;
 
@@ -585,9 +585,19 @@ impl GatewayResponses {
             None => (JSON, Template(default_template.to_owned()).render(&scope)),
         };
 
-        let mut response = Response::new(Body::from(body));
+        // A HEAD request gets the response's headers with a length of zero,
+        // not the length of the body a GET would have had.
+        let head = request.method == Method::HEAD;
+        let mut response = Response::new(if head {
+            Body::empty()
+        } else {
+            Body::from(body)
+        });
         *response.status_mut() = status;
         let headers = response.headers_mut();
+        if head {
+            headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
+        }
         if let Some(response_type) = failure.response_type() {
             headers.insert(
                 ERROR_TYPE_HEADER,
@@ -870,6 +880,23 @@ mod tests {
             body(response).await,
             "HTTP content length exceeded 10485760 bytes."
         );
+    }
+
+    /// Measured against a deployed REST API.
+    #[tokio::test]
+    async fn a_head_request_gets_the_headers_and_a_zero_length() {
+        let mut ctx = request(ApiKind::Rest);
+        ctx.method = Method::HEAD;
+        let response =
+            GatewayResponses::default().render(&GatewayError::NoRoute.failure(ApiKind::Rest), &ctx);
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.headers()["content-length"], "0");
+        assert_eq!(response.headers()["content-type"], "application/json");
+        assert_eq!(
+            response.headers()["x-amzn-errortype"],
+            "MissingAuthenticationTokenException"
+        );
+        assert_eq!(body(response).await, "");
     }
 
     #[test]

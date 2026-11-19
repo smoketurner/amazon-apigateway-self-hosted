@@ -439,6 +439,16 @@ fn json_response(status: StatusCode, event: &EchoEvent) -> Response {
     let body = serde_json::to_vec(event).unwrap_or_default();
     let mut response = Response::new(Body::from(body));
     *response.status_mut() = status;
+    // A function URL names its own request and trace, which a gateway in
+    // front of it has to deal with.
+    response.headers_mut().insert(
+        "x-amzn-requestid",
+        HeaderValue::from_static("00000000-0000-0000-0000-000000000000"),
+    );
+    response.headers_mut().insert(
+        "x-amzn-trace-id",
+        HeaderValue::from_static("Root=1-00000000-000000000000000000000000"),
+    );
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),

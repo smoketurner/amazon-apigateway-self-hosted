@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use axum::Router;
 use axum::extract::Request;
-use axum::http::{HeaderValue, Method, StatusCode};
+use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use serde::Serialize;
@@ -31,6 +31,8 @@ use crate::route::{AccessRules, Route};
 use crate::throttle::ThrottleSettings;
 use crate::usage::ApiKeyRules;
 use crate::validation::RequestValidators;
+
+const EXTENDED_REQUEST_ID: HeaderName = HeaderName::from_static("x-amz-apigw-id");
 
 /// A stage prefix such as `/prod` that every route is served under, as on an
 /// `execute-api` endpoint. Empty serves routes at the root, as on a custom domain.
@@ -404,6 +406,13 @@ impl Loaded {
                 .headers_mut()
                 .insert(self.kind.request_id_header(), value);
         }
+        // A REST API puts the extended request ID on every response, not only
+        // on the ones it generates itself.
+        if self.kind == ApiKind::Rest
+            && let Ok(value) = HeaderValue::try_from(RequestId(request_id).extended())
+        {
+            response.headers_mut().insert(EXTENDED_REQUEST_ID, value);
+        }
         tracing::info!(
             request_id = %request_id,
             %method,
@@ -620,6 +629,7 @@ pub(crate) mod tests {
             observer: StageObserver::disabled(),
             release: None,
             deployment_id: None,
+            resource_ids: Arc::default(),
             payload: Arc::default(),
             cache: CacheScope::Off,
         })
@@ -1728,6 +1738,14 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert!(response.headers().contains_key("x-amzn-requestid"));
+        assert!(
+            response.headers().contains_key("x-amz-apigw-id"),
+            "a REST API names the extended request ID on every response"
+        );
+        assert!(
+            !response.headers().contains_key("x-amzn-trace-id"),
+            "a MOCK integration starts no trace"
+        );
 
         let doc =
             json!({"paths": {"/pets": {"get": {"x-amazon-apigateway-integration": mock(203)}}}});
@@ -1801,6 +1819,7 @@ pub(crate) mod tests {
             observer: StageObserver::disabled(),
             release: None,
             deployment_id: None,
+            resource_ids: Arc::default(),
             payload: Arc::default(),
             cache: CacheScope::Off,
         });
