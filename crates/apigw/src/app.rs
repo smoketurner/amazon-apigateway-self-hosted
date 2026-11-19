@@ -221,6 +221,14 @@ impl Builder {
                 release,
             ),
             release,
+            deployment_id: match release {
+                Some(Release::Canary) => snapshot
+                    .stage_settings
+                    .canary
+                    .as_ref()
+                    .and_then(|canary| canary.deployment_id.clone()),
+                Some(Release::Production) | None => snapshot.stamp.deployment_id.clone(),
+            },
             payload: Arc::new(PayloadSettings::new(
                 &model.settings.binary_media_types,
                 model.settings.minimum_compression_size,

@@ -21,6 +21,7 @@ use crate::header_policy::{Flavor, IamAuthorization};
 use crate::integration::{LambdaProxy, StageVariables};
 use crate::lambda_response::{PreludeError, ProxyResponse, StreamBody, StreamPrelude};
 use crate::model::{ApiKind, PayloadVersion, Protection, ResponseTransferMode};
+use crate::observability::TraceId;
 use crate::pipeline::RequestContext;
 use crate::route::Route;
 
@@ -235,6 +236,15 @@ impl EventBody {
     }
 }
 
+/// Headers a REST API writes into an event itself; what the client sent under
+/// these names is folded into the gateway's own values.
+const GATEWAY_EVENT_HEADERS: [&str; 4] = [
+    "x-forwarded-for",
+    "x-forwarded-port",
+    "x-forwarded-proto",
+    "x-amzn-trace-id",
+];
+
 /// A JSON object of string values.
 #[derive(Default)]
 struct StringFields(Map<String, Value>);
@@ -387,6 +397,9 @@ impl<'a> ProxyEvent<'a> {
         };
         let mut headers = MultiValues::default();
         for (name, value) in allowed.iter() {
+            if keep_case && GATEWAY_EVENT_HEADERS.contains(&name.as_str()) {
+                continue;
+            }
             let name = if keep_case {
                 self.ctx.header_case.spelling(name.as_str())
             } else {
@@ -397,7 +410,53 @@ impl<'a> ProxyEvent<'a> {
                 String::from_utf8_lossy(value.as_bytes()).into_owned(),
             );
         }
+        if keep_case {
+            self.push_gateway_headers(&mut headers);
+        }
         headers
+    }
+
+    /// The headers a REST API writes into an event itself, under these
+    /// spellings whatever the client sent: the forwarding chain, the port and
+    /// protocol the client connected to, and the trace header.
+    fn push_gateway_headers(&self, headers: &mut MultiValues) {
+        let ctx = self.ctx;
+        let chain: Vec<&str> = ctx
+            .headers
+            .get_all("x-forwarded-for")
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .collect();
+        let forwarded_for = if chain.is_empty() {
+            ctx.source_ip()
+        } else {
+            Some(chain.join(", "))
+        };
+        if let Some(forwarded_for) = forwarded_for {
+            headers.push("X-Forwarded-For".to_owned(), forwarded_for);
+        }
+        headers.push("X-Forwarded-Port".to_owned(), ctx.port().to_string());
+        headers.push("X-Forwarded-Proto".to_owned(), "https".to_owned());
+        if let Some(trace) = self.trace_header() {
+            headers.push("X-Amzn-Trace-Id".to_owned(), trace);
+        }
+    }
+
+    /// `X-Amzn-Trace-Id` as the event carries it. With tracing on, the request
+    /// was already stamped with this gateway's segment. Without it, API Gateway
+    /// still starts a trace: `Root=` alone, or `Self=` before whatever the
+    /// client sent.
+    fn trace_header(&self) -> Option<String> {
+        let ctx = self.ctx;
+        let sent = ctx.header_str("x-amzn-trace-id");
+        if ctx.trace.is_some() {
+            return sent.map(str::to_owned);
+        }
+        let started = TraceId::generate(ctx.received)?;
+        Some(match sent {
+            Some(sent) => format!("Self={started};{sent}"),
+            None => format!("Root={started}"),
+        })
     }
 
     fn query(&self) -> MultiValues {
@@ -446,7 +505,7 @@ impl<'a> ProxyEvent<'a> {
         let (headers, multi_headers) = self.headers().single_and_multi();
         let (query, multi_query) = self.query().single_and_multi();
         let body = EventBody::for_request(ctx);
-        json!({
+        let mut event = json!({
             "resource": ctx.resource_path,
             "path": ctx.path,
             "httpMethod": ctx.method.as_str(),
@@ -472,11 +531,21 @@ impl<'a> ProxyEvent<'a> {
                 "resourceId": null,
                 "resourcePath": ctx.resource_path,
                 "stage": ctx.api.stage_name(),
-                "authorizer": ctx.authorizer.event_value(PayloadVersion::V1),
             },
             "body": body.body,
             "isBase64Encoded": body.is_base64,
-        })
+        });
+        // Present only when there is something to say: an event for a route
+        // without an authorizer has no `authorizer` key at all.
+        if let Some(Value::Object(request_context)) = event.get_mut("requestContext") {
+            if let Some(authorizer) = ctx.authorizer.event_value(PayloadVersion::V1) {
+                request_context.insert("authorizer".to_owned(), authorizer);
+            }
+            if let Some(ref deployment_id) = ctx.api.deployment_id {
+                request_context.insert("deploymentId".to_owned(), json!(deployment_id));
+            }
+        }
+        event
     }
 
     fn v2(&self) -> Value {
@@ -622,7 +691,10 @@ mod tests {
             "14/Nov/2023:22:13:20 +0000"
         );
         assert_eq!(event["requestContext"]["identity"]["sourceIp"], "192.0.2.1");
-        assert!(event["requestContext"]["authorizer"].is_null());
+        assert!(
+            event["requestContext"].get("authorizer").is_none(),
+            "no authorizer ran, so the key is absent"
+        );
         assert_eq!(event["body"], "{\"a\":1}");
         assert_eq!(event["isBase64Encoded"], false);
     }
@@ -683,6 +755,74 @@ mod tests {
         assert_eq!(http["headers"]["content-type"], "text/plain");
         let v2 = event(&ctx, PayloadVersion::V2);
         assert_eq!(v2["headers"]["content-type"], "text/plain");
+    }
+
+    /// Measured against a deployed REST API: the event names the forwarding
+    /// chain, port, protocol, and trace under fixed spellings, and leaves out
+    /// `Content-Length`.
+    #[test]
+    fn rest_events_carry_the_headers_api_gateway_adds() {
+        let mut ctx = incoming(b"{}");
+        ctx.headers
+            .insert("content-length", HeaderValue::from_static("2"));
+        ctx.headers
+            .insert("x-forwarded-for", HeaderValue::from_static("203.0.113.9"));
+        ctx.headers
+            .insert("x-forwarded-proto", HeaderValue::from_static("http"));
+        ctx.headers
+            .insert("x-forwarded-port", HeaderValue::from_static("80"));
+        let event = ProxyEvent::new(&ctx, &variables())
+            .with_header_table(IamAuthorization::NotUsed)
+            .render(PayloadVersion::V1);
+        let headers = event["headers"].as_object().unwrap();
+        assert_eq!(headers["X-Forwarded-For"], "203.0.113.9");
+        assert_eq!(headers["X-Forwarded-Port"], "443");
+        assert_eq!(headers["X-Forwarded-Proto"], "https");
+        assert_eq!(
+            event["multiValueHeaders"]["X-Forwarded-Proto"],
+            json!(["https"])
+        );
+        let trace = headers["X-Amzn-Trace-Id"].as_str().unwrap();
+        assert!(trace.starts_with("Root=1-"), "{trace}");
+        for absent in [
+            "x-forwarded-for",
+            "x-forwarded-proto",
+            "x-forwarded-port",
+            "x-amzn-trace-id",
+            "content-length",
+            "Content-Length",
+        ] {
+            assert!(!headers.contains_key(absent), "{absent}");
+        }
+    }
+
+    #[test]
+    fn a_clients_trace_header_follows_the_gateways_own() {
+        let mut ctx = incoming(b"");
+        ctx.headers.insert(
+            "x-amzn-trace-id",
+            HeaderValue::from_static("Root=1-67891233-abcdef012345678912345678;Sampled=1"),
+        );
+        let event = event(&ctx, PayloadVersion::V1);
+        let trace = event["headers"]["X-Amzn-Trace-Id"].as_str().unwrap();
+        let (own, sent) = trace.split_once(';').unwrap();
+        assert!(own.starts_with("Self=1-"), "{trace}");
+        assert_eq!(sent, "Root=1-67891233-abcdef012345678912345678;Sampled=1");
+    }
+
+    #[test]
+    fn the_event_names_the_deployment_when_it_is_known() {
+        let mut ctx = incoming(b"");
+        assert!(
+            event(&ctx, PayloadVersion::V1)["requestContext"]
+                .get("deploymentId")
+                .is_none()
+        );
+        ctx.api.deployment_id = Some("8ckp7l".to_owned());
+        assert_eq!(
+            event(&ctx, PayloadVersion::V1)["requestContext"]["deploymentId"],
+            "8ckp7l"
+        );
     }
 
     #[test]

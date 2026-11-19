@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 pub(crate) use destination::{LogGroup, StreamName};
 pub(crate) use metrics::MetricsNamespace;
 pub(crate) use observer::{IntegrationTiming, StageObserver};
-pub(crate) use trace::Trace;
+pub(crate) use trace::{Trace, TraceId};
 
 use crate::canary::Release;
 use destination::Destination;

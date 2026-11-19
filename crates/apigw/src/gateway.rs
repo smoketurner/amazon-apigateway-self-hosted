@@ -163,6 +163,8 @@ pub(crate) struct ApiContext {
     /// Which release of a canary stage this context serves; `None` when the
     /// stage has no canary.
     pub(crate) release: Option<Release>,
+    /// The deployment this release serves, when API Gateway named one.
+    pub(crate) deployment_id: Option<String>,
     /// Binary media types and compression settings.
     pub(crate) payload: Arc<PayloadSettings>,
     /// Whether this release caches responses, and where.

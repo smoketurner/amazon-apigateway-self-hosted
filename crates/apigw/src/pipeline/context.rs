@@ -36,6 +36,8 @@ pub(crate) struct ApiInfo {
     pub(crate) stage: Option<String>,
     /// Which release serves the request, for stages that have a canary.
     pub(crate) release: Option<Release>,
+    /// The deployment being served, when API Gateway named one.
+    pub(crate) deployment_id: Option<String>,
 }
 
 impl ApiInfo {
@@ -394,6 +396,7 @@ impl RequestContext {
                 api_id: api.api_id.clone(),
                 stage: api.stage.clone(),
                 release: api.release,
+                deployment_id: api.deployment_id.clone(),
             },
             route_key,
             resource_path,
@@ -479,6 +482,14 @@ impl RequestContext {
 
     pub(crate) fn domain_name(&self) -> &str {
         self.header_str("host").unwrap_or_default()
+    }
+
+    /// The port the client connected to: the one its `Host` names, else 443.
+    pub(crate) fn port(&self) -> u16 {
+        self.domain_name()
+            .rsplit_once(':')
+            .and_then(|(_, port)| port.parse().ok())
+            .unwrap_or(443)
     }
 
     pub(crate) fn domain_prefix(&self) -> &str {
@@ -580,6 +591,7 @@ pub(crate) mod tests {
                 api_id: "abc123".to_owned(),
                 stage: Some("prod".to_owned()),
                 release: None,
+                deployment_id: None,
             },
             route_key: RouteKey::from("POST /pets/{petId}"),
             resource_path: "/pets/{petId}".to_owned(),
@@ -741,6 +753,7 @@ pub(crate) mod tests {
             api_id: "a".to_owned(),
             stage: None,
             release: None,
+            deployment_id: None,
         };
         assert_eq!(info.stage_name(), "$default");
     }

@@ -290,12 +290,7 @@ impl HttpProxy {
             HeaderName::from_static("x-forwarded-proto"),
             HeaderValue::from_static("https"),
         );
-        let port = ctx
-            .domain_name()
-            .rsplit_once(':')
-            .and_then(|(_, port)| port.parse::<u16>().ok())
-            .unwrap_or(443);
-        if let Ok(port) = HeaderValue::try_from(port.to_string()) {
+        if let Ok(port) = HeaderValue::try_from(ctx.port().to_string()) {
             headers.insert(HeaderName::from_static("x-forwarded-port"), port);
         }
     }

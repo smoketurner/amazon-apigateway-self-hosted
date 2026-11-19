@@ -259,6 +259,7 @@ impl Harness {
             vpc_links: VpcLinks::default(),
             observer: StageObserver::disabled(),
             release: None,
+            deployment_id: None,
             payload: Arc::default(),
             cache: CacheScope::Off,
             http: reqwest::Client::new(),

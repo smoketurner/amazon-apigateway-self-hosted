@@ -72,7 +72,7 @@ pub(crate) struct TraceId {
 }
 
 impl TraceId {
-    fn generate(now: jiff::Timestamp) -> Option<Self> {
+    pub(crate) fn generate(now: jiff::Timestamp) -> Option<Self> {
         let seconds = u32::try_from(now.as_second()).unwrap_or_default();
         Some(Self {
             epoch: Hex(seconds.to_be_bytes()),

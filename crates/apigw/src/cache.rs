@@ -1035,6 +1035,7 @@ mod tests {
             vpc_links: VpcLinks::default(),
             observer: StageObserver::disabled(),
             release: None,
+            deployment_id: None,
             cache: scope,
             payload: Arc::default(),
             http: reqwest::Client::new(),

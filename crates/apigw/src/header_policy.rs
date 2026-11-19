@@ -99,7 +99,13 @@ const RULES: &[HeaderRule] = &[
         [Passthrough, Dropped, Passthrough],
         [Passthrough, Passthrough, Passthrough]
     ),
-    rule!("content-length", Passthrough, Passthrough),
+    // The documented table passes it through everywhere; a deployed REST API
+    // leaves it out of Lambda proxy events.
+    rule!(
+        "content-length",
+        [Passthrough, Passthrough, Dropped],
+        [Passthrough, Passthrough, Passthrough]
+    ),
     rule!("content-md5", Dropped, Remapped),
     rule!("content-type", Passthrough, Passthrough),
     rule!("date", Passthrough, RemappedOverwritten),
@@ -346,7 +352,7 @@ accept-encoding PPP PPP
 authorization PPP RRR
 connection PPD RRR
 content-encoding PDP PPP
-content-length PPP PPP
+content-length PPD PPP
 content-md5 DDD RRR
 content-type PPP PPP
 date PPP WWW
