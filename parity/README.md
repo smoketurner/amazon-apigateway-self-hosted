@@ -77,7 +77,7 @@ to the APIs' public URLs.
 
 Add `--baseline parity --drift-report drift.md` to compare the recording with the committed
 fixtures instead of trusting it; the report is written only when something differs. That is
-what the nightly workflow does.
+what the manually run `parity.yml` workflow does.
 
 ## What is normalized
 
