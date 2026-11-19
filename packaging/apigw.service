@@ -1,0 +1,49 @@
+[Unit]
+Description=apigw self-hosted Amazon API Gateway
+Documentation=https://github.com/smoketurner/amazon-apigateway-self-hosted
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+User=apigw
+Group=apigw
+EnvironmentFile=/etc/apigw/apigw.env
+# Names the CloudWatch log stream; systemd does not set it for services.
+Environment=HOSTNAME=%H
+ExecStart=/usr/bin/apigw
+Restart=on-failure
+RestartSec=5
+# Above the 30 s connection drain that follows SIGTERM.
+TimeoutStopSec=45
+# /var/cache/apigw, for APIGW_CONFIG_CACHE.
+CacheDirectory=apigw
+CacheDirectoryMode=0750
+LimitNOFILE=65536
+
+# No reload command: certificates and the API definition are re-read on a timer.
+
+# Hardening. Outbound network access and running other programs stay allowed,
+# because AWS credentials may come from instance metadata, STS, or a
+# credential_process helper. To listen on a port below 1024, add a drop-in with
+# AmbientCapabilities=CAP_NET_BIND_SERVICE and the same CapabilityBoundingSet.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateDevices=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
