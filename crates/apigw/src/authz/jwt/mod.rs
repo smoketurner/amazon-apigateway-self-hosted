@@ -1,13 +1,15 @@
-//! Token authorizers: HTTP API JWT authorizers and REST API Cognito user pool
-//! authorizers.
+//! Token authorizers: HTTP API JWT authorizers, REST API JWT authorizers, and
+//! REST API Cognito user pool authorizers.
 //!
-//! Both verify a bearer token's RSA signature against the issuer's published
-//! keys, check its claims, and expose the claims as `$context.authorizer`.
-//! See <https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-jwt-authorizer.html>
+//! Each verifies a bearer token's signature against the issuer's published
+//! keys, checks its claims, and exposes the claims as `$context.authorizer`.
+//! See <https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-jwt-authorizer.html>,
+//! <https://docs.aws.amazon.com/apigateway/latest/developerguide/rest-api-jwt-authorizer.html>,
 //! and <https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-enable-cognito-user-pool.html>.
 
 mod claims;
 mod keys;
+mod rest;
 mod token;
 
 #[cfg(test)]
@@ -19,8 +21,9 @@ use serde_json::{Value, json};
 pub(crate) use keys::{IssuerEndpoint, KeyStore};
 
 use self::claims::ClaimStyle;
-use self::keys::{Issuer, KeyLocation};
-use self::token::{Claims, IssuerConfig, TokenError, Verifier};
+use self::keys::{Issuer, KEY_TTL, KeyLocation};
+use self::rest::{CLOCK_SKEW_SECONDS, RestJwt};
+use self::token::{Claims, IssuerConfig, SigningAlgorithm, TokenError, Verifier};
 use super::identity_source::IdentitySources;
 use super::pattern::TokenPattern;
 use super::{AuthRequest, Authorized, Denial};
@@ -38,6 +41,18 @@ enum Flavor {
     /// A REST API Cognito user pool authorizer, with its optional validation
     /// expression for the `aud` claim.
     Cognito { audience: Option<TokenPattern> },
+    /// A REST API JWT authorizer, with each issuer's audiences and claim rules.
+    Rest(RestJwt),
+}
+
+impl Flavor {
+    /// How far apart the issuer's clock and this one may be.
+    fn clock_skew(&self) -> i64 {
+        match *self {
+            Self::Rest(_) => CLOCK_SKEW_SECONDS,
+            Self::Http { .. } | Self::Cognito { .. } => 0,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -128,6 +143,7 @@ pub(crate) struct JwtAuthorizer {
     flavor: Flavor,
     sources: IdentitySources,
     issuers: Vec<IssuerConfig>,
+    algorithms: Vec<SigningAlgorithm>,
 }
 
 impl JwtAuthorizer {
@@ -150,7 +166,20 @@ impl JwtAuthorizer {
             issuers: vec![IssuerConfig {
                 issuer: Issuer::new(issuer),
                 location: KeyLocation::Discovery,
+                max_age: KEY_TTL,
             }],
+            algorithms: SigningAlgorithm::RSA.to_vec(),
+        })
+    }
+
+    /// A REST API `jwt` authorizer.
+    pub(super) fn compile_rest(spec: &AuthorizerSpec) -> Result<Self, String> {
+        let compiled = RestJwt::compile(spec)?;
+        Ok(Self {
+            flavor: Flavor::Rest(compiled.rest),
+            sources: Self::single_source(Some(&json!(compiled.identity_source)))?,
+            issuers: compiled.issuers,
+            algorithms: compiled.algorithms,
         })
     }
 
@@ -171,6 +200,7 @@ impl JwtAuthorizer {
                 UserPool::parse(&arn).map(|pool| IssuerConfig {
                     issuer: pool.issuer(),
                     location: KeyLocation::WellKnownJwks,
+                    max_age: KEY_TTL,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -189,6 +219,7 @@ impl JwtAuthorizer {
             flavor: Flavor::Cognito { audience },
             sources: Self::single_source(configured.as_ref())?,
             issuers,
+            algorithms: SigningAlgorithm::RSA.to_vec(),
         })
     }
 
@@ -219,10 +250,11 @@ impl JwtAuthorizer {
         let verifier = Verifier {
             keys: request.keys,
             issuers: &self.issuers,
+            algorithms: &self.algorithms,
         };
         let claims = verifier.verify(token).await.map_err(|e| Self::reject(&e))?;
         claims
-            .check_times(ctx.received.as_second())
+            .check_times(ctx.received.as_second(), self.flavor.clock_skew())
             .map_err(|e| Self::reject(&e))?;
         match self.flavor {
             Flavor::Http { ref audiences } => {
@@ -239,6 +271,15 @@ impl JwtAuthorizer {
                 Ok(Authorized::allow(AuthorizerContext::claims(
                     Self::claims_value(ClaimStyle::Rest, &claims),
                 )))
+            }
+            Flavor::Rest(ref rest) => {
+                rest.check(&claims, required)?;
+                let mut event = serde_json::Map::new();
+                event.insert("claims".to_owned(), Value::Object(claims.to_map()));
+                Ok(Authorized::allow(
+                    AuthorizerContext::claims(Self::claims_value(ClaimStyle::Json, &claims))
+                        .with_event(event),
+                ))
             }
         }
     }

@@ -160,6 +160,8 @@ struct SecurityScheme {
     #[serde(rename = "type")]
     scheme_type: Option<String>,
     name: Option<String>,
+    #[serde(rename = "in")]
+    location: Option<String>,
     #[serde(rename = "x-amazon-apigateway-authtype")]
     auth_type: Option<String>,
     #[serde(rename = "x-amazon-apigateway-authorizer")]
@@ -291,6 +293,7 @@ impl Document {
                     AuthorizerSpec {
                         auth_type: scheme.auth_type.clone(),
                         header_name: scheme.name.clone(),
+                        location: scheme.location.clone(),
                         config: scheme.authorizer.clone().unwrap_or(Value::Null),
                     },
                 );

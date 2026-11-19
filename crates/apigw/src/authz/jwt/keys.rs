@@ -19,8 +19,10 @@ use tokio::time::Instant;
 const FETCH_TIMEOUT: Duration = Duration::from_millis(1500);
 /// The most the gateway reads from an identity provider in one response.
 const MAX_RESPONSE_BYTES: usize = 150 * 1024;
-/// API Gateway caches an issuer's keys for two hours.
-const KEY_TTL: Duration = Duration::from_hours(2);
+/// HTTP API JWT and Cognito authorizers cache an issuer's keys for two hours.
+pub(super) const KEY_TTL: Duration = Duration::from_hours(2);
+/// REST API JWT authorizers cache an issuer's keys for up to an hour.
+pub(super) const REST_JWT_KEY_TTL: Duration = Duration::from_hours(1);
 /// The soonest the keys of one issuer are fetched again, so tokens naming
 /// unknown keys cannot turn the gateway into a request amplifier.
 const MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
@@ -199,8 +201,9 @@ impl KeyStore {
         Arc::clone(issuers.entry(issuer.clone()).or_default())
     }
 
-    /// The key `kid` of `issuer`. A key that is not cached triggers a fetch,
-    /// at most once per refresh interval, so rotated keys are picked up.
+    /// The key `kid` of `issuer`, from keys fetched no more than `max_age` ago.
+    /// A key that is not cached triggers a fetch, at most once per refresh
+    /// interval, so rotated keys are picked up.
     ///
     /// # Errors
     ///
@@ -209,15 +212,17 @@ impl KeyStore {
         &self,
         issuer: &Issuer,
         location: KeyLocation,
+        max_age: Duration,
         kid: &str,
     ) -> Result<Jwk, KeyError> {
+        let ttl = self.timing.ttl.min(max_age);
         let entry = self.issuer_keys(issuer);
-        if let Some(jwk) = entry.fresh_key(kid, self.timing.ttl).await {
+        if let Some(jwk) = entry.fresh_key(kid, ttl).await {
             return Ok(jwk);
         }
         let mut last_attempt = entry.refresh.lock().await;
         // Another task may have refreshed while this one waited.
-        if let Some(jwk) = entry.fresh_key(kid, self.timing.ttl).await {
+        if let Some(jwk) = entry.fresh_key(kid, ttl).await {
             return Ok(jwk);
         }
         let now = Instant::now();
@@ -283,8 +288,10 @@ impl KeyStore {
             .keys
             .into_iter()
             .filter(|jwk| {
-                matches!(jwk.algorithm, AlgorithmParameters::RSA(_))
-                    && jwk.common.key_id.is_some()
+                matches!(
+                    jwk.algorithm,
+                    AlgorithmParameters::RSA(_) | AlgorithmParameters::EllipticCurve(_)
+                ) && jwk.common.key_id.is_some()
                     && jwk
                         .common
                         .public_key_use

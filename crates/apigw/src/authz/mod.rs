@@ -60,7 +60,8 @@ pub(crate) enum Denial {
     AuthorizerConfiguration,
     /// The method ARN is longer than API Gateway allows: 414.
     UriTooLong,
-    /// A valid token that grants none of the scopes the route requires: 403.
+    /// A valid token that grants none of the scopes the route requires, or
+    /// (REST API JWT authorizers) fails one of the issuer's claim rules: 403.
     InsufficientScope,
     /// The API's resource policy denies the request: 403. `resource` is the
     /// method ARN as API Gateway shows it, with the account masked.
@@ -269,6 +270,7 @@ impl Authorizer {
             "token" | "request" => LambdaAuthorizer::compile(name, spec, kind, variables)
                 .map(|a| Self::Lambda(Box::new(a))),
             "jwt" if kind == ApiKind::Http => JwtAuthorizer::compile_http(spec).map(Self::Jwt),
+            "jwt" => JwtAuthorizer::compile_rest(spec).map(Self::Jwt),
             "cognito_user_pools" if kind == ApiKind::Rest => {
                 JwtAuthorizer::compile_cognito(spec, variables).map(Self::Jwt)
             }

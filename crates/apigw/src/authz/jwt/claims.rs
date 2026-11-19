@@ -1,10 +1,32 @@
 //! How verified claims reach `$context.authorizer` and Lambda events: API
-//! Gateway delivers every claim as a string, and REST and HTTP APIs spell some
-//! of them differently.
+//! Gateway delivers every claim as a string, and each authorizer type spells
+//! some of them differently.
+
+use std::fmt::{self, Write as _};
 
 use serde_json::{Map, Value};
 
 use super::token::Claims;
+
+/// A value as JSON text that is pure ASCII. Non-ASCII characters can only
+/// occur inside JSON strings, where a `\uXXXX` escape means the same thing.
+struct AsciiJson<'a>(&'a Value);
+
+impl fmt::Display for AsciiJson<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for c in self.0.to_string().chars() {
+            if c.is_ascii() {
+                f.write_char(c)?;
+            } else {
+                let mut units = [0_u16; 2];
+                for unit in c.encode_utf16(&mut units) {
+                    write!(f, "\\u{unit:04X}")?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Which API product's spelling to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +37,9 @@ pub(super) enum ClaimStyle {
     /// HTTP APIs (JWT authorizers): lists are written `[a b]` and times stay
     /// numbers.
     Http,
+    /// REST API JWT authorizers: every claim is its JSON text, with each
+    /// non-ASCII character written as a `\uXXXX` escape.
+    Json,
 }
 
 impl ClaimStyle {
@@ -34,6 +59,9 @@ impl ClaimStyle {
     }
 
     fn text(self, name: &str, value: &Value) -> Option<String> {
+        if self == Self::Json {
+            return Some(AsciiJson(value).to_string());
+        }
         if self == Self::Rest
             && matches!(name, "exp" | "iat")
             && let Some(date) = value.as_i64().and_then(Self::date)
@@ -49,7 +77,7 @@ impl ClaimStyle {
                     .collect();
                 Some(match self {
                     Self::Rest => items.join(","),
-                    Self::Http => format!("[{}]", items.join(" ")),
+                    Self::Http | Self::Json => format!("[{}]", items.join(" ")),
                 })
             }
             Value::Object(_) => Some(value.to_string()),
@@ -119,6 +147,33 @@ mod tests {
                 "exp": "1586634792",
                 "scope": "openid email",
                 "nested": "{\"a\":1}",
+            })
+        );
+    }
+
+    #[test]
+    fn json_claims_are_json_text_in_ascii() {
+        let input = claims(&json!({
+            "name": "Doe, \"Jane\"",
+            "iat": 1_516_239_022,
+            "version": "42",
+            "roles": ["user", "editor"],
+            "address": {"city": "Seattle"},
+            "accent": "é",
+            "emoji": "😀",
+            "nothing": null,
+        }));
+        assert_eq!(
+            Value::Object(ClaimStyle::Json.claims(&input)),
+            json!({
+                "name": "\"Doe, \\\"Jane\\\"\"",
+                "iat": "1516239022",
+                "version": "\"42\"",
+                "roles": "[\"user\",\"editor\"]",
+                "address": "{\"city\":\"Seattle\"}",
+                "accent": "\"\\u00E9\"",
+                "emoji": "\"\\uD83D\\uDE00\"",
+                "nothing": "null",
             })
         );
     }

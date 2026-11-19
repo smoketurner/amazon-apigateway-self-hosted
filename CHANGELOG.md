@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- REST API JWT authorizers (`x-amazon-apigateway-authorizer` `type: jwt` on a REST API). Up to 10
+  issuers, each with its own audiences and `SINGLE_STRING` claim rules; tokens signed with any of the
+  authorizer's `defaultAlgorithms` (RS256/RS384/RS512/ES256/ES384/ES512) are verified against keys
+  found through OIDC discovery, cached for up to an hour; `exp`/`nbf`/`iat` allow 60 seconds of
+  clock skew. Untrusted, malformed, or expired tokens answer `401`; a failed claim rule or a missing
+  method scope answers `403`. Lambda proxy events get `requestContext.authorizer.claims` with JSON
+  types, and `$context.authorizer.claims.*` is the claim's JSON text.
 - `docs/regex-engine.md` records the evaluation of the `java_regex` crate as a replacement for the
   `apigw-regex` translation (#57). The translation stays: `java_regex` 0.1.0 overflows the stack on
   about 4,500 characters of input and returns "no match" silently when it hits its step and depth

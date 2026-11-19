@@ -91,6 +91,7 @@ fn authorizer(name: &str) -> LambdaAuthorizer {
     let spec = AuthorizerSpec {
         auth_type: Some("custom".to_owned()),
         header_name: Some("Authorization".to_owned()),
+        location: Some("header".to_owned()),
         config: json!({
             "type": "token",
             "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:auth/invocations",

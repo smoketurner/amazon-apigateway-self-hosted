@@ -26,7 +26,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde_json::{Value, json};
 
-use super::keys::{Issuer, KeyError, KeyLocation};
+use super::keys::{Issuer, KEY_TTL, KeyError, KeyLocation};
 use super::{IssuerEndpoint, KeyStore};
 use crate::authz::tests::{ECHO_FUNCTION, Harness, echo_integration};
 use crate::gateway::AuthorizationMode;
@@ -839,7 +839,7 @@ async fn a_slow_provider_is_given_up_on_after_a_second_and_a_half() {
 }
 
 #[tokio::test]
-async fn only_usable_rsa_signing_keys_are_kept() {
+async fn only_usable_signing_keys_are_kept() {
     let idp = Idp::start(HTTP_ISSUER, &[]).await;
     let good = key_a().jwk();
     let mut encryption = key_b().jwk();
@@ -1332,7 +1332,7 @@ async fn an_issuer_without_an_override_must_be_an_https_url() {
         "",
     ] {
         let error = store
-            .key(&Issuer::new(issuer), KeyLocation::Discovery, "kid")
+            .key(&Issuer::new(issuer), KeyLocation::Discovery, KEY_TTL, "kid")
             .await
             .unwrap_err();
         assert!(matches!(error, KeyError::Location(_)), "{issuer}: {error}");
@@ -1501,4 +1501,511 @@ async fn a_cognito_authorizer_and_a_resource_policy_must_both_allow() {
         StatusCode::UNAUTHORIZED
     );
     assert_eq!(h.backend_calls.count(), 1);
+}
+
+// REST API JWT authorizers.
+
+const REST_ISSUER: &str = "https://identity.example.com";
+const SECOND_ISSUER: &str = "https://second.example.com/";
+
+/// An elliptic curve signing key and the JWK that publishes its public half.
+struct EcKey {
+    pair: aws_lc_rs::signature::EcdsaKeyPair,
+    kid: &'static str,
+    alg: &'static str,
+    crv: &'static str,
+}
+
+impl EcKey {
+    fn generate(alg: &'static str, kid: &'static str) -> Self {
+        use aws_lc_rs::signature::{
+            ECDSA_P256_SHA256_FIXED_SIGNING, ECDSA_P384_SHA384_FIXED_SIGNING,
+            ECDSA_P521_SHA512_FIXED_SIGNING,
+        };
+        let (signing, crv) = match alg {
+            "ES256" => (&ECDSA_P256_SHA256_FIXED_SIGNING, "P-256"),
+            "ES384" => (&ECDSA_P384_SHA384_FIXED_SIGNING, "P-384"),
+            _ => (&ECDSA_P521_SHA512_FIXED_SIGNING, "P-521"),
+        };
+        Self {
+            pair: aws_lc_rs::signature::EcdsaKeyPair::generate(signing).unwrap(),
+            kid,
+            alg,
+            crv,
+        }
+    }
+
+    /// The JWK; `alg` names the key's algorithm when given.
+    fn jwk_with(&self, alg: Option<&str>) -> Value {
+        let point = self.pair.public_key().as_ref();
+        let half = match self.crv {
+            "P-256" => 32,
+            "P-384" => 48,
+            _ => 66,
+        };
+        let mut jwk = json!({"kty": "EC", "kid": self.kid, "use": "sig", "crv": self.crv,
+            "x": B64.encode(&point[1..=half]), "y": B64.encode(&point[half + 1..])});
+        if let Some(alg) = alg {
+            jwk["alg"] = json!(alg);
+        }
+        jwk
+    }
+
+    fn jwk(&self) -> Value {
+        self.jwk_with(Some(self.alg))
+    }
+
+    fn sign(&self, header: &Value, claims: &Value) -> String {
+        let signing_input = format!(
+            "{}.{}",
+            B64.encode(header.to_string()),
+            B64.encode(claims.to_string())
+        );
+        let signature = self
+            .pair
+            .sign(&SystemRandom::new(), signing_input.as_bytes())
+            .unwrap();
+        format!("{signing_input}.{}", B64.encode(signature.as_ref()))
+    }
+
+    fn token(&self, claims: &Value) -> String {
+        self.sign(
+            &json!({"alg": self.alg, "typ": "JWT", "kid": self.kid}),
+            claims,
+        )
+    }
+}
+
+fn es256() -> &'static EcKey {
+    static KEY: OnceLock<EcKey> = OnceLock::new();
+    KEY.get_or_init(|| EcKey::generate("ES256", "ec-256"))
+}
+
+fn es384() -> &'static EcKey {
+    static KEY: OnceLock<EcKey> = OnceLock::new();
+    KEY.get_or_init(|| EcKey::generate("ES384", "ec-384"))
+}
+
+fn es512() -> &'static EcKey {
+    static KEY: OnceLock<EcKey> = OnceLock::new();
+    KEY.get_or_init(|| EcKey::generate("ES512", "ec-521"))
+}
+
+/// The documented example: one issuer requiring `department: eng`, a second
+/// with its own audience, and a MOCK route that renders claims through a
+/// mapping template.
+fn rest_jwt_doc(configuration: &Value) -> Value {
+    let mut jwt = json!({
+        "issuers": [
+            {"issuer": REST_ISSUER, "audiences": ["api://orders"],
+                "additionalClaims": [{"claimName": "department", "format": "SINGLE_STRING",
+                    "required": true, "expectedValues": ["eng"]}]},
+            {"issuer": SECOND_ISSUER, "audiences": ["second"]},
+        ],
+        "defaultAlgorithms": ["RS256", "ES256", "ES384", "ES512"],
+    });
+    if let (Some(jwt), Some(extra)) = (jwt.as_object_mut(), configuration.as_object()) {
+        jwt.extend(extra.clone());
+    }
+    let route = |scopes: &[&str]| {
+        json!({"get": {"security": [{"orders-jwt": scopes}],
+            "x-amazon-apigateway-integration": echo_integration()}})
+    };
+    let template = r#"{"version": $context.authorizer.claims.version, "roles": $context.authorizer.claims.roles, "name": $context.authorizer.claims.name}"#;
+    json!({
+        "components": {"securitySchemes": {"orders-jwt": {"type": "apiKey",
+            "name": "Authorization", "in": "header", "x-amazon-apigateway-authtype": "jwt",
+            "x-amazon-apigateway-authorizer": {"type": "jwt", "jwtConfiguration": jwt}}}},
+        "paths": {
+            "/orders": route(&[]),
+            "/scoped": route(&["orders:read", "orders/read"]),
+            "/mapped": {"get": {"security": [{"orders-jwt": []}],
+                "x-amazon-apigateway-integration": {"type": "mock",
+                    "requestTemplates": {"application/json": "{\"statusCode\": 200}"},
+                    "responses": {"default": {"statusCode": "200",
+                        "responseTemplates": {"application/json": template}}}}}},
+        }
+    })
+}
+
+/// A key store that fetches both REST issuers' keys from local providers.
+fn rest_key_store(first: &Idp, second: &Idp) -> KeyStore {
+    let endpoints = [
+        format!("{REST_ISSUER}=http://{}", first.addr)
+            .parse()
+            .unwrap(),
+        format!("{SECOND_ISSUER}=http://{}", second.addr)
+            .parse()
+            .unwrap(),
+    ];
+    KeyStore::new(reqwest::Client::new(), endpoints)
+}
+
+async fn rest_jwt_harness(first: &Idp, second: &Idp, configuration: &Value) -> Harness {
+    Harness::start_with(
+        &rest_jwt_doc(configuration),
+        ApiKind::Rest,
+        AuthorizationMode::Enforce,
+        rest_key_store(first, second),
+    )
+    .await
+}
+
+/// Two providers: the first publishes every test key, the second only `key_b`.
+async fn rest_idps() -> (Idp, Idp) {
+    let first = Idp::start(REST_ISSUER, &[key_a()]).await;
+    first.set_keys(&[key_a().jwk(), es256().jwk(), es384().jwk(), es512().jwk()]);
+    let second = Idp::start(SECOND_ISSUER, &[key_b()]).await;
+    (first, second)
+}
+
+fn rest_claims(overrides: &Value) -> Value {
+    let mut claims = json!({"iss": REST_ISSUER, "aud": "api://orders", "sub": "user-1",
+        "department": "eng", "scope": "orders:read profile", "iat": now() - 10,
+        "exp": now() + 3600});
+    merge(&mut claims, overrides);
+    claims
+}
+
+#[tokio::test]
+async fn rest_jwt_tokens_reach_lambda_with_typed_claims() {
+    let (first, second) = rest_idps().await;
+    let h = rest_jwt_harness(&first, &second, &json!({})).await;
+    let token = key_a().token(&rest_claims(&json!({"roles": ["user", "editor"],
+        "address": {"city": "Seattle"}, "version": "42"})));
+    let (status, _) = h
+        .call(Method::GET, "/orders", &[("authorization", &token)])
+        .await;
+    assert_eq!(status, StatusCode::OK, "a bare token is accepted");
+    assert_eq!(
+        h.call(
+            Method::GET,
+            "/orders",
+            &[("authorization", &format!("bEaReR {token}"))]
+        )
+        .await
+        .0,
+        StatusCode::OK,
+        "the Bearer prefix is not case-sensitive"
+    );
+    let authorizer = h.backend_authorizer();
+    assert_eq!(
+        authorizer.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["claims"],
+        "the event carries the claims and nothing else"
+    );
+    let claims = &authorizer["claims"];
+    assert_eq!(claims["sub"], "user-1");
+    assert_eq!(claims["version"], "42");
+    assert!(claims["iat"].is_i64(), "{claims}");
+    assert_eq!(claims["roles"], json!(["user", "editor"]));
+    assert_eq!(claims["address"], json!({"city": "Seattle"}));
+    assert_eq!(
+        first.discovery_hits(),
+        1,
+        "keys are found through discovery"
+    );
+}
+
+#[tokio::test]
+async fn rest_jwt_claims_reach_mapping_templates_as_json_text() {
+    let (first, second) = rest_idps().await;
+    let h = rest_jwt_harness(&first, &second, &json!({})).await;
+    let token = key_a().token(&rest_claims(&json!({"roles": ["user", "editor"],
+        "version": "42", "name": "Doe, \"Jané\""})));
+    let (status, body) = h
+        .call(Method::GET, "/mapped", &[("authorization", &token)])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        json!({"version": "42", "roles": ["user", "editor"], "name": "Doe, \"Jané\""})
+    );
+}
+
+#[tokio::test]
+async fn rest_jwt_accepts_each_allowed_algorithm() {
+    let (first, second) = rest_idps().await;
+    let h = rest_jwt_harness(&first, &second, &json!({})).await;
+    let claims = rest_claims(&json!({}));
+    for (name, token) in [
+        ("RS256", key_a().token(&claims)),
+        ("ES256", es256().token(&claims)),
+        ("ES384", es384().token(&claims)),
+        ("ES512", es512().token(&claims)),
+    ] {
+        assert_eq!(
+            get_with(&h, "/orders", &token).await,
+            StatusCode::OK,
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn rest_jwt_refuses_algorithms_it_does_not_allow() {
+    let (first, second) = rest_idps().await;
+    let h = rest_jwt_harness(&first, &second, &json!({"defaultAlgorithms": ["ES256"]})).await;
+    let claims = rest_claims(&json!({}));
+    assert_eq!(
+        get_with(&h, "/orders", &es256().token(&claims)).await,
+        StatusCode::OK
+    );
+    for (name, token) in [
+        ("RS256 is not listed", key_a().token(&claims)),
+        ("ES384 is not listed", es384().token(&claims)),
+        (
+            "an HMAC algorithm",
+            es256().sign(&json!({"alg": "HS256", "kid": "ec-256"}), &claims),
+        ),
+        (
+            "no algorithm",
+            es256().sign(&json!({"alg": "none", "kid": "ec-256"}), &claims),
+        ),
+    ] {
+        assert_eq!(
+            get_with(&h, "/orders", &token).await,
+            StatusCode::UNAUTHORIZED,
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn rest_jwt_signatures_must_match_the_key_and_its_curve() {
+    let (first, second) = rest_idps().await;
+    let h = rest_jwt_harness(&first, &second, &json!({})).await;
+    let claims = rest_claims(&json!({}));
+    let mut forged_512 = es512().token(&claims);
+    forged_512.push('A');
+    let other_521 = EcKey::generate("ES512", "ec-521");
+    for (name, token) in [
+        (
+            "an ES384 header on a P-256 key",
+            es256().sign(&json!({"alg": "ES384", "kid": "ec-256"}), &claims),
+        ),
+        (
+            "an ES512 header on a P-384 key",
+            es384().sign(&json!({"alg": "ES512", "kid": "ec-384"}), &claims),
+        ),
+        (
+            "an ES256 header on an RSA key",
+            es256().sign(&json!({"alg": "ES256", "kid": "key-a"}), &claims),
+        ),
+        ("a tampered ES512 signature", forged_512),
+        (
+            "another P-521 key under a published id",
+            other_521.token(&claims),
+        ),
+        ("an ES512 payload that was changed after signing", {
+            let token = es512().token(&claims);
+            let mut parts: Vec<&str> = token.split('.').collect();
+            let changed = B64.encode(rest_claims(&json!({"sub": "admin"})).to_string());
+            parts[1] = &changed;
+            parts.join(".")
+        }),
+        ("not three parts", "a.b".to_owned()),
+    ] {
+        assert_eq!(
+            get_with(&h, "/orders", &token).await,
+            StatusCode::UNAUTHORIZED,
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn rest_jwt_es512_keys_may_name_their_algorithm_or_not() {
+    let (first, second) = rest_idps().await;
+    first.set_keys(&[es512().jwk_with(None)]);
+    let h = rest_jwt_harness(&first, &second, &json!({})).await;
+    assert_eq!(
+        get_with(&h, "/orders", &es512().token(&rest_claims(&json!({})))).await,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn rest_jwt_issuers_audiences_and_times_are_401() {
+    let (first, second) = rest_idps().await;
+    let h = rest_jwt_harness(&first, &second, &json!({})).await;
+    let n = now();
+    let a = key_a();
+    for (name, token) in [
+        (
+            "an issuer that is not configured",
+            a.token(&rest_claims(&json!({"iss": "https://evil.example"}))),
+        ),
+        (
+            "the issuer without its trailing slash",
+            key_b().token(&rest_claims(
+                &json!({"iss": "https://second.example.com", "aud": "second"}),
+            )),
+        ),
+        (
+            "another issuer's audience",
+            a.token(&rest_claims(&json!({"aud": "second"}))),
+        ),
+        ("no audience", a.token(&rest_claims(&json!({"aud": null})))),
+        (
+            "expired beyond the skew",
+            a.token(&rest_claims(&json!({"exp": n - 120}))),
+        ),
+        (
+            "not valid until beyond the skew",
+            a.token(&rest_claims(&json!({"nbf": n + 120}))),
+        ),
+        (
+            "issued beyond the skew",
+            a.token(&rest_claims(&json!({"iat": n + 120}))),
+        ),
+        ("no expiry", a.token(&rest_claims(&json!({"exp": null})))),
+        (
+            "the second issuer's key under the first issuer",
+            key_b().token(&rest_claims(&json!({}))),
+        ),
+    ] {
+        let (status, body) = h
+            .call(Method::GET, "/orders", &[("authorization", &token)])
+            .await;
+        assert_eq!(
+            (status, body),
+            (StatusCode::UNAUTHORIZED, json!({"message": "Unauthorized"})),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        h.call(Method::GET, "/orders", &[]).await.0,
+        StatusCode::UNAUTHORIZED,
+        "no token"
+    );
+}
+
+#[tokio::test]
+async fn rest_jwt_allows_sixty_seconds_of_clock_skew() {
+    let (first, second) = rest_idps().await;
+    let h = rest_jwt_harness(&first, &second, &json!({})).await;
+    let n = now();
+    for (name, overrides) in [
+        ("just expired", json!({"exp": n - 30})),
+        ("valid shortly", json!({"nbf": n + 30})),
+        ("issued shortly", json!({"iat": n + 30})),
+    ] {
+        assert_eq!(
+            get_with(&h, "/orders", &key_a().token(&rest_claims(&overrides))).await,
+            StatusCode::OK,
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn rest_jwt_claim_rules_and_scopes_are_403() {
+    let (first, second) = rest_idps().await;
+    let h = rest_jwt_harness(&first, &second, &json!({})).await;
+    let forbidden = (
+        StatusCode::FORBIDDEN,
+        json!({"message": "User is not authorized to access this resource"}),
+    );
+    let call = |path: &'static str, claims: Value| {
+        let token = key_a().token(&claims);
+        let h = &h;
+        async move {
+            h.call(Method::GET, path, &[("authorization", &token)])
+                .await
+        }
+    };
+    assert_eq!(
+        call("/orders", rest_claims(&json!({"department": "ops"}))).await,
+        forbidden,
+        "the wrong value"
+    );
+    assert_eq!(
+        call("/orders", rest_claims(&json!({"department": null}))).await,
+        forbidden,
+        "a required claim that is missing"
+    );
+    assert_eq!(
+        call("/orders", rest_claims(&json!({"department": ["eng"]}))).await,
+        forbidden,
+        "an array is not a single string"
+    );
+    assert_eq!(
+        call("/scoped", rest_claims(&json!({}))).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(
+            "/scoped",
+            rest_claims(&json!({"scope": null, "scp": ["orders/read"]}))
+        )
+        .await
+        .0,
+        StatusCode::OK,
+        "any one of the route's scopes, from scp"
+    );
+    assert_eq!(
+        call("/scoped", rest_claims(&json!({"scope": "profile"}))).await,
+        forbidden,
+        "none of the route's scopes"
+    );
+    assert_eq!(
+        call("/orders", rest_claims(&json!({"scope": null})))
+            .await
+            .0,
+        StatusCode::OK,
+        "a route without scopes needs none"
+    );
+    let second_token = key_b().token(&json!({"iss": SECOND_ISSUER, "aud": "second",
+        "exp": now() + 3600}));
+    assert_eq!(
+        get_with(&h, "/orders", &second_token).await,
+        StatusCode::OK,
+        "the second issuer has no claim rules"
+    );
+}
+
+#[tokio::test]
+async fn rest_jwt_keys_are_cached_for_at_most_an_hour() {
+    let (first, second) = rest_idps().await;
+    let keys = rest_key_store(&first, &second).with_timing(KEY_TTL, Duration::ZERO);
+    let h = Harness::start_with(
+        &rest_jwt_doc(&json!({})),
+        ApiKind::Rest,
+        AuthorizationMode::Enforce,
+        keys,
+    )
+    .await;
+    let token = key_a().token(&rest_claims(&json!({})));
+    assert_eq!(get_with(&h, "/orders", &token).await, StatusCode::OK);
+    assert_eq!(get_with(&h, "/orders", &token).await, StatusCode::OK);
+    assert_eq!(first.jwks_hits(), 1);
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(3601)).await;
+    assert_eq!(get_with(&h, "/orders", &token).await, StatusCode::OK);
+    assert_eq!(
+        first.jwks_hits(),
+        2,
+        "the key set is fetched again after an hour"
+    );
+}
+
+#[tokio::test]
+async fn unevaluable_rest_jwt_authorizers_fail_closed_and_are_reported() {
+    let (first, second) = rest_idps().await;
+    let h = rest_jwt_harness(&first, &second, &json!({"defaultAlgorithms": ["HS256"]})).await;
+    assert_eq!(
+        get_with(&h, "/orders", &key_a().token(&rest_claims(&json!({})))).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(first.discovery_hits() + first.jwks_hits(), 0);
+    let route = h
+        .summaries
+        .iter()
+        .find(|s| s.route_key == "GET /orders")
+        .unwrap();
+    assert!(
+        route.problems.iter().any(|p| p.contains("HS256")),
+        "{route:?}"
+    );
 }
