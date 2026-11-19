@@ -22,3 +22,8 @@ output "log_group_name" {
   description = "Log group holding the gateway's logs."
   value       = aws_cloudwatch_log_group.this.name
 }
+
+output "ports" {
+  description = "The API and admin port of each container, by container name."
+  value       = { for name, api in local.apis : name => { api = api.api_port, admin = api.admin_port } }
+}

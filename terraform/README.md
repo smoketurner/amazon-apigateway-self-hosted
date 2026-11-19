@@ -158,6 +158,14 @@ curl --insecure "https://$ip:8443/ref/lambda-proxy"        # invokes the echo La
 curl "$(terraform output -json parity_runner | jq -r .rest.base_url)/mock"   # API Gateway
 ```
 
+`enable_ecs_gateway_http = true` also mirrors the reference HTTP API. One `apigw` process
+mirrors one API, so this adds a second container to the same task, from the same image and
+under the same task role, on ports 8444 (API) and 9444 (admin) at the same address:
+
+```bash
+curl --insecure "https://$ip:8444/ref/lambda-v2/x"
+```
+
 The gateway's logs are in the `log_group_name` from the `ecs_gateway` output. Set
 `enable_ecs_gateway = false` and apply to remove it; the repository is deleted with its images.
 

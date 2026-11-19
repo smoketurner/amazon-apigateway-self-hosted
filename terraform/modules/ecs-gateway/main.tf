@@ -37,6 +37,14 @@ resource "aws_iam_role_policy" "gateway" {
   policy = var.gateway_policy_json
 }
 
+resource "aws_iam_role_policy" "additional" {
+  for_each = var.additional_apis
+
+  name   = "gateway-${each.key}"
+  role   = aws_iam_role.task.id
+  policy = each.value.gateway_policy_json
+}
+
 resource "aws_security_group" "this" {
   name        = local.name
   description = "apigw test gateway: API and admin ports from the allowed addresses"
@@ -63,6 +71,17 @@ resource "aws_vpc_security_group_ingress_rule" "admin" {
   ip_protocol       = "tcp"
   from_port         = local.admin_port
   to_port           = local.admin_port
+}
+
+resource "aws_vpc_security_group_ingress_rule" "additional" {
+  for_each = local.additional_ingress
+
+  security_group_id = aws_security_group.this.id
+  description       = "apigw listener of an additional API"
+  cidr_ipv4         = each.value.cidr
+  ip_protocol       = "tcp"
+  from_port         = each.value.port
+  to_port           = each.value.port
 }
 
 resource "aws_vpc_security_group_egress_rule" "all" {

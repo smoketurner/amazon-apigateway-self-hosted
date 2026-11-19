@@ -31,6 +31,18 @@ locals {
   # does, so `$context.path` and Lambda events match the real API's.
   gateway_base_path = "/${var.stage_name}"
 
+  # One apigw process mirrors one API, so the HTTP API gets a second container
+  # in the ECS gateway's task rather than a service of its own.
+  ecs_gateway_additional_apis = var.enable_ecs_gateway_http ? {
+    http = {
+      kind                = "http"
+      id                  = module.http_api.api_id
+      api_port            = 8444
+      admin_port          = 9444
+      gateway_policy_json = module.gateway_policy_http[0].json
+    }
+  } : {}
+
   # Only the role outputs, not the whole modules: each gateway's definition
   # depends on the REST API, which depends on the integration role.
   gateway_role_arns = concat(
