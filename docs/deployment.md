@@ -31,7 +31,7 @@ The chart needs an API source and a certificate, and fails to render without the
   keys as environment variables; `aws.webIdentity.roleArn` projects a service account token
   and sets `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE`; `aws.configFile` and
   `aws.sharedCredentialsFile` (empty by default) point at files you mount with `extraVolumes`.
-- `replicaCount` is also passed as `--replicas`; `valkey.existingSecret` shares throttle state.
+- `replicaCount` is also passed as `--replicas`; `valkey.existingSecret` shares throttle, quota, and cache state between replicas.
 - `cache.existingClaim` keeps the last-known-good definition on a PersistentVolumeClaim
   instead of an `emptyDir`.
 - `istio.destinationRule.enabled` renders the DestinationRule shown under [Istio](#istio).

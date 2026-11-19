@@ -75,8 +75,12 @@ and shares entries with production only when it runs the same deployment.
 
 ## Response caching
 
-A REST stage with `cacheClusterEnabled` caches responses in the state backend (per replica, in
-memory, until a shared backend is configured), so no cache cluster is provisioned or billed.
+A REST stage with `cacheClusterEnabled` caches responses in the state backend, so no cache
+cluster is provisioned or billed. Without `--valkey-url` each replica keeps its own entries in
+memory. With it, replicas share entries through Valkey; a Valkey error or timeout is a cache
+miss, and the response is served without being stored. Entries in Valkey are not encrypted,
+whatever the stage's `cacheDataEncrypted` says
+([#110](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/110)).
 
 - **Which methods:** those whose method settings enable caching. As on API Gateway, the stage-wide
   `*/*` setting enables `GET` methods only; other methods need their own setting.
