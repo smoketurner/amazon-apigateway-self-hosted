@@ -65,16 +65,9 @@ variable "cpu_architecture" {
   }
 }
 
-variable "lambda_function_arns" {
-  description = "Lambda functions the gateway invokes with its own credentials: integrations and authorizers that name no credentials role."
-  type        = list(string)
-  default     = []
-}
-
-variable "assumable_role_arns" {
-  description = "Integration and authorizer credentials roles the gateway assumes. Each role's trust policy must also allow the task role."
-  type        = list(string)
-  default     = []
+variable "gateway_policy_json" {
+  description = "IAM policy document for the task role: what apigw may do (modules/gateway-policy)."
+  type        = string
 }
 
 variable "log_retention_days" {

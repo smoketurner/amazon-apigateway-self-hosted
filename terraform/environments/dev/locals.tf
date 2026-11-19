@@ -25,9 +25,14 @@ locals {
   ecs_gateway_vpc_id             = local.create_ecs_network ? module.ecs_network[0].vpc_id : var.vpc_id
   ecs_gateway_subnet_ids         = local.create_ecs_network ? module.ecs_network[0].public_subnet_ids : var.ecs_gateway_subnet_ids
 
-  # Only this output, not the whole module: the gateway's task definition
+  any_gateway = var.enable_ecs_gateway || var.enable_lambda_gateway
+
+  # Only the role outputs, not the whole modules: each gateway's definition
   # depends on the REST API, which depends on the integration role.
-  ecs_gateway_role_arns = var.enable_ecs_gateway ? [module.ecs_gateway[0].task_role_arn] : []
+  gateway_role_arns = concat(
+    var.enable_ecs_gateway ? [module.ecs_gateway[0].task_role_arn] : [],
+    var.enable_lambda_gateway ? [module.lambda_gateway[0].role_arn] : [],
+  )
 
   lambda_function_arns = [
     module.lambda_backends.echo_function_arn,

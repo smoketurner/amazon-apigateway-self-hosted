@@ -78,3 +78,13 @@ output "ecs_gateway" {
     log_group_name = module.ecs_gateway[0].log_group_name
   } : null
 }
+
+output "lambda_gateway" {
+  description = "Where the Lambda gateway runs and where to push its image; null unless enable_lambda_gateway is true."
+  value = var.enable_lambda_gateway ? {
+    repository_url = module.lambda_gateway[0].repository_url
+    function_url   = module.lambda_gateway[0].function_url
+    role_arn       = module.lambda_gateway[0].role_arn
+    log_group_name = module.lambda_gateway[0].log_group_name
+  } : null
+}

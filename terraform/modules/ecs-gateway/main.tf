@@ -34,7 +34,7 @@ resource "aws_iam_role" "task" {
 resource "aws_iam_role_policy" "gateway" {
   name   = "gateway"
   role   = aws_iam_role.task.id
-  policy = data.aws_iam_policy_document.gateway.json
+  policy = var.gateway_policy_json
 }
 
 resource "aws_security_group" "this" {

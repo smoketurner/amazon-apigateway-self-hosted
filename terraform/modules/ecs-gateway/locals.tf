@@ -20,23 +20,6 @@ locals {
   # Above the 30 s connection drain that follows SIGTERM.
   stop_timeout_seconds = 45
 
-  # Functions are invoked by ARN or by a qualified ARN (alias or version).
-  invocable_function_arns = concat(var.lambda_function_arns, [for arn in var.lambda_function_arns : "${arn}:*"])
-
-  apigateway_arn = "arn:${local.partition}:apigateway:${local.region}:"
-
-  # The resources apigw reads to load and refresh the API (README, "AWS permissions").
-  api_resources = var.api_kind == "rest" ? [
-    "${local.apigateway_arn}:/restapis/${var.api_id}/stages/${var.stage_name}",
-    "${local.apigateway_arn}:/restapis/${var.api_id}/stages/${var.stage_name}/exports/oas30",
-    "${local.apigateway_arn}:/usageplans",
-    "${local.apigateway_arn}:/usageplans/*/keys",
-    "${local.apigateway_arn}:/apikeys",
-    ] : [
-    "${local.apigateway_arn}:/apis/${var.api_id}/stages/${var.stage_name}",
-    "${local.apigateway_arn}:/apis/${var.api_id}/exports/OAS30",
-  ]
-
   api_environment = var.api_kind == "rest" ? "APIGW_REST_API_ID" : "APIGW_HTTP_API_ID"
 
   # apigw has no plaintext listener, so the task makes itself a certificate

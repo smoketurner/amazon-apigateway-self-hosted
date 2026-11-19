@@ -29,7 +29,7 @@ module "integration_role" {
   state_machine_arn    = module.service_targets.state_machine_arn
   event_bus_arn        = module.service_targets.event_bus_arn
 
-  trusted_principal_arns = local.ecs_gateway_role_arns
+  trusted_principal_arns = local.gateway_role_arns
 }
 
 module "account_cloudwatch_role" {
@@ -102,6 +102,18 @@ module "http_api" {
   throttle_burst_limit      = var.throttle_burst_limit
 }
 
+# What apigw may do to mirror the reference REST API, whatever it runs on.
+module "gateway_policy" {
+  source = "../../modules/gateway-policy"
+  count  = local.any_gateway ? 1 : 0
+
+  api_kind             = "rest"
+  api_id               = module.rest_api.api_id
+  stage_name           = var.stage_name
+  lambda_function_arns = local.lambda_function_arns
+  assumable_role_arns  = [module.integration_role.role_arn]
+}
+
 # A public-subnet VPC for the ECS gateway, unless subnets are passed in.
 module "ecs_network" {
   source = "../../modules/ecs-network"
@@ -117,17 +129,30 @@ module "ecs_gateway" {
   source = "../../modules/ecs-gateway"
   count  = var.enable_ecs_gateway ? 1 : 0
 
-  name_prefix          = var.name_prefix
-  vpc_id               = local.ecs_gateway_vpc_id
-  subnet_ids           = local.ecs_gateway_subnet_ids
-  allowed_cidrs        = var.ecs_gateway_allowed_cidrs
-  api_kind             = "rest"
-  api_id               = module.rest_api.api_id
-  stage_name           = var.stage_name
-  image_tag            = var.ecs_gateway_image_tag
-  log_retention_days   = var.log_retention_days
-  lambda_function_arns = local.lambda_function_arns
-  assumable_role_arns  = [module.integration_role.role_arn]
+  name_prefix         = var.name_prefix
+  vpc_id              = local.ecs_gateway_vpc_id
+  subnet_ids          = local.ecs_gateway_subnet_ids
+  allowed_cidrs       = var.ecs_gateway_allowed_cidrs
+  api_kind            = "rest"
+  api_id              = module.rest_api.api_id
+  stage_name          = var.stage_name
+  image_tag           = var.ecs_gateway_image_tag
+  log_retention_days  = var.log_retention_days
+  gateway_policy_json = module.gateway_policy[0].json
+}
+
+# apigw as a Lambda function behind a function URL, mirroring the same API.
+module "lambda_gateway" {
+  source = "../../modules/lambda-gateway"
+  count  = var.enable_lambda_gateway ? 1 : 0
+
+  name_prefix         = var.name_prefix
+  api_kind            = "rest"
+  api_id              = module.rest_api.api_id
+  stage_name          = var.stage_name
+  image_tag           = var.lambda_gateway_image_tag
+  log_retention_days  = var.log_retention_days
+  gateway_policy_json = module.gateway_policy[0].json
 }
 
 module "github_oidc" {

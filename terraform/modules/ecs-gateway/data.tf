@@ -20,32 +20,3 @@ data "aws_iam_policy_document" "assume_tasks" {
     }
   }
 }
-
-# What the gateway itself may do, granted to the task role.
-data "aws_iam_policy_document" "gateway" {
-  statement {
-    sid       = "ReadApiDefinition"
-    actions   = ["apigateway:GET"]
-    resources = local.api_resources
-  }
-
-  dynamic "statement" {
-    for_each = length(var.lambda_function_arns) > 0 ? [1] : []
-
-    content {
-      sid       = "InvokeFunctions"
-      actions   = ["lambda:InvokeFunction"]
-      resources = local.invocable_function_arns
-    }
-  }
-
-  dynamic "statement" {
-    for_each = length(var.assumable_role_arns) > 0 ? [1] : []
-
-    content {
-      sid       = "AssumeIntegrationRoles"
-      actions   = ["sts:AssumeRole"]
-      resources = var.assumable_role_arns
-    }
-  }
-}

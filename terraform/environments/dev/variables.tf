@@ -146,3 +146,15 @@ variable "ecs_gateway_image_tag" {
   type        = string
   default     = "dev"
 }
+
+variable "enable_lambda_gateway" {
+  description = "Run apigw as a Lambda function behind a public function URL against the reference REST API. Creates an ECR repository and a role, and the function once lambda_gateway_image_tag is set."
+  type        = bool
+  default     = false
+}
+
+variable "lambda_gateway_image_tag" {
+  description = "Tag of the image pushed to the Lambda gateway's ECR repository. Leave null for the first apply, which creates the repository to push to."
+  type        = string
+  default     = null
+}

@@ -23,6 +23,8 @@ terraform/
     vpc-link/                optional internal NLB + VPC link
     ecs-gateway/             optional apigw itself on ECS Fargate, mirroring the reference REST API
     ecs-network/             optional public-subnet VPC for the ECS gateway
+    lambda-gateway/          optional apigw as a Lambda function behind a function URL
+    gateway-policy/          the IAM policy apigw needs to mirror an API, shared by both gateways
     rest-api/                reference REST API, stage, method settings, usage plan, API key
     rest-policy-api/         REST API with a resource policy
     http-api/                reference HTTP API and stage
@@ -82,6 +84,7 @@ Variables worth knowing (all in `environments/dev/variables.tf`):
 | `enable_cache_cluster` | `false` | Stage cache cluster (billed hourly while it exists) |
 | `enable_vpc_link` | `false` | Internal NLB, VPC link, and a `/vpc-link` REST route. Needs `vpc_id` and `vpc_link_subnet_ids` |
 | `enable_ecs_gateway` | `false` | `apigw` on ECS Fargate against the reference REST API. See [Running apigw on ECS](#running-apigw-on-ecs) |
+| `enable_lambda_gateway` | `false` | `apigw` as a Lambda function behind a public function URL. See [Running apigw on Lambda](#running-apigw-on-lambda) |
 | `github_repository` | this repository | Repository allowed to assume the CI role |
 | `github_oidc_provider_arn` | `null` | Reuse an existing GitHub OIDC provider instead of creating one |
 
@@ -99,6 +102,7 @@ Variables worth knowing (all in `environments/dev/variables.tf`):
 | `echo_shared_secret` (sensitive) | Secret the echo function URL requires |
 | `github_ci_role_arn` | Role for the nightly workflow |
 | `ecs_gateway` | ECR repository, cluster, service, task role, and log group of the ECS gateway; `null` unless enabled |
+| `lambda_gateway` | ECR repository, function URL, role, and log group of the Lambda gateway; `null` unless enabled |
 
 ## Running apigw on ECS
 
@@ -157,6 +161,38 @@ curl "$(terraform output -json parity_runner | jq -r .rest.base_url)/mock"   # A
 The gateway's logs are in the `log_group_name` from the `ecs_gateway` output. Set
 `enable_ecs_gateway = false` and apply to remove it; the repository is deleted with its images.
 
+## Running apigw on Lambda
+
+`enable_lambda_gateway` runs the same build as a Lambda function behind a function URL, as a
+second point of comparison. `apigw` is a server with TLS-only listeners and Lambda delivers
+events, so the image (`modules/lambda-gateway/image`) adds two things beside it: the
+[Lambda Web Adapter](https://github.com/awslabs/aws-lambda-web-adapter), which turns events
+into HTTP requests, and `socat`, which bridges the adapter's plain HTTP on loopback to
+`apigw`'s TLS listener, because the adapter cannot speak TLS to the application. `apigw`
+itself is unchanged.
+
+This is for testing, not a deployment model: `apigw` is frozen between invocations, so its
+refresh timers and in-memory throttle state do not behave as they do in a long-running
+process, and the function URL rewrites requests before `apigw` sees them (it lower-cases
+header names, for example). A function URL has no address filter, so the gateway is as public
+as the API it mirrors; the admin listener is not exposed.
+
+The function needs its image to exist, so it takes two applies:
+
+```bash
+# terraform.tfvars: enable_lambda_gateway = true
+terraform apply                       # creates the repository and the role
+repo="$(terraform output -json lambda_gateway | jq -r .repository_url)"
+aws ecr get-login-password | docker login --username AWS --password-stdin "${repo%%/*}"
+docker build --platform linux/arm64 -t apigw:local ../../..
+docker build --platform linux/arm64 --build-arg APIGW_IMAGE=apigw:local \
+  -t "$repo:dev" ../../modules/lambda-gateway/image
+docker push "$repo:dev"
+# terraform.tfvars: lambda_gateway_image_tag = "dev"
+terraform apply                       # creates the function and its URL
+curl "$(terraform output -json lambda_gateway | jq -r .function_url)mock"
+```
+
 ## Nightly parity workflow
 
 `.github/workflows/parity.yml` assumes the CI role with GitHub OIDC. Configure the repository
@@ -196,6 +232,7 @@ exist, so apply them only for a test and destroy afterwards:
 - `enable_vpc_link`: an internal Network Load Balancer.
 - `enable_ecs_gateway`: one Fargate task (0.25 vCPU, 0.5 GB) while the service runs, and the
   image stored in ECR.
+- `enable_lambda_gateway`: Lambda invocations while you test, and the image stored in ECR.
 
 ## Local checks
 
