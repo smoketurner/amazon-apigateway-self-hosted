@@ -1,6 +1,7 @@
-data "aws_caller_identity" "current" {}
-
 data "aws_iam_policy_document" "assume" {
+  # No aws:SourceAccount condition: with one, every REST and HTTP API route
+  # that names this role as its integration or authorizer credentials answered
+  # 500, because API Gateway could not assume the role.
   statement {
     actions = ["sts:AssumeRole"]
 
@@ -8,11 +9,20 @@ data "aws_iam_policy_document" "assume" {
       type        = "Service"
       identifiers = ["apigateway.amazonaws.com"]
     }
+  }
 
-    condition {
-      test     = "StringEquals"
-      variable = "aws:SourceAccount"
-      values   = [local.account_id]
+  # A self-hosted gateway calls integrations as itself, so it assumes this role
+  # the way API Gateway does (docs/deployment.md, "Integration roles").
+  dynamic "statement" {
+    for_each = length(var.trusted_principal_arns) > 0 ? [1] : []
+
+    content {
+      actions = ["sts:AssumeRole"]
+
+      principals {
+        type        = "AWS"
+        identifiers = var.trusted_principal_arns
+      }
     }
   }
 }

@@ -1,0 +1,301 @@
+name: Release
+
+# Tag-triggered (`v*`), or by hand as a dry run that builds everything and
+# publishes nothing. Building and publishing are separate jobs on purpose: every
+# artifact is built, signed, and attested inside reusable-build.yml, which never
+# holds `contents: write`, and this workflow's publish jobs only upload what
+# came out of it.
+#
+# Produces: static musl binaries for Linux x86_64 and aarch64 with SBOMs, the
+# container image for amd64 and arm64 and the Helm chart on GHCR, signed .rpm
+# and .deb packages (also pushed to smoketurner/packages, served as
+# packages.smoketurner.com), SHA256SUMS, and a GitHub release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# No workflow-level group. gates and build share `release-<ref>` with
+# `cancel-in-progress`, so a second run of the same ref cancels the first one's
+# build. The publish jobs are never cancelled: once `gh release create` has run,
+# cutting the rest short would leave a release without its packages.
+# publish-packages queues on a constant group because two tags would race on
+# the push to smoketurner/packages.
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Must match ci.yml: rust-cache hashes every CARGO_* variable into its key, so
+  # a difference here would stop the gates job from restoring CI's cache.
+  CARGO_BUILD_WARNINGS: deny
+
+jobs:
+  gates:
+    name: Release gates
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+          # git-cliff reads the commits back to the previous tag.
+          fetch-depth: 0
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake clang
+      - name: Setup Rust toolchain
+        run: rustup show
+      # Restore-only: a release run reads the cache CI saved on main and never
+      # writes one.
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2.9.3 # zizmor: ignore[cache-poisoning]
+        with:
+          prefix-key: "v1"
+          shared-key: "debug-${{ runner.os }}"
+          save-if: "false"
+
+      # A tag must be the calendar version Cargo.toml already carries, so the
+      # binary, the packages, the image, and the chart all report the same one.
+      - name: Derive the version
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "${REF_TYPE}" != "tag" ]; then
+            echo "version=0.0.0-${SHA:0:7}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version="${REF_NAME#v}"
+          if ! [[ "${version}" =~ ^[0-9]{4}\.([1-9]|1[0-2])\.[1-9][0-9]*$ ]]; then
+            echo "::error::tag ${REF_NAME} is not a vYYYY.M.N calendar version"
+            exit 1
+          fi
+          crate="$(cargo metadata --locked --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "apigw") | .version')"
+          if [ "${crate}" != "${version}" ]; then
+            echo "::error::tag ${REF_NAME} does not match the apigw crate version ${crate}; merge the version bump first"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --workspace
+      - name: Replay the recorded fixtures against apigw
+        run: |
+          cargo build --locked -p apigw -p apigw-parity
+          ./target/debug/apigw-parity replay
+      - name: Crypto gates (aws-lc-rs only, no ring or OpenSSL)
+        run: |
+          set -euo pipefail
+          for crate in ring openssl-sys; do
+            if cargo tree --locked --invert "${crate}" > /dev/null 2>&1; then
+              echo "::error::${crate} is in the dependency graph (docs/crypto.md)"
+              exit 1
+            fi
+          done
+      - uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        with:
+          command: check
+
+      # The release notes: the commits since the previous tag grouped by type
+      # (cliff.toml). Rendered here because this job has the checkout;
+      # `publish` only downloads.
+      - name: Render the commits since the previous tag
+        if: github.ref_type == 'tag'
+        uses: orhun/git-cliff-action@v4.9.1
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        env:
+          OUTPUT: notes.md
+      - name: Upload the release notes
+        if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: release-notes
+          path: notes.md
+          if-no-files-found: error
+
+  # Everything that touches a compiler lives in the reusable workflow so the
+  # attestations it writes name that workflow as the builder. The permissions
+  # here are the ceiling for its jobs; each one declares its own subset.
+  build:
+    name: Build
+    needs: gates
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    uses: $/.github/workflows/reusable-build.yml
+    with:
+      version: ${{ needs.gates.outputs.version }}
+      publish: ${{ github.ref_type == 'tag' }}
+    secrets:
+      GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+      GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+
+  publish:
+    name: Publish the release
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # No checkout: this job only moves artifacts the build workflow produced.
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: binaries-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: packages-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: chart
+          path: dist
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: release-notes
+          path: notes
+      - name: Collect SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          # The per-file .sha256 files came from the machines that built them;
+          # verify against those, then publish one consolidated file.
+          sha256sum -c -- *.sha256
+          rm ./*.sha256
+          sha256sum -- *.tar.gz *.cdx.json *.tgz *.rpm *.deb > SHA256SUMS
+      # One call with every asset: releases are immutable, so nothing can be
+      # added afterwards.
+      - name: Publish
+        run: gh release create "${GITHUB_REF_NAME}" --notes-file notes/notes.md --verify-tag ./dist/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Without a checkout there is no git remote to infer the repository from.
+          GH_REPO: ${{ github.repository }}
+
+  # Adds the packages the build signed to the APT and YUM repositories in
+  # smoketurner/packages, re-signs their metadata, and pushes. The push uses
+  # PACKAGES_DEPLOY_KEY, a deploy key with write access to that one repository;
+  # a deploy-key push is what triggers its publish-to-s3.yml. Runs after publish
+  # so a failed GitHub release never leaves packages without a release.
+  publish-packages:
+    name: Publish to packages.smoketurner.com
+    if: github.ref_type == 'tag'
+    needs: [gates, publish]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-packages
+      cancel-in-progress: false
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: packages-*
+          path: packages
+          merge-multiple: true
+
+      - uses: actions/checkout@v7.0.1
+        with: # zizmor: ignore[artipacked] the credentials push the commit below
+          repository: smoketurner/packages
+          ssh-key: ${{ secrets.PACKAGES_DEPLOY_KEY }}
+          path: packages-repo
+
+      - name: Install repository tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq apt-utils dpkg-dev createrepo-c
+
+      - name: Import the signing key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${GPG_PRIVATE_KEY}" | gpg --batch --import
+          fpr="$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/ { print $10; exit }')"
+          echo "GPG_FPR=${fpr}" >> "$GITHUB_ENV"
+
+      - name: Add the packages, re-sign the metadata, and push
+        working-directory: packages-repo
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          VERSION: ${{ needs.gates.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          sign() {
+            gpg --batch --yes --pinentry-mode loopback --passphrase "${GPG_PASSPHRASE}" \
+              --local-user "${GPG_FPR}" "$@"
+          }
+
+          add_packages() {
+            cp ../packages/*.deb apt/pool/main/
+            for rpm in ../packages/*.rpm; do
+              case "${rpm}" in
+                *.x86_64.rpm) cp "${rpm}" rpm/x86_64/ ;;
+                *.aarch64.rpm) cp "${rpm}" rpm/aarch64/ ;;
+                *) echo "::error::unexpected RPM architecture: ${rpm}"; exit 1 ;;
+              esac
+            done
+
+            # dpkg-scanpackages runs from apt/ so each Filename is relative to
+            # https://packages.smoketurner.com/apt, the APT source root.
+            # --multiversion indexes every version in the pool, so
+            # `apt-get install apigw=<version>` works like it does with dnf.
+            for arch in amd64 arm64; do
+              index="dists/stable/main/binary-${arch}/Packages"
+              (cd apt && dpkg-scanpackages --multiversion --arch "${arch}" pool/main > "${index}")
+              gzip -9nc "apt/${index}" > "apt/${index}.gz"
+            done
+            # The previous Release would otherwise be hashed into the new one.
+            rm -f apt/dists/stable/Release apt/dists/stable/InRelease apt/dists/stable/Release.gpg
+            apt-ftparchive -c apt-ftparchive.conf release apt/dists/stable > Release.new
+            mv Release.new apt/dists/stable/Release
+            sign --clearsign -o apt/dists/stable/InRelease apt/dists/stable/Release
+            sign --detach-sign --armor -o apt/dists/stable/Release.gpg apt/dists/stable/Release
+
+            for arch in x86_64 aarch64; do
+              createrepo_c --update "rpm/${arch}"
+              sign --detach-sign --armor -o "rpm/${arch}/repodata/repomd.xml.asc" \
+                "rpm/${arch}/repodata/repomd.xml"
+            done
+          }
+
+          # Other projects release into the same repository. When one of them
+          # pushes first, start again from its commit: the metadata indexes the
+          # whole pool, so it cannot be merged, only regenerated.
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git reset --hard origin/main
+            git clean -fd
+            add_packages
+            git add -A
+            git commit -m "apigw ${VERSION}"
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "::warning::push rejected on attempt ${attempt}; regenerating from the new main"
+          done
+          echo "::error::could not push to smoketurner/packages after 3 attempts"
+          exit 1

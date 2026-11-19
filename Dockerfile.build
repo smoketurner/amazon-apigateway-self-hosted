@@ -1,0 +1,64 @@
+# syntax=docker/dockerfile:1
+#
+# Reproducible static musl binaries of `apigw`, driven by docker-bake.hcl and,
+# in the release workflow, a matrix that sets TARGET per runner architecture.
+# This does not replace the local image in `Dockerfile`.
+#
+# cargo-chef caches dependency compilation: only the workspace crates recompile
+# when the source changes, as long as Cargo.toml and Cargo.lock are stable.
+
+# Keep this Rust version in sync with rust-toolchain.toml.
+FROM rust:1.100.0-alpine@sha256:8d0e82abfdf9a38071e07cabc5afba4ddbe077631a80e4e742a760c38beadc33 AS base
+# aws-lc-rs compiles C on musl: cmake/make/clang/perl and musl/linux headers.
+# No openssl: aws-lc-rs is the only crypto provider (deny.toml bans openssl and ring).
+RUN apk add --no-cache musl-dev pkgconfig cmake make perl clang linux-headers
+
+RUN cargo install cargo-chef --version 0.1.78 --locked
+
+# cargo-cyclonedx writes the release SBOM. Installed in the base layer rather
+# than beside the `cargo cyclonedx` call so a source change does not rebuild it,
+# and so SBOM and non-SBOM builds share this layer.
+RUN cargo install cargo-cyclonedx --version 0.5.10 --locked
+
+# --- Planner: the dependency recipe ---
+FROM base AS planner
+WORKDIR /app
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# --- Builder: cook the dependencies, then build the workspace ---
+FROM base AS builder
+
+ARG TARGET
+
+WORKDIR /app
+RUN rustup target add "${TARGET}"
+
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --locked --target "${TARGET}" --package apigw --recipe-path recipe.json
+
+COPY . .
+
+# Declared after the cook layer so changes do not bust the cache.
+ARG SOURCE_DATE_EPOCH=0
+ARG GENERATE_SBOM=false
+
+# A fixed mtime on each crate root built into the binary keeps the build inputs
+# identical from one run to the next.
+RUN touch -d "@${SOURCE_DATE_EPOCH}" crates/apigw/src/main.rs crates/apigw-regex/src/lib.rs crates/apigw-vtl/src/lib.rs
+
+RUN cargo build --release --locked --target "${TARGET}" --package apigw
+
+RUN if [ "${GENERATE_SBOM}" = "true" ]; then \
+      cargo cyclonedx --manifest-path crates/apigw/Cargo.toml --target "${TARGET}" --format json; \
+    fi
+
+# Only the binary and any SBOM go to /out.
+RUN mkdir -p "/out/target/${TARGET}/release" \
+    && cp "target/${TARGET}/release/apigw" "/out/target/${TARGET}/release/" \
+    && find crates/apigw -name "*cdx.json" | while read -r f; do \
+         cp "$f" "/out/target/${TARGET}/release/apigw.cdx.json"; \
+       done
+
+FROM scratch AS output
+COPY --from=builder /out/ /

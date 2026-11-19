@@ -27,3 +27,9 @@ variable "event_bus_arn" {
   description = "Event bus the AWS integrations publish to."
   type        = string
 }
+
+variable "trusted_principal_arns" {
+  description = "IAM principals, besides API Gateway, allowed to assume the role: the identity of each self-hosted gateway."
+  type        = list(string)
+  default     = []
+}

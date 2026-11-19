@@ -26,7 +26,11 @@ crates/apigw-vtl/     # Velocity 1.7 mapping templates + JSON paths (library, pu
 fuzz/                 # detached cargo-fuzz crate (own workspace)
 tools/                # Docker-run Java oracles that generate test fixtures
 docs/                 # architecture, deployment (k8s/Istio), crypto, CI
-Dockerfile            # static musl build → distroless
+charts/apigw/         # Helm chart, published to GHCR as an OCI artifact
+packaging/            # nfpm config, systemd unit, and scripts for the .rpm and .deb
+Dockerfile            # static musl build → distroless (local image)
+Dockerfile.build      # reproducible release binaries (docker-bake.hcl)
+Dockerfile.release    # the published image, from the prebuilt binaries
 .claude/rules/        # review gates, branching, commits, continuous improvement
 ```
 
@@ -61,5 +65,6 @@ make lint      # cargo clippy --workspace --all-targets --all-features -- -D war
 make test      # cargo test --workspace --all-features
 make deny      # cargo deny check
 make image     # docker build -t apigw:local .
+make chart-lint  # helm lint + kubeconform over charts/apigw/ci/*.yaml
 cargo test -p apigw <test_name>
 ```

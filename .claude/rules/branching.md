@@ -32,6 +32,7 @@ cargo deny check
 
 - Verify the review gates in [`code-standards.md`](code-standards.md) pass
 - Formatting runs on **stable** (`.rustfmt.toml` uses stable-only options — no nightly needed)
-- Update `CHANGELOG.md` (`[Unreleased]` section if no version assigned)
+- Release notes are generated from commit subjects (`cliff.toml`), so write the subject for
+  the people who will read the release
 - If you touched a critical path in [`continuous-improvement.md`](continuous-improvement.md),
   live-test it

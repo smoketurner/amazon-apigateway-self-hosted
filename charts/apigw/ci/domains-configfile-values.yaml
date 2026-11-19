@@ -1,0 +1,20 @@
+image:
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+api:
+  domainNames:
+    - api.example.com
+    - "*.example.org"
+aws:
+  profile: gateway
+  configFile: /etc/aws/config
+  sharedCredentialsFile: /etc/aws/credentials
+tls:
+  existingSecret: apigw-tls
+extraVolumes:
+  - name: aws-config
+    secret:
+      secretName: apigw-aws-config
+extraVolumeMounts:
+  - name: aws-config
+    mountPath: /etc/aws
+    readOnly: true

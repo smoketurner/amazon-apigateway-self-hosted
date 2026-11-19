@@ -53,13 +53,13 @@ variable "enable_vpc_link" {
 }
 
 variable "vpc_id" {
-  description = "VPC for the VPC-link target group. Required when enable_vpc_link is true."
+  description = "VPC for the VPC-link target group, and for the ECS gateway when ecs_gateway_subnet_ids is set. Required when enable_vpc_link is true or ecs_gateway_subnet_ids is not empty."
   type        = string
   default     = null
 
   validation {
-    condition     = !var.enable_vpc_link || var.vpc_id != null
-    error_message = "enable_vpc_link requires vpc_id."
+    condition     = !(var.enable_vpc_link || length(var.ecs_gateway_subnet_ids) > 0) || var.vpc_id != null
+    error_message = "enable_vpc_link and ecs_gateway_subnet_ids require vpc_id."
   }
 }
 
@@ -121,4 +121,40 @@ variable "cors_allowed_origin" {
   description = "Origin allowed by the CORS configuration on every API."
   type        = string
   default     = "https://example.com"
+}
+
+variable "enable_ecs_gateway" {
+  description = "Run apigw on ECS Fargate against the reference REST API. Creates an ECR repository, a cluster, a service, and its roles; the task bills while it runs."
+  type        = bool
+  default     = false
+}
+
+variable "ecs_gateway_subnet_ids" {
+  description = "Public subnets in vpc_id for the ECS gateway task. Leave empty to have the stack create a small VPC with public subnets for it."
+  type        = list(string)
+  default     = []
+}
+
+variable "ecs_gateway_allowed_cidrs" {
+  description = "CIDR blocks allowed to reach the ECS gateway's API and admin ports, for example your own address as a /32."
+  type        = list(string)
+  default     = []
+}
+
+variable "ecs_gateway_image_tag" {
+  description = "Tag of the apigw image pushed to the ECS gateway's ECR repository."
+  type        = string
+  default     = "dev"
+}
+
+variable "enable_lambda_gateway" {
+  description = "Run apigw as a Lambda function behind a public function URL against the reference REST API. Creates an ECR repository and a role, and the function once lambda_gateway_image_tag is set."
+  type        = bool
+  default     = false
+}
+
+variable "lambda_gateway_image_tag" {
+  description = "Tag of the image pushed to the Lambda gateway's ECR repository. Leave null for the first apply, which creates the repository to push to."
+  type        = string
+  default     = null
 }

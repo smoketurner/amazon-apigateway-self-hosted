@@ -1,0 +1,19 @@
+api:
+  httpApiId: f6g7h8i9j0
+  stage: $default
+aws:
+  region: eu-west-1
+  webIdentity:
+    roleArn: arn:aws:iam::123456789012:role/apigw
+tls:
+  certManager:
+    enabled: true
+    issuerRef:
+      name: internal-ca
+cache:
+  existingClaim: apigw-cache
+valkey:
+  existingSecret: apigw-valkey
+istio:
+  destinationRule:
+    enabled: true
