@@ -1,0 +1,20 @@
+# Dockerfile.build copies the whole workspace (COPY . .), so this is a denylist
+# of paths the build does not need: it keeps the context small and cache-stable.
+target/
+dist/
+staging/
+.git/
+.github/
+.claude/
+.local/
+charts/
+docs/
+fuzz/
+mutants.out/
+packaging/
+parity/
+terraform/
+tools/
+*.md
+.env
+.env.example
