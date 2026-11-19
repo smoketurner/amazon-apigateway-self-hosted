@@ -125,7 +125,13 @@ jobs:
             exit 1
           fi
           name="apigw-${VERSION}-${TARGET}.cdx.json"
-          cp "${sbom}" "dist/${name}"
+          # cargo-cyclonedx leaves out the random serial number when
+          # SOURCE_DATE_EPOCH is set, and actions/attest takes a file for
+          # CycloneDX only if it has one. Derive it from the SBOM's own
+          # digest, so the same build still writes the same file.
+          digest="$(sha256sum "${sbom}" | cut -c1-32)"
+          serial="urn:uuid:${digest:0:8}-${digest:8:4}-8${digest:13:3}-9${digest:17:3}-${digest:20:12}"
+          jq --arg serial "${serial}" '. + {serialNumber: $serial}' "${sbom}" > "dist/${name}"
           echo "path=dist/${name}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v7.0.2
