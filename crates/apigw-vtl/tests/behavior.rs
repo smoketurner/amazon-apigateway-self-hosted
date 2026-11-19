@@ -365,6 +365,12 @@ fn bodies_are_read_the_way_api_gateway_reads_them() {
         "an empty body is an empty object"
     );
     assert_eq!(json("  "), Ok("{}".to_owned()));
+    assert_eq!(json("null"), Ok("{}".to_owned()));
+    assert_eq!(
+        json("{\"a\":null,\"b\":[null,1]}"),
+        Ok("{\"a\":null,\"b\":[null,1]}".to_owned()),
+        "nulls inside a body are kept"
+    );
     for (body, rendered) in [
         ("not json", "\"not json\""),
         ("tru", "\"tru\""),

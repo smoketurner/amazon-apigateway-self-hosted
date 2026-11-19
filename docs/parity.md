@@ -214,6 +214,14 @@ also leaves `'` bare; `apigw` sends `%27`.
 
 - A Lambda proxy response's `statusCode` must be 100 through 599. Anything else, like a function
   error, is a `502` whose `x-amzn-errortype` is `InternalServerErrorException`.
+  `$context.error.responseType` tells the two apart: a function error is an `INTEGRATION_FAILURE`,
+  a response nothing can be made from is only a `DEFAULT_5XX`.
+- A request no route claims that has an `Authorization` header is read as a failed attempt at
+  Signature Version 4: `403` `IncompleteSignatureException`, with a message naming what the header
+  lacks and its SHA-256 digest. A complete header is an `UnrecognizedClientException`.
+- A response to `HEAD` from an integration repeats its length as `x-amzn-Remapped-Content-Length`.
+- An `HTTP_PROXY` backend receives the client's own `x-amzn-apigateway-api-id` when it sent one.
+- In a request template a body of `null` reads as `{}`; nulls inside a body are kept.
 - `X-HTTP-Method-Override` is consumed: neither a Lambda event nor an HTTP backend sees it.
 - `TRACE` never reaches a REST API. The endpoint answers `405` with a small HTML page and, like the
   `400` for a malformed escape, no `x-amzn-RequestId` or `x-amz-apigw-id`.
@@ -229,6 +237,17 @@ value is ignored, and a body that is not JSON is a string. A body that opens an 
 string and does not hold one answers `400` `{"message": "Could not process payload"}`.
 
 Known differences that remain:
+
+- `apigw` resolves `.` and `..` segments in the URL it sends to an HTTP backend; API Gateway
+  sends them as they are.
+- A header value that is not ASCII is not available to parameter mappings. API Gateway passes
+  its bytes on re-encoded.
+- API Gateway answers `403` to a request whose `Host` is not the API's; `apigw` serves any host
+  unless `--domain-name` is used.
+- The incomplete-signature messages cover the `Authorization` header only: a `Date` header in
+  the wrong format and signature parameters in the query string get the header's messages or
+  the missing-route answer.
+- The endpoint's `server: awselb/2.0` header on its `405` to `TRACE` is not sent.
 
 - Response header names are lower case. API Gateway writes them in mixed case over HTTP/1.1
   (`Content-Type`, `x-amzn-RequestId`); over HTTP/2 both are lower case.

@@ -12,9 +12,9 @@ pub(crate) mod context;
 
 use std::time::Instant;
 
-use axum::body::{Body, Bytes};
+use axum::body::{Body, Bytes, HttpBody};
 use axum::extract::{FromRequestParts as _, RawPathParams, Request};
-use axum::http::{HeaderName, HeaderValue};
+use axum::http::{HeaderName, HeaderValue, Method, header};
 use axum::response::Response;
 
 pub(crate) use context::{ApiKeyIdentity, RequestContext};
@@ -146,6 +146,7 @@ impl<'a> Pipeline<'a> {
         response.extensions_mut().insert(timing);
         if succeeded {
             self.add_trace_header(ctx, &mut response);
+            self.add_head_length(ctx, &mut response);
         }
         let response = match plan {
             Some(plan) if succeeded => match plan.store(&self.api.state, response).await {
@@ -187,6 +188,31 @@ impl<'a> Pipeline<'a> {
             && let Ok(value) = HeaderValue::try_from(format!("Root={trace}"))
         {
             response.headers_mut().insert(TRACE_HEADER, value);
+        }
+    }
+
+    /// A REST API repeats the length of an integration's response to a `HEAD`
+    /// request as `x-amzn-Remapped-Content-Length` (measured against a
+    /// deployed API with a Lambda proxy integration).
+    fn add_head_length(&self, ctx: &RequestContext, response: &mut Response) {
+        const REMAPPED_LENGTH: HeaderName =
+            HeaderName::from_static("x-amzn-remapped-content-length");
+        if self.api.kind != ApiKind::Rest
+            || ctx.method != Method::HEAD
+            || response.headers().contains_key(REMAPPED_LENGTH)
+        {
+            return;
+        }
+        let length = response
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .cloned()
+            .or_else(|| {
+                let exact = HttpBody::size_hint(response.body()).exact()?;
+                HeaderValue::try_from(exact.to_string()).ok()
+            });
+        if let Some(length) = length {
+            response.headers_mut().insert(REMAPPED_LENGTH, length);
         }
     }
 

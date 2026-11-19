@@ -19,6 +19,7 @@ use crate::cache::CacheScope;
 use crate::canary::Release;
 use crate::cors::Cors;
 use crate::gateway_response::{Failure, GatewayResponses};
+use crate::incomplete_signature::UnclaimedAuthorization;
 use crate::integration::StageVariables;
 use crate::limits::LimitExceeded;
 use crate::model::{ApiKind, Protection, ResponseType};
@@ -187,13 +188,21 @@ impl ApiContext {
     pub(crate) fn reject(&self, request: Request, error: GatewayError) -> Response {
         let (parts, _) = request.into_parts();
         let context = RequestContext::new(self, None, parts, Vec::new());
+        // A REST API reads an `Authorization` header no route claims as a
+        // failed attempt at Signature Version 4.
+        let failure = match (self.kind, error) {
+            (ApiKind::Rest, GatewayError::NoRoute) => UnclaimedAuthorization::of(&context.headers)
+                .map(|unclaimed| unclaimed.failure(&context.headers)),
+            _ => None,
+        }
+        .unwrap_or_else(|| error.failure(self.kind));
         let Some(ref cors) = self.cors else {
-            return self.respond(&context, &error.failure(self.kind));
+            return self.respond(&context, &failure);
         };
         if Cors::is_preflight(&context) {
             return cors.preflight(&context);
         }
-        let mut response = self.respond(&context, &error.failure(self.kind));
+        let mut response = self.respond(&context, &failure);
         cors.decorate(&context, &mut response);
         response
     }
@@ -218,6 +227,9 @@ pub(crate) enum GatewayError {
     ApiConfiguration,
     /// A request template read the body as JSON and the body is broken JSON.
     UnprocessablePayload,
+    /// The integration answered, but not in a form a response can be made
+    /// from, such as a Lambda proxy response without a usable `statusCode`.
+    MalformedIntegrationResponse,
     RequestTooLarge,
     /// An integration this gateway can't execute yet.
     UnsupportedIntegration,
@@ -251,16 +263,29 @@ impl GatewayError {
             }
             (Self::NoRoute, ApiKind::Http) => Failure::gateway(StatusCode::NOT_FOUND, "Not Found"),
             (Self::InvalidRequest, _) => Failure::new(ResponseType::Default4xx),
-            // On a deployed REST API this is not an `INTEGRATION_FAILURE`:
-            // `$context.error.responseType` says `DEFAULT_5XX`.
-            (Self::IntegrationFailure, ApiKind::Rest) => Failure::new(ResponseType::Default5xx)
-                .with_status(StatusCode::BAD_GATEWAY)
-                .with_error_type("InternalServerErrorException"),
-            (Self::IntegrationFailure | Self::IntegrationUnreachable, ApiKind::Http) => {
+            // Both are a 502 `InternalServerErrorException` on a deployed REST
+            // API, but `$context.error.responseType` tells them apart: a
+            // function error is an `INTEGRATION_FAILURE`, an answer no
+            // response can be made from is only a `DEFAULT_5XX`.
+            (Self::IntegrationFailure, ApiKind::Rest) => {
                 Failure::new(ResponseType::IntegrationFailure)
                     .with_status(StatusCode::BAD_GATEWAY)
                     .with_message("Internal server error")
+                    .with_error_type("InternalServerErrorException")
             }
+            (Self::MalformedIntegrationResponse, ApiKind::Rest) => {
+                Failure::new(ResponseType::Default5xx)
+                    .with_status(StatusCode::BAD_GATEWAY)
+                    .with_error_type("InternalServerErrorException")
+            }
+            (
+                Self::IntegrationFailure
+                | Self::IntegrationUnreachable
+                | Self::MalformedIntegrationResponse,
+                ApiKind::Http,
+            ) => Failure::new(ResponseType::IntegrationFailure)
+                .with_status(StatusCode::BAD_GATEWAY)
+                .with_message("Internal server error"),
             (Self::IntegrationUnreachable, ApiKind::Rest) => {
                 Failure::new(ResponseType::IntegrationFailure)
             }

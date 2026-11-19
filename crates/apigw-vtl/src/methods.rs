@@ -590,7 +590,7 @@ impl Interpreter<'_> {
 /// Reads a body the way API Gateway does, which is more forgiving than a
 /// JSON parser (measured against a deployed REST API):
 ///
-/// - an empty body is an empty object;
+/// - an empty body, or the JSON `null`, is an empty object;
 /// - a body that opens an object, an array, or a string must hold one,
 ///   and whatever follows that first value is ignored;
 /// - anything else is a JSON scalar when the whole body is one, and
@@ -608,7 +608,12 @@ fn parse_body(body: &str) -> Result<Value, RenderError> {
             None => Err(RenderError::InvalidBodyJson("no value".to_owned())),
         };
     }
-    Ok(Value::from_json(text).unwrap_or_else(|_| Value::string(body)))
+    Ok(match Value::from_json(text) {
+        // A body of `null` reads as no body at all.
+        Ok(Value::Null) => Value::Map(Map::new()),
+        Ok(scalar) => scalar,
+        Err(_) => Value::string(body),
+    })
 }
 
 fn evaluate_path(path: &str, document: &Value) -> Result<Value, RenderError> {

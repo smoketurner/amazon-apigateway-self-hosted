@@ -1,0 +1,16 @@
+{
+  "name": "rest-wrong-method-with-authorization",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-errortype": "IncompleteSignatureException",
+      "x-amzn-requestid": "[masked]"
+    },
+    "body": "{\"message\":\"Authorization header requires 'Credential' parameter. Authorization header requires 'Signature' parameter. Authorization header requires 'SignedHeaders' parameter. Authorization header requires existence of either a 'X-Amz-Date' or a 'Date' header. (Hashed with SHA-256 and encoded with Base64) Authorization=QQCDc1c1oQ5lihnt0XBOYGyd0RLiJYJbY/r+3tdmyLk=\"}"
+  }
+}

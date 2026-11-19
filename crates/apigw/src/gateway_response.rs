@@ -889,6 +889,15 @@ mod tests {
             response.headers()["x-amzn-errortype"],
             "InternalServerErrorException"
         );
+        // `$context.error.responseType` tells the two apart.
+        let function_error = GatewayError::IntegrationFailure.failure(ApiKind::Rest);
+        assert_eq!(
+            function_error.response_type(),
+            Some(ResponseType::IntegrationFailure)
+        );
+        let malformed = GatewayError::MalformedIntegrationResponse.failure(ApiKind::Rest);
+        assert_eq!(malformed.response_type(), Some(ResponseType::Default5xx));
+        assert_eq!(malformed.status(), StatusCode::BAD_GATEWAY);
     }
 
     #[test]
