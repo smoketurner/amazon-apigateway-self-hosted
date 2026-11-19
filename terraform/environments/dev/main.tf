@@ -140,6 +140,19 @@ module "ecs_gateway" {
   image_tag           = var.ecs_gateway_image_tag
   log_retention_days  = var.log_retention_days
   gateway_policy_json = module.gateway_policy[0].json
+  additional_apis     = local.ecs_gateway_additional_apis
+}
+
+# What the ECS gateway's second container may do to mirror the HTTP API.
+module "gateway_policy_http" {
+  source = "../../modules/gateway-policy"
+  count  = var.enable_ecs_gateway_http ? 1 : 0
+
+  api_kind             = "http"
+  api_id               = module.http_api.api_id
+  stage_name           = var.stage_name
+  lambda_function_arns = local.lambda_function_arns
+  assumable_role_arns  = [module.integration_role.role_arn]
 }
 
 # apigw as a Lambda function behind a function URL, mirroring the same API.
