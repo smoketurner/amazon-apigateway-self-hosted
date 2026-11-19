@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use axum::body::{Body, Bytes};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, header};
 use axum::response::Response;
 
 use crate::gateway::{GatewayError, HeaderNameExt as _, MAX_BODY_BYTES};
@@ -145,6 +145,15 @@ impl HttpProxy {
         };
         let method = self.method.clone().unwrap_or_else(|| ctx.method.clone());
         self.request_mapping.apply(ctx, &mut headers, &mut url);
+        // A REST API tells the backend a body-less request has no body, for
+        // every method but GET and HEAD.
+        if ctx.api.kind == ApiKind::Rest
+            && body.is_empty()
+            && method != Method::GET
+            && method != Method::HEAD
+        {
+            headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
+        }
         ctx.integration.transfer_mode = Some(self.transfer);
         let (client, url) = self.client_for(client, route, url, &mut headers).await?;
         let started = Instant::now();

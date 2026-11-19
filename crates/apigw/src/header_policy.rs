@@ -126,9 +126,10 @@ const RULES: &[HeaderRule] = &[
     rule!("trailer", Dropped, Dropped),
     rule!("upgrade", Dropped, Dropped),
     rule!("user-agent", Passthrough, Remapped),
+    // The documented table drops it for `http_proxy`; a deployed API passes it.
     rule!(
         "via",
-        [Dropped, Dropped, Passthrough],
+        [Dropped, Passthrough, Passthrough],
         [Passthrough, Dropped, Dropped]
     ),
     rule!("warn", Passthrough, Passthrough),
@@ -404,7 +405,7 @@ transfer-encoding DDX DDD
 trailer DDD DDD
 upgrade DDD DDD
 user-agent PPP RRR
-via DDP PDD
+via DPP PDD
 warn PPP PPP
 www-authenticate DDD RRR";
 
@@ -493,7 +494,7 @@ www-authenticate DDD RRR";
         let sent = Flavor::HttpProxy.request_headers(&client, IamAuthorization::NotUsed);
         let mut names: Vec<&str> = sent.keys().map(HeaderName::as_str).collect();
         names.sort_unstable();
-        assert_eq!(names, ["accept", "user-agent", "x-custom"]);
+        assert_eq!(names, ["accept", "user-agent", "via", "x-custom"]);
         assert_eq!(sent.get_all("x-custom").iter().count(), 2);
 
         let lambda = Flavor::Lambda.request_headers(&client, IamAuthorization::NotUsed);

@@ -1,0 +1,13 @@
+{
+  "name": "rest-trace",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 405,
+    "headers": {
+      "content-type": "text/html",
+      "date": "[masked]"
+    },
+    "body": "<html>\r\n<head><title>405 Not Allowed</title></head>\r\n<body>\r\n<center><h1>405 Not Allowed</h1></center>\r\n</body>\r\n</html>\r\n"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "rest-lambda-proxy-status-599",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 599,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-requestid": "[masked]",
+      "x-amzn-trace-id": "[masked]"
+    }
+  }
+}

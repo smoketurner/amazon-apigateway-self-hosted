@@ -232,6 +232,8 @@ pub(crate) struct Failure {
     validation: Option<String>,
     /// Whether `$context.error.messageString` starts with a space.
     spaced: bool,
+    /// The `x-amzn-ErrorType` value, when it is not the response type's own.
+    error_type: Option<&'static str>,
 }
 
 impl Failure {
@@ -258,6 +260,7 @@ impl Failure {
             message: Cow::Borrowed(response_type.default_message()),
             validation: None,
             spaced: response_type.message_string_is_spaced(),
+            error_type: None,
         }
     }
 
@@ -269,6 +272,7 @@ impl Failure {
             message: Cow::Borrowed(message),
             validation: None,
             spaced: false,
+            error_type: None,
         }
     }
 
@@ -281,6 +285,15 @@ impl Failure {
     #[must_use]
     pub(crate) fn with_message(mut self, message: impl Into<Cow<'static, str>>) -> Self {
         self.message = message.into();
+        self
+    }
+
+    /// Names the failure differently in `x-amzn-ErrorType` than its response
+    /// type does: a `502` for an unusable integration answer is an
+    /// `InternalServerErrorException` on a deployed API.
+    #[must_use]
+    pub(crate) const fn with_error_type(mut self, error_type: &'static str) -> Self {
+        self.error_type = Some(error_type);
         self
     }
 
@@ -599,10 +612,10 @@ impl GatewayResponses {
             headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
         }
         if let Some(response_type) = failure.response_type() {
-            headers.insert(
-                ERROR_TYPE_HEADER,
-                HeaderValue::from_static(response_type.error_type()),
-            );
+            let error_type = failure
+                .error_type
+                .unwrap_or_else(|| response_type.error_type());
+            headers.insert(ERROR_TYPE_HEADER, HeaderValue::from_static(error_type));
         }
         if let Ok(id) = HeaderValue::try_from(request.extended_request_id()) {
             headers.insert(EXTENDED_REQUEST_ID_HEADER, id);
@@ -897,6 +910,22 @@ mod tests {
             "MissingAuthenticationTokenException"
         );
         assert_eq!(body(response).await, "");
+    }
+
+    /// Measured against a deployed REST API: a function error or a malformed
+    /// proxy response is a `502` named `InternalServerErrorException`.
+    #[test]
+    fn an_unusable_integration_answer_is_an_internal_server_error() {
+        let ctx = request(ApiKind::Rest);
+        let response = GatewayResponses::default().render(
+            &GatewayError::IntegrationFailure.failure(ApiKind::Rest),
+            &ctx,
+        );
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            response.headers()["x-amzn-errortype"],
+            "InternalServerErrorException"
+        );
     }
 
     #[test]
