@@ -53,13 +53,13 @@ variable "enable_vpc_link" {
 }
 
 variable "vpc_id" {
-  description = "VPC for the VPC-link target group. Required when enable_vpc_link is true."
+  description = "VPC for the VPC-link target group and the ECS gateway. Required when enable_vpc_link or enable_ecs_gateway is true."
   type        = string
   default     = null
 
   validation {
-    condition     = !var.enable_vpc_link || var.vpc_id != null
-    error_message = "enable_vpc_link requires vpc_id."
+    condition     = !(var.enable_vpc_link || var.enable_ecs_gateway) || var.vpc_id != null
+    error_message = "enable_vpc_link and enable_ecs_gateway require vpc_id."
   }
 }
 
@@ -121,4 +121,28 @@ variable "cors_allowed_origin" {
   description = "Origin allowed by the CORS configuration on every API."
   type        = string
   default     = "https://example.com"
+}
+
+variable "enable_ecs_gateway" {
+  description = "Run apigw on ECS Fargate against the reference REST API. Creates an ECR repository, a cluster, a service, and its roles; the task bills while it runs."
+  type        = bool
+  default     = false
+}
+
+variable "ecs_gateway_subnet_ids" {
+  description = "Public subnets for the ECS gateway task. Required when enable_ecs_gateway is true."
+  type        = list(string)
+  default     = []
+}
+
+variable "ecs_gateway_allowed_cidrs" {
+  description = "CIDR blocks allowed to reach the ECS gateway's API and admin ports, for example your own address as a /32."
+  type        = list(string)
+  default     = []
+}
+
+variable "ecs_gateway_image_tag" {
+  description = "Tag of the apigw image pushed to the ECS gateway's ECR repository."
+  type        = string
+  default     = "dev"
 }

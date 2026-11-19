@@ -15,6 +15,21 @@ data "aws_iam_policy_document" "assume" {
       values   = [local.account_id]
     }
   }
+
+  # A self-hosted gateway calls integrations as itself, so it assumes this role
+  # the way API Gateway does (docs/deployment.md, "Integration roles").
+  dynamic "statement" {
+    for_each = length(var.trusted_principal_arns) > 0 ? [1] : []
+
+    content {
+      actions = ["sts:AssumeRole"]
+
+      principals {
+        type        = "AWS"
+        identifiers = var.trusted_principal_arns
+      }
+    }
+  }
 }
 
 data "aws_iam_policy_document" "invoke" {

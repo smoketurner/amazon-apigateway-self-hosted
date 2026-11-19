@@ -7,3 +7,10 @@ enable_logging                 = false
 manage_account_cloudwatch_role = false
 enable_cache_cluster           = false
 enable_vpc_link                = false
+
+# apigw on ECS Fargate against the reference REST API (bills while the task runs).
+enable_ecs_gateway = false
+# vpc_id                    = "vpc-0123456789abcdef0"
+# ecs_gateway_subnet_ids    = ["subnet-0123456789abcdef0"]
+# ecs_gateway_allowed_cidrs = ["203.0.113.7/32"]
+# ecs_gateway_image_tag     = "dev"

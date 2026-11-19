@@ -31,6 +31,10 @@ module "integration_role" {
   table_arn         = module.service_targets.table_arn
   state_machine_arn = module.service_targets.state_machine_arn
   event_bus_arn     = module.service_targets.event_bus_arn
+
+  # Only this output, not the whole module: the gateway's task definition
+  # depends on the REST API, which depends on this role.
+  trusted_principal_arns = var.enable_ecs_gateway ? [module.ecs_gateway[0].task_role_arn] : []
 }
 
 module "account_cloudwatch_role" {
@@ -101,6 +105,28 @@ module "http_api" {
   log_retention_days        = var.log_retention_days
   throttle_rate_limit       = var.throttle_rate_limit
   throttle_burst_limit      = var.throttle_burst_limit
+}
+
+# apigw itself on ECS Fargate, mirroring the reference REST API, to test a
+# build against the real thing.
+module "ecs_gateway" {
+  source = "../../modules/ecs-gateway"
+  count  = var.enable_ecs_gateway ? 1 : 0
+
+  name_prefix        = var.name_prefix
+  vpc_id             = var.vpc_id
+  subnet_ids         = var.ecs_gateway_subnet_ids
+  allowed_cidrs      = var.ecs_gateway_allowed_cidrs
+  api_kind           = "rest"
+  api_id             = module.rest_api.api_id
+  stage_name         = var.stage_name
+  image_tag          = var.ecs_gateway_image_tag
+  log_retention_days = var.log_retention_days
+  lambda_function_arns = [
+    module.lambda_backends.echo_function_arn,
+    module.lambda_backends.authorizer_function_arn,
+  ]
+  assumable_role_arns = [module.integration_role.role_arn]
 }
 
 module "github_oidc" {

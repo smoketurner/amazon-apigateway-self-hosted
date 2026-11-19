@@ -21,6 +21,7 @@ terraform/
     integration-role/        role API Gateway assumes to call integrations and authorizers
     account-cloudwatch-role/ optional account-wide API Gateway CloudWatch role
     vpc-link/                optional internal NLB + VPC link
+    ecs-gateway/             optional apigw itself on ECS Fargate, mirroring the reference REST API
     rest-api/                reference REST API, stage, method settings, usage plan, API key
     rest-policy-api/         REST API with a resource policy
     http-api/                reference HTTP API and stage
@@ -79,6 +80,7 @@ Variables worth knowing (all in `environments/dev/variables.tf`):
 | `manage_account_cloudwatch_role` | `false` | Creates the role and sets it in `aws_api_gateway_account`. This **overwrites** the account's current role, and destroying it clears the setting. Leave it off if the account already has one |
 | `enable_cache_cluster` | `false` | Stage cache cluster (billed hourly while it exists) |
 | `enable_vpc_link` | `false` | Internal NLB, VPC link, and a `/vpc-link` REST route. Needs `vpc_id` and `vpc_link_subnet_ids` |
+| `enable_ecs_gateway` | `false` | `apigw` on ECS Fargate against the reference REST API. See [Running apigw on ECS](#running-apigw-on-ecs) |
 | `github_repository` | this repository | Repository allowed to assume the CI role |
 | `github_oidc_provider_arn` | `null` | Reuse an existing GitHub OIDC provider instead of creating one |
 
@@ -95,6 +97,62 @@ Variables worth knowing (all in `environments/dev/variables.tf`):
 | `cognito_test_password` (sensitive) | Password of the Cognito test user |
 | `echo_shared_secret` (sensitive) | Secret the echo function URL requires |
 | `github_ci_role_arn` | Role for the nightly workflow |
+| `ecs_gateway` | ECR repository, cluster, service, task role, and log group of the ECS gateway; `null` unless enabled |
+
+## Running apigw on ECS
+
+`enable_ecs_gateway` runs a build of `apigw` next to the real API it mirrors, so the two can
+be compared request for request. It creates an ECR repository, a cluster and service with one
+Fargate task, a security group, a log group, and two roles:
+
+- the **task role** is the identity `apigw` makes AWS calls as. It may read the reference REST
+  API's stage, export, usage plans, and API keys, invoke the echo and authorizer functions, and
+  assume the integration role, whose trust policy gains the task role.
+- the **execution role** only lets ECS pull the image and write logs.
+
+`apigw` has no plaintext listener, so an init container generates a self-signed certificate
+into a volume the gateway reads. The task gets a public IP; ports 8443 (API) and 9443 (admin)
+are open only to `ecs_gateway_allowed_cidrs`, which may not include `0.0.0.0/0`.
+
+```hcl
+# terraform.tfvars
+enable_ecs_gateway        = true
+vpc_id                    = "vpc-0123456789abcdef0"
+ecs_gateway_subnet_ids    = ["subnet-0123456789abcdef0"] # public subnets
+ecs_gateway_allowed_cidrs = ["203.0.113.7/32"]           # curl -s https://checkip.amazonaws.com
+ecs_gateway_image_tag     = "dev"
+```
+
+Apply, then build and push the image. The service retries until the image is there. Tags are
+immutable, so a new build needs a new `ecs_gateway_image_tag` and another apply. The default
+`cpu_architecture` is `ARM64`; build on an arm64 machine or pass `--platform linux/arm64`.
+
+```bash
+terraform apply
+repo="$(terraform output -json ecs_gateway | jq -r .repository_url)"
+aws ecr get-login-password | docker login --username AWS --password-stdin "${repo%%/*}"
+docker build --platform linux/arm64 -t "$repo:dev" ../../..
+docker push "$repo:dev"
+```
+
+Find the task's address and compare the gateway with API Gateway:
+
+```bash
+cluster="$(terraform output -json ecs_gateway | jq -r .cluster_name)"
+task="$(aws ecs list-tasks --cluster "$cluster" --query 'taskArns[0]' --output text)"
+eni="$(aws ecs describe-tasks --cluster "$cluster" --tasks "$task" \
+  --query "tasks[0].attachments[0].details[?name=='networkInterfaceId'].value" --output text)"
+ip="$(aws ec2 describe-network-interfaces --network-interface-ids "$eni" \
+  --query 'NetworkInterfaces[0].Association.PublicIp' --output text)"
+
+curl --insecure "https://$ip:9443/routes"                  # what apigw loaded, and role status
+curl --insecure "https://$ip:8443/mock"                    # apigw
+curl --insecure "https://$ip:8443/lambda-proxy"            # invokes the echo Lambda as the task role
+curl "$(terraform output -json parity_runner | jq -r .rest.base_url)/mock"   # API Gateway
+```
+
+The gateway's logs are in the `log_group_name` from the `ecs_gateway` output. Set
+`enable_ecs_gateway = false` and apply to remove it; the repository is deleted with its images.
 
 ## Nightly parity workflow
 
@@ -133,6 +191,8 @@ exist, so apply them only for a test and destroy afterwards:
 
 - `enable_cache_cluster`: a 0.5 GB REST API cache cluster.
 - `enable_vpc_link`: an internal Network Load Balancer.
+- `enable_ecs_gateway`: one Fargate task (0.25 vCPU, 0.5 GB) while the service runs, and the
+  image stored in ECR.
 
 ## Local checks
 
