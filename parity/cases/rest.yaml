@@ -373,3 +373,41 @@ cases:
     compare:
       headers: [content-type, x-amzn-errortype]
 
+  # A proxy response's status must be 100 through 599; anything else is a 502
+  - name: rest-lambda-proxy-status-out-of-range
+    api: rest
+    path: /lambda-proxy/x?echo_status=999
+    compare:
+      headers: [content-type, x-amzn-errortype, x-reference-gateway-response]
+
+  - name: rest-lambda-proxy-status-599
+    api: rest
+    path: /lambda-proxy/x?echo_status=599
+    compare:
+      headers: [content-type]
+      body: ignore
+
+  # X-HTTP-Method-Override changes the method and is not passed on
+  - name: rest-method-override
+    api: rest
+    path: /lambda-proxy/x
+    headers: {X-HTTP-Method-Override: DELETE}
+    compare:
+      body: json
+
+  # TRACE is answered by the endpoint, in HTML, before the API sees it
+  - name: rest-trace
+    api: rest
+    method: TRACE
+    path: /mock
+    compare:
+      headers: [content-type, x-amzn-requestid, x-amz-apigw-id, x-amzn-errortype]
+
+  - name: rest-http-proxy-via
+    api: rest
+    path: /http-proxy/x
+    headers: {Via: 1.1 test}
+    compare:
+      body: ignore
+      echo: {headers: [via]}
+

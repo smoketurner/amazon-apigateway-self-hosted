@@ -251,7 +251,12 @@ impl GatewayError {
             }
             (Self::NoRoute, ApiKind::Http) => Failure::gateway(StatusCode::NOT_FOUND, "Not Found"),
             (Self::InvalidRequest, _) => Failure::new(ResponseType::Default4xx),
-            (Self::IntegrationFailure, _) | (Self::IntegrationUnreachable, ApiKind::Http) => {
+            // On a deployed REST API this is not an `INTEGRATION_FAILURE`:
+            // `$context.error.responseType` says `DEFAULT_5XX`.
+            (Self::IntegrationFailure, ApiKind::Rest) => Failure::new(ResponseType::Default5xx)
+                .with_status(StatusCode::BAD_GATEWAY)
+                .with_error_type("InternalServerErrorException"),
+            (Self::IntegrationFailure | Self::IntegrationUnreachable, ApiKind::Http) => {
                 Failure::new(ResponseType::IntegrationFailure)
                     .with_status(StatusCode::BAD_GATEWAY)
                     .with_message("Internal server error")
@@ -308,6 +313,9 @@ impl ApiKind {
             return;
         };
         *request.method_mut() = method;
+        // The override is consumed: neither a Lambda event nor an HTTP
+        // backend sees the header.
+        request.headers_mut().remove("x-http-method-override");
     }
 
     /// The header carrying the request ID on every response.
@@ -376,6 +384,10 @@ mod tests {
         let mut rest = request(Method::POST, "PUT");
         ApiKind::Rest.override_method(&mut rest);
         assert_eq!(rest.method(), Method::PUT);
+        assert!(
+            !rest.headers().contains_key("x-http-method-override"),
+            "the override is consumed"
+        );
         let mut http = request(Method::POST, "PUT");
         ApiKind::Http.override_method(&mut http);
         assert_eq!(http.method(), Method::POST);

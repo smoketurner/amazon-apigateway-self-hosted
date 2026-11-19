@@ -26,7 +26,7 @@ use crate::identity::ClientIdentity;
 use crate::integration::Integration;
 use crate::model::{ApiKind, ApiModel, MethodMatch, Protections, RouteKey, RoutePath};
 use crate::pipeline::Pipeline;
-use crate::rest_path;
+use crate::rest_path::{self, EdgeResponse};
 use crate::route::{AccessRules, Route};
 use crate::throttle::ThrottleSettings;
 use crate::usage::ApiKeyRules;
@@ -401,14 +401,16 @@ impl Loaded {
             .oneshot(request)
             .await
             .into_response();
-        if let Ok(value) = HeaderValue::try_from(request_id.to_string()) {
+        let attributed = response.extensions().get::<EdgeResponse>().is_none();
+        if attributed && let Ok(value) = HeaderValue::try_from(request_id.to_string()) {
             response
                 .headers_mut()
                 .insert(self.kind.request_id_header(), value);
         }
         // A REST API puts the extended request ID on every response, not only
         // on the ones it generates itself.
-        if self.kind == ApiKind::Rest
+        if attributed
+            && self.kind == ApiKind::Rest
             && let Ok(value) = HeaderValue::try_from(RequestId(request_id).extended())
         {
             response.headers_mut().insert(EXTENDED_REQUEST_ID, value);

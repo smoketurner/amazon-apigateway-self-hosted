@@ -95,6 +95,15 @@ impl HeaderFields {
     }
 }
 
+/// The status of a proxy response. API Gateway takes 100 through 599 and
+/// answers `502` for anything else (measured against a deployed REST API).
+fn proxy_status(code: u16) -> Result<StatusCode, String> {
+    if !(100..=599).contains(&code) {
+        return Err(format!("statusCode {code} is not between 100 and 599"));
+    }
+    StatusCode::from_u16(code).map_err(|e| e.to_string())
+}
+
 /// A structured Lambda proxy response.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -131,7 +140,7 @@ impl ProxyResponse {
             return Ok(response);
         }
         let parsed = Self::deserialize(&value).map_err(|e| e.to_string())?;
-        let status = StatusCode::from_u16(parsed.status_code).map_err(|e| e.to_string())?;
+        let status = proxy_status(parsed.status_code)?;
         let mut headers = HeaderMap::new();
         parsed
             .fields
@@ -227,9 +236,7 @@ impl StreamPrelude {
     ///
     /// Fails when the status code or a header is not valid HTTP.
     pub(crate) fn into_head(self, response: &mut Response) -> Result<(), String> {
-        let status =
-            StatusCode::from_u16(self.status_code.unwrap_or(200)).map_err(|e| e.to_string())?;
-        *response.status_mut() = status;
+        *response.status_mut() = proxy_status(self.status_code.unwrap_or(200))?;
         self.fields
             .apply_to(response.headers_mut(), LengthHeader::Honor)
     }
@@ -438,6 +445,17 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(response.headers()["content-type"], "application/json");
             assert_eq!(&*body_of(response).await, expected.as_bytes());
+        }
+    }
+
+    /// Measured against a deployed REST API: 100 through 599, nothing else.
+    #[test]
+    fn statuses_outside_100_to_599_are_malformed() {
+        for accepted in [100, 199, 399, 599] {
+            assert_eq!(proxy_status(accepted).unwrap().as_u16(), accepted);
+        }
+        for refused in [0, 99, 600, 999, 1000] {
+            assert!(proxy_status(refused).is_err(), "{refused}");
         }
     }
 

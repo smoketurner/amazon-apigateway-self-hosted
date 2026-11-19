@@ -212,6 +212,14 @@ also leaves `'` bare; `apigw` sends `%27`.
 
 **Other**
 
+- A Lambda proxy response's `statusCode` must be 100 through 599. Anything else, like a function
+  error, is a `502` whose `x-amzn-errortype` is `InternalServerErrorException`.
+- `X-HTTP-Method-Override` is consumed: neither a Lambda event nor an HTTP backend sees it.
+- `TRACE` never reaches a REST API. The endpoint answers `405` with a small HTML page and, like the
+  `400` for a malformed escape, no `x-amzn-RequestId` or `x-amz-apigw-id`.
+- An `HTTP_PROXY` backend receives the client's `Via` (the documented header table says it is
+  dropped) and `Content-Length: 0` for a body-less request of any method but `GET` and `HEAD`.
+
 - A response API Gateway generates for a `HEAD` request has `content-length: 0`.
 - AWS service integrations receive the request's `X-Amzn-Trace-Id`, which Step Functions reports
   back as `traceHeader`.

@@ -16,7 +16,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::extract::{OriginalUri, Request};
 use axum::http::uri::{InvalidUri, PathAndQuery};
-use axum::http::{StatusCode, Uri};
+use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::Response;
 use tower::ServiceExt as _;
 
@@ -108,6 +108,9 @@ pub(crate) fn serve(router: Router) -> Router {
     Router::new().fallback(move |mut request: Request| {
         let router = Arc::clone(&router);
         async move {
+            if request.method() == Method::TRACE {
+                return trace_refused();
+            }
             let uri = request.uri().clone();
             if RestPath::has_malformed_escape(uri.path())
                 || uri.query().is_some_and(RestPath::has_malformed_escape)
@@ -144,10 +147,31 @@ fn with_path(uri: &Uri, path: &str) -> Result<Uri, InvalidUri> {
     Ok(Uri::from_parts(parts).unwrap_or_else(|_| uri.clone()))
 }
 
+/// Marks a response the endpoint in front of a REST API gives before the API
+/// sees the request. Such a response names no request: it has no
+/// `x-amzn-RequestId` and no `x-amz-apigw-id`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EdgeResponse;
+
+/// What the endpoint says to `TRACE`, byte for byte.
+const TRACE_BODY: &str = "<html>\r\n<head><title>405 Not Allowed</title></head>\r\n<body>\r\n<center><h1>405 Not Allowed</h1></center>\r\n</body>\r\n</html>\r\n";
+
 /// API Gateway's answer to a malformed escape: `400` and nothing else.
 fn malformed() -> Response {
     let mut response = Response::new(Body::empty());
     *response.status_mut() = StatusCode::BAD_REQUEST;
+    response.extensions_mut().insert(EdgeResponse);
+    response
+}
+
+/// `TRACE` never reaches a REST API: the endpoint answers `405` in HTML.
+fn trace_refused() -> Response {
+    let mut response = Response::new(Body::from(TRACE_BODY));
+    *response.status_mut() = StatusCode::METHOD_NOT_ALLOWED;
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html"));
+    response.extensions_mut().insert(EdgeResponse);
     response
 }
 
@@ -242,6 +266,15 @@ mod tests {
             assert_eq!(status(&router, found).await, StatusCode::OK, "{found}");
         }
         assert_eq!(status(&router, "/mock//x").await, StatusCode::NOT_FOUND);
+        let trace = Request::builder()
+            .method(Method::TRACE)
+            .uri("/mock")
+            .body(Body::empty())
+            .unwrap();
+        let refused = router.clone().oneshot(trace).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(refused.headers()["content-type"], "text/html");
+        assert!(refused.extensions().get::<EdgeResponse>().is_some());
         for refused in ["/mock?d=%zz", "/%zz", "/mock?a=%"] {
             assert_eq!(
                 status(&router, refused).await,
