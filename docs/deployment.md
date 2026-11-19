@@ -72,7 +72,8 @@ own principal does the calling, so:
 - **Cognito and JWT authorizers** call no AWS API. The gateway fetches the issuer's signing keys over
   HTTPS (`https://cognito-idp.<region>.amazonaws.com/<pool>/.well-known/jwks.json` for Cognito,
   the issuer's `/.well-known/openid-configuration` and the key set it names for JWT authorizers), so
-  egress to the identity provider must be allowed. Keys are cached for two hours and a fetch is
+  egress to the identity provider must be allowed (for a REST JWT authorizer, to every issuer it
+  lists). Keys are cached for two hours (one hour for REST JWT authorizers) and a fetch is
   abandoned after 1.5 seconds or 150 KB. To reach the provider through a mirror, pass
   `--issuer-endpoint <issuer>=<url>`.
 - **Lambda functions without a role**: grant the gateway's principal `lambda:InvokeFunction`

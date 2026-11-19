@@ -136,6 +136,10 @@ pub(crate) enum AuthorizerSource {
 pub(crate) struct AuthorizerContext {
     values: Map<String, Value>,
     source: AuthorizerSource,
+    /// What Lambda proxy events carry instead of `values`, when the two
+    /// differ: a REST API JWT authorizer gives `$context.authorizer.claims`
+    /// as JSON text but the event its claims with their JSON types.
+    event: Option<Map<String, Value>>,
 }
 
 impl AuthorizerContext {
@@ -144,6 +148,7 @@ impl AuthorizerContext {
         Self {
             values,
             source: AuthorizerSource::Lambda,
+            event: None,
         }
     }
 
@@ -152,7 +157,14 @@ impl AuthorizerContext {
         Self {
             values,
             source: AuthorizerSource::Claims,
+            event: None,
         }
+    }
+
+    /// Gives Lambda proxy events `event` in place of the context variables.
+    pub(crate) fn with_event(mut self, event: Map<String, Value>) -> Self {
+        self.event = Some(event);
+        self
     }
 
     pub(crate) fn values(&self) -> &Map<String, Value> {
@@ -162,17 +174,18 @@ impl AuthorizerContext {
     /// The value of `requestContext.authorizer` in a Lambda proxy event of this
     /// payload version, if an authorizer ran.
     pub(crate) fn event_value(&self, version: PayloadVersion) -> Option<Value> {
+        let values = self.event.as_ref().unwrap_or(&self.values);
         match (self.source, version) {
             (AuthorizerSource::None, _) => None,
             (AuthorizerSource::Lambda | AuthorizerSource::Claims, PayloadVersion::V1) => {
-                Some(Value::Object(self.values.clone()))
+                Some(Value::Object(values.clone()))
             }
             (AuthorizerSource::Lambda, PayloadVersion::V2) => {
-                let mut context = self.values.clone();
+                let mut context = values.clone();
                 context.remove("principalId");
                 Some(json!({ "lambda": context }))
             }
-            (AuthorizerSource::Claims, PayloadVersion::V2) => Some(json!({ "jwt": self.values })),
+            (AuthorizerSource::Claims, PayloadVersion::V2) => Some(json!({ "jwt": values })),
         }
     }
 }
@@ -706,6 +719,18 @@ pub(crate) mod tests {
         assert_eq!(
             AuthorizerContext::default().event_value(PayloadVersion::V2),
             None
+        );
+    }
+
+    #[test]
+    fn an_event_override_reaches_lambda_but_not_context_variables() {
+        let text = Map::from_iter([("claims".to_owned(), json!({"iat": "1516239022"}))]);
+        let typed = Map::from_iter([("claims".to_owned(), json!({"iat": 1_516_239_022}))]);
+        let context = AuthorizerContext::claims(text.clone()).with_event(typed);
+        assert_eq!(context.values(), &text);
+        assert_eq!(
+            context.event_value(PayloadVersion::V1),
+            Some(json!({"claims": {"iat": 1_516_239_022}}))
         );
     }
 

@@ -426,6 +426,8 @@ pub(crate) struct AuthorizerRef {
 pub(crate) struct AuthorizerSpec {
     pub(crate) auth_type: Option<String>,
     pub(crate) header_name: Option<String>,
+    /// The security scheme's `in`: where `header_name` is looked for.
+    pub(crate) location: Option<String>,
     pub(crate) config: Value,
 }
 
