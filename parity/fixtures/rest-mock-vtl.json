@@ -1,11 +1,14 @@
 {
   "name": "rest-mock-vtl",
-  "source": "hand_written",
+  "source": "recorded",
   "api": "rest",
   "response": {
     "status": 200,
     "headers": {
-      "content-type": "application/json"
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-requestid": "[masked]"
     },
     "body": "{\"hello\":\"world\",\"stage\":\"ref\",\"method\":\"GET\"}"
   }

@@ -1,0 +1,16 @@
+{
+  "name": "rest-lambda-proxy-event-single-parameter",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-requestid": "[masked]",
+      "x-amzn-trace-id": "[masked]"
+    },
+    "body": "{\"body\": \"{\\\"name\\\":\\\"widget\\\"}\", \"headers\": {\"Host\": \"lto2s7vgul.execute-api.us-east-1.amazonaws.com\", \"User-Agent\": \"apigw-parity\", \"X-Amzn-Trace-Id\": \"Root=1-6aff0e75-3894ca7267c269a56602ea6f\", \"X-Forwarded-For\": \"<ip-1>\", \"X-Forwarded-Port\": \"443\", \"X-Forwarded-Proto\": \"https\", \"accept\": \"*/*\", \"content-type\": \"application/json\", \"x-required\": \"yes\"}, \"httpMethod\": \"POST\", \"isBase64Encoded\": false, \"multiValueHeaders\": {\"Host\": [\"lto2s7vgul.execute-api.us-east-1.amazonaws.com\"], \"User-Agent\": [\"apigw-parity\"], \"X-Amzn-Trace-Id\": [\"Root=1-6aff0e75-3894ca7267c269a56602ea6f\"], \"X-Forwarded-For\": [\"<ip-1>\"], \"X-Forwarded-Port\": [\"443\"], \"X-Forwarded-Proto\": [\"https\"], \"accept\": [\"*/*\"], \"content-type\": [\"application/json\"], \"x-required\": [\"yes\"]}, \"multiValueQueryStringParameters\": {\"page\": [\"1\"]}, \"path\": \"/validated/a%20b%2Fc\", \"pathParameters\": {\"id\": \"a%20b%2Fc\"}, \"queryStringParameters\": {\"page\": \"1\"}, \"requestContext\": {\"accountId\": \"[account-id]\", \"apiId\": \"lto2s7vgul\", \"deploymentId\": \"8ckp7l\", \"domainName\": \"lto2s7vgul.execute-api.us-east-1.amazonaws.com\", \"domainPrefix\": \"lto2s7vgul\", \"extendedRequestId\": \"HF8yZFzxIAMEAzQ=\", \"httpMethod\": \"POST\", \"identity\": {\"accessKey\": null, \"accountId\": null, \"caller\": null, \"cognitoAuthenticationProvider\": null, \"cognitoAuthenticationType\": null, \"cognitoIdentityId\": null, \"cognitoIdentityPoolId\": null, \"principalOrgId\": null, \"sourceIp\": \"<ip-1>\", \"user\": null, \"userAgent\": \"apigw-parity\", \"userArn\": null}, \"path\": \"/ref/validated/a%20b%2Fc\", \"protocol\": \"HTTP/1.1\", \"requestId\": \"ea8be74f-deb7-4ef0-b06c-1c8dfe72e930\", \"requestTime\": \"19/Nov/2026:14:57:57 +0000\", \"requestTimeEpoch\": 1795100277258, \"resourceId\": \"jalxye\", \"resourcePath\": \"/validated/{id}\", \"stage\": \"ref\"}, \"resource\": \"/validated/{id}\", \"stageVariables\": {\"echo_host\": \"7alf2exwlga7kld2gkw4kieype0rbaxv.lambda-url.us-east-1.on.aws\", \"echo_secret\": \"[redacted]\"}}"
+  }
+}

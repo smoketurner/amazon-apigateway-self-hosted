@@ -1,17 +1,29 @@
 {
   "name": "http-parameter-mapping",
-  "source": "hand_written",
+  "source": "recorded",
   "api": "http",
   "response": {
     "status": 200,
-    "headers": {}
+    "headers": {
+      "apigw-requestid": "[masked]",
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amzn-requestid": "[masked]",
+      "x-amzn-trace-id": "[masked]",
+      "x-reference-response": "mapped"
+    }
   },
   "echo": {
     "method": "GET",
     "path": "/http-mapped/42",
     "query": "appended=ref&fixed=literal&q=1",
     "headers": {
-      "x-appended": "ref"
-    }
+      "accept": "*/*",
+      "forwarded": "by=<ip-1>;for=<ip-2>;host=a2jjc5tao1.execute-api.us-east-1.amazonaws.com;proto=https",
+      "user-agent": "apigw-parity",
+      "x-appended": "ref",
+      "x-echo-secret": "[redacted]"
+    },
+    "resource": "$default"
   }
 }

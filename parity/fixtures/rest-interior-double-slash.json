@@ -1,0 +1,16 @@
+{
+  "name": "rest-interior-double-slash",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-errortype": "MissingAuthenticationTokenException",
+      "x-amzn-requestid": "[masked]"
+    },
+    "body": "{\"message\":\"Missing Authentication Token\"}"
+  }
+}

@@ -1,11 +1,14 @@
 {
   "name": "rest-mock-ok",
-  "source": "hand_written",
+  "source": "recorded",
   "api": "rest",
   "response": {
     "status": 200,
     "headers": {
       "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-requestid": "[masked]",
       "x-mock": "yes"
     },
     "body": "{\"message\":\"mock\"}"

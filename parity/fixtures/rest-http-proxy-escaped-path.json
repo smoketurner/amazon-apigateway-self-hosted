@@ -1,0 +1,30 @@
+{
+  "name": "rest-http-proxy-escaped-path",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-remapped-connection": "keep-alive",
+      "x-amzn-remapped-content-length": "1146",
+      "x-amzn-remapped-date": "Thu, 19 Nov 2026 14:57:53 GMT",
+      "x-amzn-remapped-x-amzn-requestid": "3b86db52-eae7-4695-a327-34211f0855a3",
+      "x-amzn-requestid": "[masked]",
+      "x-amzn-trace-id": "[masked]"
+    }
+  },
+  "echo": {
+    "method": "GET",
+    "path": "/http-proxy/a%20b%2Fc/d",
+    "query": "",
+    "headers": {
+      "accept": "*/*",
+      "user-agent": "apigw-parity",
+      "x-echo-secret": "[redacted]"
+    },
+    "resource": "$default"
+  }
+}

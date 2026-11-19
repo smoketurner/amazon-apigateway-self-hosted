@@ -1,11 +1,19 @@
 {
   "name": "rest-http-mapped-parameters",
-  "source": "hand_written",
+  "source": "recorded",
   "api": "rest",
   "response": {
     "status": 200,
     "headers": {
-      "content-type": "application/json"
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-remapped-connection": "keep-alive",
+      "x-amzn-remapped-content-length": "1310",
+      "x-amzn-remapped-date": "Thu, 19 Nov 2026 14:57:52 GMT",
+      "x-amzn-remapped-x-amzn-requestid": "d1052119-e16e-4fb4-9376-3f7bdb5cd727",
+      "x-amzn-requestid": "[masked]",
+      "x-amzn-trace-id": "[masked]"
     }
   },
   "echo": {
@@ -13,7 +21,12 @@
     "path": "/http-mapped/42",
     "query": "fixed=literal&mappedQuery=hello&q=hello",
     "headers": {
+      "accept": "*/*",
+      "user-agent": "apigw-parity",
+      "x-echo-secret": "[redacted]",
+      "x-from-client": "abc",
       "x-mapped-header": "abc"
-    }
+    },
+    "resource": "$default"
   }
 }

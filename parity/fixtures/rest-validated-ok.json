@@ -1,11 +1,15 @@
 {
   "name": "rest-validated-ok",
-  "source": "hand_written",
+  "source": "recorded",
   "api": "rest",
   "response": {
     "status": 200,
     "headers": {
-      "content-type": "application/json"
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-requestid": "[masked]",
+      "x-amzn-trace-id": "[masked]"
     }
   },
   "echo": {
@@ -13,8 +17,15 @@
     "path": "/validated/1",
     "query": "page=1",
     "headers": {
-      "content-type": "application/json"
+      "accept": "*/*",
+      "content-type": "application/json",
+      "user-agent": "apigw-parity",
+      "x-required": "yes"
     },
-    "body": "{\"name\":\"widget\",\"count\":2}"
+    "body": "{\"name\":\"widget\",\"count\":2}",
+    "resource": "/validated/{id}",
+    "path_parameters": {
+      "id": "1"
+    }
   }
 }

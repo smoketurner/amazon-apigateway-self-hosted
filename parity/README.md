@@ -69,7 +69,8 @@ apigw-parity record --outputs parity/outputs.json --export-dir <downloads> \
 ```
 
 `--export-dir` holds `<api>.openapi.json` from `aws apigateway get-export` (REST,
-`--parameters extensions=apigateway,authorizers`) or `aws apigatewayv2 export-api` (HTTP), and
+`--parameters '{"extensions":"apigateway,authorizers"}'`; the shorthand form splits the value on
+its comma and is rejected) or `aws apigatewayv2 export-api` (HTTP), and
 optionally `<api>.stage.json` from `get-stage`; without a stage file the stage variables come
 from the Terraform outputs. `record` makes no AWS API calls: it only sends the case requests
 to the APIs' public URLs.
@@ -87,25 +88,34 @@ what the nightly workflow does.
   `x-amzn-*`, ...), so only gateway-added differences remain. Its query string is sorted.
 - Every distinct IP address in a case becomes `<ip-1>`, `<ip-2>`, ... in order of appearance, so a
   recording made from one client address replays from another.
-- JSON bodies compared as `json` ignore key order, whitespace, and per-request keys (`requestId`,
-  `time`, `timeEpoch`, ...).
+- JSON bodies compared as `json` ignore key order and whitespace, and each member that differs is
+  reported by its JSON pointer. Members whose values differ per request (`requestId`, `time`,
+  `timeEpoch`, `X-Amzn-Trace-Id`, `integrationLatency`, ...) or between a deployed API and a replay
+  of its export on localhost (`apiId`, `accountId`, `resourceId`, `domainName`, `Host`,
+  `X-Forwarded-Port`, `sourceIp`, `stageVariables`, ...) are masked, but must be present on both
+  sides. `deploymentId`, which a replay has no value for, is dropped from both.
 - Redaction removes values passed through `{{env:...}}` and `--secret-env`, JWTs, and 12-digit AWS
   account IDs (`[account-id]`) from fixtures and exports, and the value of any stage variable whose
-  name contains `secret`, `token`, or `password`.
+  name contains `secret`, `token`, or `password`. In a JSON response body, the value of every member
+  whose key suggests a credential is removed wherever it appears, which covers the stage variables
+  an echoed Lambda event repeats.
 
-## Hand-written fixtures
+## What replay stands in for
 
-The checked-in fixtures and exports are marked `"source": "hand_written"`: they were written from
-documented API Gateway behavior and the reference stack's definition, not recorded. The first
-nightly `record` run compares them with the real APIs and files a drift issue for every difference,
-which is how they get confirmed or corrected. Recorded files carry `"source": "recorded"`.
+Replay runs no AWS service. The in-process echo server reproduces the reference stack's two
+functions: the echo function (a proxy response carrying the event for proxy events, the event itself
+for anything else, and its failures) and the authorizer function (`allow`, `deny`, or an error).
+Both sides are called over HTTP/1.1, so header-name case is comparable.
+
+## Recorded fixtures
+
+The checked-in fixtures and exports carry `"source": "recorded"`: they are what the deployed
+reference APIs answered. A fixture written by hand from documentation would carry
+`"source": "hand_written"`; there are none at present.
 
 ## Not covered yet
 
-- Lambda proxy event fidelity beyond the fields a case selects. Replay compares the request fields
-  the echo reports (`method`, `path`, `query`, `body`, headers, plus `resource` and
-  `path_parameters`); `requestContext` parity is tracked in
-  [#13](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/13).
-- Mapping templates are not implemented in `apigw` yet; the seed case that exercises them is marked
-  `known_gap`.
+- AWS service integrations (SQS, DynamoDB, Step Functions, EventBridge), which replay has no
+  stand-in for.
+- Responses that need a credential replay cannot mint (a valid Cognito or JWT token).
 - Time-dependent behavior (throttles, quotas, cache TTLs) is covered by property tests, not fixtures.

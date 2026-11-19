@@ -1,0 +1,16 @@
+{
+  "name": "rest-lambda-proxy-trailing-slash",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-requestid": "[masked]",
+      "x-amzn-trace-id": "[masked]"
+    },
+    "body": "{\"body\": null, \"headers\": {\"Host\": \"lto2s7vgul.execute-api.us-east-1.amazonaws.com\", \"User-Agent\": \"apigw-parity\", \"X-Amzn-Trace-Id\": \"Root=1-6aff0e77-4090da1d5baee29e71d14b02\", \"X-Forwarded-For\": \"<ip-1>\", \"X-Forwarded-Port\": \"443\", \"X-Forwarded-Proto\": \"https\", \"accept\": \"*/*\"}, \"httpMethod\": \"GET\", \"isBase64Encoded\": false, \"multiValueHeaders\": {\"Host\": [\"lto2s7vgul.execute-api.us-east-1.amazonaws.com\"], \"User-Agent\": [\"apigw-parity\"], \"X-Amzn-Trace-Id\": [\"Root=1-6aff0e77-4090da1d5baee29e71d14b02\"], \"X-Forwarded-For\": [\"<ip-1>\"], \"X-Forwarded-Port\": [\"443\"], \"X-Forwarded-Proto\": [\"https\"], \"accept\": [\"*/*\"]}, \"multiValueQueryStringParameters\": null, \"path\": \"/lambda-proxy/x/\", \"pathParameters\": {\"proxy\": \"x\"}, \"queryStringParameters\": null, \"requestContext\": {\"accountId\": \"[account-id]\", \"apiId\": \"lto2s7vgul\", \"deploymentId\": \"8ckp7l\", \"domainName\": \"lto2s7vgul.execute-api.us-east-1.amazonaws.com\", \"domainPrefix\": \"lto2s7vgul\", \"extendedRequestId\": \"HF8ysFBxIAMEFVQ=\", \"httpMethod\": \"GET\", \"identity\": {\"accessKey\": null, \"accountId\": null, \"caller\": null, \"cognitoAuthenticationProvider\": null, \"cognitoAuthenticationType\": null, \"cognitoIdentityId\": null, \"cognitoIdentityPoolId\": null, \"principalOrgId\": null, \"sourceIp\": \"<ip-1>\", \"user\": null, \"userAgent\": \"apigw-parity\", \"userArn\": null}, \"path\": \"/ref/lambda-proxy/x/\", \"protocol\": \"HTTP/1.1\", \"requestId\": \"d550bb7e-ff8c-45ec-aaaf-39a37ef50763\", \"requestTime\": \"19/Nov/2026:14:57:59 +0000\", \"requestTimeEpoch\": 1795100279167, \"resourceId\": \"t7o32o\", \"resourcePath\": \"/lambda-proxy/{proxy+}\", \"stage\": \"ref\"}, \"resource\": \"/lambda-proxy/{proxy+}\", \"stageVariables\": {\"echo_host\": \"7alf2exwlga7kld2gkw4kieype0rbaxv.lambda-url.us-east-1.on.aws\", \"echo_secret\": \"[redacted]\"}}"
+  }
+}

@@ -150,6 +150,41 @@ impl Redactor {
         }
     }
 
+    /// The string values in `value` held under keys that suggest a credential,
+    /// including inside strings that are themselves JSON documents.
+    fn sensitive_values(value: &Value, found: &mut Vec<String>) {
+        match value {
+            Value::Object(members) => {
+                for (key, member) in members {
+                    match member {
+                        Value::String(text) if Self::is_sensitive_key(key) => {
+                            found.push(text.clone());
+                        }
+                        Value::Null
+                        | Value::Bool(_)
+                        | Value::Number(_)
+                        | Value::String(_)
+                        | Value::Array(_)
+                        | Value::Object(_) => Self::sensitive_values(member, found),
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    Self::sensitive_values(item, found);
+                }
+            }
+            Value::String(text) => {
+                if let Ok(nested) = serde_json::from_str::<Value>(text)
+                    && (nested.is_object() || nested.is_array())
+                {
+                    Self::sensitive_values(&nested, found);
+                }
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) => {}
+        }
+    }
+
     fn is_sensitive_key(key: &str) -> bool {
         let lower = key.to_ascii_lowercase();
         SENSITIVE_KEY_HINTS.iter().any(|hint| lower.contains(hint))
@@ -304,7 +339,7 @@ impl Normalizer {
             ..Observed::default()
         };
         if case.compare.body != BodyCompare::Ignore {
-            response = response.with_body(&self.redact_body(&raw.body));
+            response = response.with_body(&self.redact_body(&raw.body, &mut ips));
         }
         let echo = if case.compare.echo.is_some() {
             Some(self.echo(case, raw, &mut ips)?)
@@ -314,11 +349,24 @@ impl Normalizer {
         Ok(Observation { response, echo })
     }
 
-    fn redact_body(&self, body: &[u8]) -> Vec<u8> {
-        match std::str::from_utf8(body) {
-            Ok(text) => self.redactor.redact(text).into_bytes(),
-            Err(_) => body.to_vec(),
+    /// A text body without its secrets and with its addresses aliased. A JSON
+    /// body may carry credentials no one declared, such as the stage variables
+    /// an echoed Lambda event repeats: the value of every member whose key
+    /// suggests a credential is removed wherever it appears. The body's bytes
+    /// are otherwise untouched, so an exact comparison still means something.
+    fn redact_body(&self, body: &[u8], ips: &mut IpAliases) -> Vec<u8> {
+        let Ok(text) = std::str::from_utf8(body) else {
+            return body.to_vec();
+        };
+        let mut found = Vec::new();
+        if let Ok(document) = serde_json::from_str::<Value>(text) {
+            Redactor::sensitive_values(&document, &mut found);
         }
+        let mut text = text.to_owned();
+        for secret in Redactor::new(found).secrets {
+            text = text.replace(secret.as_str(), REDACTED);
+        }
+        ips.alias_in(&self.redactor.redact(&text)).into_bytes()
     }
 
     fn echo(&self, case: &Case, raw: &RawResponse, ips: &mut IpAliases) -> Result<EchoReceived> {

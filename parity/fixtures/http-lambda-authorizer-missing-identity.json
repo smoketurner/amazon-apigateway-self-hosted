@@ -1,11 +1,13 @@
 {
   "name": "http-lambda-authorizer-missing-identity",
-  "source": "hand_written",
+  "source": "recorded",
   "api": "http",
   "response": {
     "status": 401,
     "headers": {
-      "content-type": "application/json"
+      "apigw-requestid": "[masked]",
+      "content-type": "application/json",
+      "date": "[masked]"
     },
     "body": "{\"message\":\"Unauthorized\"}"
   }

@@ -1,0 +1,16 @@
+{
+  "name": "rest-request-authorizer-deny",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-errortype": "AccessDeniedException",
+      "x-amzn-requestid": "[masked]"
+    },
+    "body": "{\"Message\":\"User is not authorized to access this resource with an explicit deny in an identity-based policy\"}"
+  }
+}

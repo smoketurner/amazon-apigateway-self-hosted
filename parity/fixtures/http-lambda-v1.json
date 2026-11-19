@@ -1,18 +1,23 @@
 {
   "name": "http-lambda-v1",
-  "source": "hand_written",
+  "source": "recorded",
   "api": "http",
   "response": {
     "status": 200,
     "headers": {
-      "content-type": "application/json"
+      "apigw-requestid": "[masked]",
+      "content-type": "application/json",
+      "date": "[masked]"
     }
   },
   "echo": {
     "method": "GET",
     "path": "/ref/lambda-v1/x",
     "query": "k=v",
-    "headers": {},
+    "headers": {
+      "accept": "*/*",
+      "user-agent": "apigw-parity"
+    },
     "resource": "/lambda-v1/{proxy+}",
     "path_parameters": {
       "proxy": "x"

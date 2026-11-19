@@ -1,17 +1,27 @@
 {
   "name": "http-http-proxy-greedy",
-  "source": "hand_written",
+  "source": "recorded",
   "api": "http",
   "response": {
     "status": 200,
     "headers": {
-      "content-type": "application/json"
+      "apigw-requestid": "[masked]",
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amzn-requestid": "[masked]",
+      "x-amzn-trace-id": "[masked]"
     }
   },
   "echo": {
     "method": "GET",
     "path": "/http-proxy/x/y",
     "query": "k=v",
-    "headers": {}
+    "headers": {
+      "accept": "*/*",
+      "forwarded": "by=<ip-1>;for=<ip-2>;host=a2jjc5tao1.execute-api.us-east-1.amazonaws.com;proto=https",
+      "user-agent": "apigw-parity",
+      "x-echo-secret": "[redacted]"
+    },
+    "resource": "$default"
   }
 }

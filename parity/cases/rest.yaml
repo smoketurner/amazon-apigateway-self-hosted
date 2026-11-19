@@ -187,3 +187,180 @@ cases:
     compare:
       body: ignore
       echo: {fields: [method, path, query, body], headers: [content-type]}
+
+  # Lambda proxy events, compared whole (per-request and per-deployment keys are masked)
+  - name: rest-lambda-proxy-event
+    api: rest
+    path: /lambda-proxy/a%20b/c%2Fd?x=1&x=2&sp=a%20b&e=
+    headers: {X-Custom: A, Cookie: "a=1; b=2"}
+    compare:
+      headers: [content-type]
+      body: json
+
+  - name: rest-lambda-proxy-event-post
+    api: rest
+    method: POST
+    path: /lambda-proxy/items
+    headers: {content-type: application/json}
+    body: '{"name":"widget"}'
+    compare:
+      body: json
+
+  - name: rest-lambda-proxy-event-single-parameter
+    api: rest
+    method: POST
+    path: /validated/a%20b%2Fc?page=1
+    headers: {content-type: application/json, x-required: "yes"}
+    body: '{"name":"widget"}'
+    compare:
+      body: json
+
+  # Slashes around the path do not take part in routing; one between segments does
+  - name: rest-trailing-slash
+    api: rest
+    path: /mock/
+    compare:
+      headers: [content-type]
+
+  - name: rest-leading-slashes
+    api: rest
+    path: //mock
+    compare:
+      headers: [content-type]
+
+  - name: rest-interior-double-slash
+    api: rest
+    path: /mock//teapot
+    compare:
+      headers: [content-type, x-amzn-errortype]
+
+  - name: rest-lambda-proxy-trailing-slash
+    api: rest
+    path: /lambda-proxy/x/
+    compare:
+      body: json
+
+  - name: rest-lambda-proxy-root-trailing-slash
+    api: rest
+    path: /lambda-proxy/
+    compare:
+      body: json
+
+  - name: rest-lambda-proxy-greedy-double-slash
+    api: rest
+    path: //lambda-proxy//x//
+    compare:
+      body: json
+
+  - name: rest-malformed-query-escape
+    api: rest
+    path: /lambda-proxy/x?d=%zz
+    compare:
+      headers: [content-type, x-amzn-errortype]
+
+  # Path parameters reach templates and backends as the client escaped them
+  - name: rest-http-proxy-escaped-path
+    api: rest
+    path: /http-proxy/a%20b%2Fc/d
+    compare:
+      body: ignore
+      echo: {fields: [path]}
+
+  - name: rest-http-mapped-escaped-path
+    api: rest
+    path: /http-mapped/a%20b%2Fc?q=x%20y
+    compare:
+      body: ignore
+      echo: {fields: [path, query]}
+
+  - name: rest-http-nonproxy-escaped-path
+    api: rest
+    path: /http-nonproxy/a%20b%2Fc?q=x%20y
+    compare:
+      body: json
+
+  # The query string is written again for HTTP backends
+  - name: rest-http-proxy-query-escaping
+    api: rest
+    path: "/http-proxy/x?a=%7E~&b=%21!&c=%2A*&d=a%2Fb/c&e=%40@&f=%3A:&g=%C3%A9&h=a%26b&i=%3D&j=%25&l=(%29&m=a,b%2C&n=%5B%5D&o=x+y%20z&p=&q&r=%3F?&s=%24$"
+    compare:
+      body: ignore
+      echo: {fields: [query]}
+
+  # Gateway responses, byte for byte
+  - name: rest-unsupported-media-type-exact
+    api: rest
+    path: /http-nonproxy/42
+    headers: {content-type: text/plain}
+    compare:
+      headers: [content-type, x-amzn-errortype]
+
+  - name: rest-validated-params-missing-exact
+    api: rest
+    path: /validated-params
+    compare:
+      headers: [content-type, x-amzn-errortype, x-reference-gateway-response]
+
+  - name: rest-token-authorizer-deny
+    api: rest
+    path: /authz/token
+    headers: {Authorization: deny}
+    compare:
+      headers: [content-type, x-amzn-errortype]
+
+  - name: rest-request-authorizer-deny
+    api: rest
+    path: /authz/request
+    headers: {x-auth: deny}
+    compare:
+      headers: [content-type, x-amzn-errortype]
+
+  - name: rest-token-authorizer-allow
+    api: rest
+    path: /authz/token
+    headers: {Authorization: allow}
+    compare:
+      body: json
+
+  - name: rest-request-authorizer-allow
+    api: rest
+    path: /authz/request
+    headers: {x-auth: allow}
+    compare:
+      body: json
+
+  # How request templates read bodies that are empty, not JSON, or broken JSON
+  - name: rest-lambda-nonproxy-object
+    api: rest
+    method: POST
+    path: /lambda-nonproxy
+    headers: {content-type: application/json}
+    body: '{"a":1}'
+    compare:
+      headers: [content-type]
+
+  - name: rest-lambda-nonproxy-empty-body
+    api: rest
+    method: POST
+    path: /lambda-nonproxy
+    compare:
+      headers: [content-type]
+
+  - name: rest-lambda-nonproxy-trailing-text
+    api: rest
+    method: POST
+    path: /lambda-nonproxy
+    headers: {content-type: application/json}
+    body: '{"a":1} trailing'
+    compare:
+      headers: [content-type]
+
+  - name: rest-lambda-nonproxy-broken-json
+    api: rest
+    method: POST
+    path: /lambda-nonproxy
+    headers: {content-type: application/json}
+    body: '{"a":'
+    compare:
+      headers: [content-type, x-amzn-errortype]
+

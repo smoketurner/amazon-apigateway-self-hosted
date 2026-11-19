@@ -14,6 +14,7 @@ use crate::normalize::Redactor;
 
 const ANY_METHOD_KEY: &str = "x-amazon-apigateway-any-method";
 const INTEGRATION_KEY: &str = "x-amazon-apigateway-integration";
+const AUTHORIZER_KEY: &str = "x-amazon-apigateway-authorizer";
 const HTTP_API_DEFAULT_PATH: &str = "/$default";
 const HTTP_METHODS: [&str; 7] = ["get", "put", "post", "delete", "options", "head", "patch"];
 
@@ -209,6 +210,29 @@ impl ExportRecord {
             let uri = operation
                 .get(INTEGRATION_KEY)
                 .and_then(|integration| integration.get("uri"))
+                .and_then(Value::as_str);
+            if let Some((_, rest)) = uri.and_then(|uri| uri.split_once(":function:"))
+                && let Some(name) = rest.split(['/', ':']).next()
+                && !name.is_empty()
+            {
+                functions.insert(name.to_owned());
+            }
+        }
+        functions
+    }
+
+    /// The names of the Lambda functions the API's authorizers invoke.
+    pub(crate) fn authorizer_functions(&self) -> BTreeSet<String> {
+        let mut functions = BTreeSet::new();
+        let schemes = ["/components/securitySchemes", "/securityDefinitions"]
+            .into_iter()
+            .filter_map(|pointer| self.openapi.pointer(pointer))
+            .filter_map(Value::as_object)
+            .flat_map(|schemes| schemes.values());
+        for scheme in schemes {
+            let uri = scheme
+                .get(AUTHORIZER_KEY)
+                .and_then(|authorizer| authorizer.get("authorizerUri"))
                 .and_then(Value::as_str);
             if let Some((_, rest)) = uri.and_then(|uri| uri.split_once(":function:"))
                 && let Some(name) = rest.split(['/', ':']).next()

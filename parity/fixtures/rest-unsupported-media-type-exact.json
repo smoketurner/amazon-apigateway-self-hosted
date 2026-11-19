@@ -1,0 +1,16 @@
+{
+  "name": "rest-unsupported-media-type-exact",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 415,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-errortype": "BadRequestException",
+      "x-amzn-requestid": "[masked]"
+    },
+    "body": "{\"message\": \"Unsupported Media Type\"}"
+  }
+}

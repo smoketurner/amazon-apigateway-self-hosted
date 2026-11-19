@@ -9,7 +9,7 @@ use tokio::process::{Child, Command};
 
 use crate::case::ApiName;
 use crate::client::Requester;
-use crate::echo::LAMBDA_INVOKE_PATH;
+use crate::echo::{AUTHORIZER_INVOKE_PATH, LAMBDA_INVOKE_PATH};
 use crate::error::{ParityError, Result};
 use crate::export::ExportRecord;
 use crate::fixture::write_json;
@@ -123,9 +123,15 @@ impl ApigwProcess {
         command
             .arg("--stage-variable")
             .arg(format!("{ECHO_VARIABLE}={echo_authority}"));
-        for function in export.lambda_functions() {
+        let authorizers = export.authorizer_functions();
+        for function in export.lambda_functions().difference(&authorizers) {
             command.arg("--lambda-endpoint").arg(format!(
                 "{function}=http://{echo_authority}{LAMBDA_INVOKE_PATH}"
+            ));
+        }
+        for function in &authorizers {
+            command.arg("--lambda-endpoint").arg(format!(
+                "{function}=http://{echo_authority}{AUTHORIZER_INVOKE_PATH}"
             ));
         }
         if !overrides.is_empty() {
