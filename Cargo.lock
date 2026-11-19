@@ -42,7 +42,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "apigw"
-version = "2026.11.2"
+version = "2026.11.3"
 dependencies = [
  "anyhow",
  "apigw-regex",
@@ -90,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "apigw-parity"
-version = "2026.11.2"
+version = "2026.11.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -112,7 +112,7 @@ dependencies = [
 
 [[package]]
 name = "apigw-regex"
-version = "2026.11.2"
+version = "2026.11.3"
 dependencies = [
  "fancy-regex",
  "proptest",
@@ -123,7 +123,7 @@ dependencies = [
 
 [[package]]
 name = "apigw-vtl"
-version = "2026.11.2"
+version = "2026.11.3"
 dependencies = [
  "apigw-regex",
  "base64",
