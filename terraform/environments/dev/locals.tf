@@ -19,6 +19,9 @@ locals {
     echo_secret = module.lambda_backends.echo_shared_secret
   })
 
+  # The ECS gateway brings its own network unless it is given subnets.
+  create_ecs_network = var.enable_ecs_gateway && length(var.ecs_gateway_subnet_ids) == 0
+
   vpc_link = var.enable_vpc_link ? {
     id       = module.vpc_link[0].vpc_link_id
     dns_name = module.vpc_link[0].nlb_dns_name

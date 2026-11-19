@@ -22,6 +22,7 @@ terraform/
     account-cloudwatch-role/ optional account-wide API Gateway CloudWatch role
     vpc-link/                optional internal NLB + VPC link
     ecs-gateway/             optional apigw itself on ECS Fargate, mirroring the reference REST API
+    ecs-network/             optional public-subnet VPC for the ECS gateway
     rest-api/                reference REST API, stage, method settings, usage plan, API key
     rest-policy-api/         REST API with a resource policy
     http-api/                reference HTTP API and stage
@@ -117,11 +118,13 @@ are open only to `ecs_gateway_allowed_cidrs`, which may not include `0.0.0.0/0`.
 ```hcl
 # terraform.tfvars
 enable_ecs_gateway        = true
-vpc_id                    = "vpc-0123456789abcdef0"
-ecs_gateway_subnet_ids    = ["subnet-0123456789abcdef0"] # public subnets
-ecs_gateway_allowed_cidrs = ["203.0.113.7/32"]           # curl -s https://checkip.amazonaws.com
+ecs_gateway_allowed_cidrs = ["203.0.113.7/32"] # curl -s https://checkip.amazonaws.com
 ecs_gateway_image_tag     = "dev"
 ```
+
+With no subnets given, the stack creates a small VPC with two public subnets and an internet
+gateway for the task (`modules/ecs-network`). To use an existing network instead, set `vpc_id`
+and `ecs_gateway_subnet_ids` to public subnets in it.
 
 Apply, then build and push the image. The service retries until the image is there. Tags are
 immutable, so a new build needs a new `ecs_gateway_image_tag` and another apply. The default

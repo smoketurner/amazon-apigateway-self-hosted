@@ -107,6 +107,15 @@ module "http_api" {
   throttle_burst_limit      = var.throttle_burst_limit
 }
 
+# A public-subnet VPC for the ECS gateway, unless subnets are passed in.
+module "ecs_network" {
+  source = "../../modules/ecs-network"
+  count  = local.create_ecs_network ? 1 : 0
+
+  name_prefix        = var.name_prefix
+  availability_zones = slice(data.aws_availability_zones.available.names, 0, 2)
+}
+
 # apigw itself on ECS Fargate, mirroring the reference REST API, to test a
 # build against the real thing.
 module "ecs_gateway" {
@@ -114,8 +123,8 @@ module "ecs_gateway" {
   count  = var.enable_ecs_gateway ? 1 : 0
 
   name_prefix        = var.name_prefix
-  vpc_id             = var.vpc_id
-  subnet_ids         = var.ecs_gateway_subnet_ids
+  vpc_id             = local.create_ecs_network ? module.ecs_network[0].vpc_id : var.vpc_id
+  subnet_ids         = local.create_ecs_network ? module.ecs_network[0].public_subnet_ids : var.ecs_gateway_subnet_ids
   allowed_cidrs      = var.ecs_gateway_allowed_cidrs
   api_kind           = "rest"
   api_id             = module.rest_api.api_id

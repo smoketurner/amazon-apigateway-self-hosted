@@ -53,13 +53,13 @@ variable "enable_vpc_link" {
 }
 
 variable "vpc_id" {
-  description = "VPC for the VPC-link target group and the ECS gateway. Required when enable_vpc_link or enable_ecs_gateway is true."
+  description = "VPC for the VPC-link target group, and for the ECS gateway when ecs_gateway_subnet_ids is set. Required when enable_vpc_link is true or ecs_gateway_subnet_ids is not empty."
   type        = string
   default     = null
 
   validation {
-    condition     = !(var.enable_vpc_link || var.enable_ecs_gateway) || var.vpc_id != null
-    error_message = "enable_vpc_link and enable_ecs_gateway require vpc_id."
+    condition     = !(var.enable_vpc_link || length(var.ecs_gateway_subnet_ids) > 0) || var.vpc_id != null
+    error_message = "enable_vpc_link and ecs_gateway_subnet_ids require vpc_id."
   }
 }
 
@@ -130,7 +130,7 @@ variable "enable_ecs_gateway" {
 }
 
 variable "ecs_gateway_subnet_ids" {
-  description = "Public subnets for the ECS gateway task. Required when enable_ecs_gateway is true."
+  description = "Public subnets in vpc_id for the ECS gateway task. Leave empty to have the stack create a small VPC with public subnets for it."
   type        = list(string)
   default     = []
 }
