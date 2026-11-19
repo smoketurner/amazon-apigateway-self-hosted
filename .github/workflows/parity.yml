@@ -67,11 +67,11 @@ jobs:
           stage=$(jq -r .stage "$WORK_DIR/outputs.json")
           aws apigateway get-export --rest-api-id "$(jq -r .rest.api_id "$WORK_DIR/outputs.json")" \
             --stage-name "$stage" --export-type oas30 \
-            --parameters extensions=apigateway,authorizers \
+            --parameters '{"extensions":"apigateway,authorizers"}' \
             "$WORK_DIR/exports/rest.openapi.json"
           aws apigateway get-export --rest-api-id "$(jq -r .rest_policy.api_id "$WORK_DIR/outputs.json")" \
             --stage-name "$stage" --export-type oas30 \
-            --parameters extensions=apigateway,authorizers \
+            --parameters '{"extensions":"apigateway,authorizers"}' \
             "$WORK_DIR/exports/rest_policy.openapi.json"
           aws apigatewayv2 export-api --api-id "$(jq -r .http.api_id "$WORK_DIR/outputs.json")" \
             --stage-name "$stage" --specification OAS30 --output-type JSON \

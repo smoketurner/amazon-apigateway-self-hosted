@@ -152,6 +152,70 @@ the case must lose its marker and the row changes status. See [parity/README.md]
 - Control-plane calls share a 10 requests per second per-account limit, so refreshes are
   conditional and jittered.
 
+## Measured against deployed APIs
+
+The reference stack ([terraform/README.md](../terraform/README.md)) deploys real REST and HTTP
+APIs, and the fixtures under `parity/` are recordings of what they answer. The behavior below is
+not in API Gateway's documentation, or differs from it; `apigw` follows what the deployed APIs
+do.
+
+**Gateway responses (REST)**
+
+- `$context.error.messageString` starts with a space for failures of a request that has started
+  executing (`{"message": "Internal server error"}`, and the same for `BAD_REQUEST_BODY`,
+  `BAD_REQUEST_PARAMETERS`, `UNSUPPORTED_MEDIA_TYPE`, `INTEGRATION_FAILURE`, `INTEGRATION_TIMEOUT`,
+  `API_CONFIGURATION_ERROR`), in customized templates too. Failures that turn a request away
+  earlier have none (`{"message":"Forbidden"}`).
+- An uncustomized `ACCESS_DENIED` uses the key `Message`, not `message`.
+- The `413` is the plain text `HTTP content length exceeded 10485760 bytes.` with
+  `content-type: text; charset=utf-8` and no `x-amzn-errortype`.
+- `x-amzn-errortype` is `TooManyRequestsException` for `THROTTLED` and `BadRequestException` for
+  `UNSUPPORTED_MEDIA_TYPE`.
+
+**Paths**
+
+- REST: slashes after the last segment and extra slashes before the first do not take part in
+  routing (`/pets/` and `//pets` are `/pets`); a doubled slash between segments does. Path
+  parameters are never percent-decoded, in Lambda events, `$input.params()`, and integration URLs.
+  A `%` that does not start an escape, in the path or query string, answers `400` with no body.
+- HTTP: the path is percent-decoded and runs of slashes are collapsed before routing, and
+  `rawPath`, `$context.path`, and path parameters use that form. A trailing slash is part of the
+  path (`/pets/` is not `/pets`). A greedy parameter under a prefix may be empty (`/files/`).
+
+**Query strings to HTTP backends (REST)** are written again rather than forwarded: a space becomes
+`+`, the characters RFC 3986 allows in a query stay bare, and the rest are escaped. API Gateway
+also leaves `'` bare; `apigw` sends `%27`.
+
+**Lambda events**
+
+- Every event carries `X-Forwarded-For`, `X-Forwarded-Port`, `X-Forwarded-Proto`, and
+  `X-Amzn-Trace-Id` (`Root=...`, or `Self=...;` before what the client sent), whatever the client
+  sent under those names.
+- Header names: REST payload 1.0 keeps the client's spelling except `Host`, `User-Agent`, and
+  `Authorization`; HTTP API payload 1.0 does the same and also spells `Cookie` and
+  `Content-Length` itself and lower-cases `accept`; payload 2.0 is lower case.
+- REST events leave out `Content-Length`; HTTP API events always carry it, `0` for no body.
+- REST `requestContext` has no `authorizer` key when no authorizer ran, carries
+  `authorizer.integrationLatency` when a Lambda authorizer did, and names the `deploymentId`.
+- HTTP API payload 1.0 has `version: "1.0"`, the route key as `resourceId`, `identity.cognitoAmr`,
+  and a `path` that is the path as sent, stage and escapes included.
+
+**Request templates** read the body leniently: an empty body is `{}`, what follows the first JSON
+value is ignored, and a body that is not JSON is a string. A body that opens an object, array, or
+string and does not hold one answers `400` `{"message": "Could not process payload"}`.
+
+Known differences that remain:
+
+- `requestContext.resourceId` is `null` on REST events: an export does not carry resource IDs.
+- `X-Forwarded-For` holds the address `apigw` established for the client. API Gateway appends
+  that address to whatever the client sent; `apigw` only keeps a client's value from a trusted
+  proxy ([deployment.md](deployment.md#client-ip)).
+- `X-Forwarded-Port` is the port in the `Host` header, `443` when it names none. API Gateway
+  always says `443`.
+- A `HEAD` request that fails gets `content-length: 0` from API Gateway and the body's length
+  from `apigw`.
+- Step Functions responses lack the `traceHeader` API Gateway's own trace adds.
+
 ## Request validation
 
 Differences from API Gateway's validators:

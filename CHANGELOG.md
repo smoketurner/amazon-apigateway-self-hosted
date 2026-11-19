@@ -292,6 +292,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Behavior measured against deployed REST and HTTP APIs and recorded as parity fixtures, which
+  replace the hand-written ones ([docs/parity.md](docs/parity.md#measured-against-deployed-apis)):
+  REST gateway response bodies match byte for byte (the space after the colon on execution-phase
+  errors, `Message` on access denials, the plain-text 413, `TooManyRequestsException` on throttling);
+  Lambda events carry the forwarding and trace headers, the right header spellings, and the
+  `requestContext` members API Gateway sends, for REST and for both HTTP API payload versions; REST
+  routes ignore trailing and extra leading slashes and never percent-decode path parameters; HTTP
+  APIs route on the decoded, slash-collapsed path; query strings to REST HTTP backends are escaped
+  as API Gateway escapes them; a malformed `%` escape answers 400; and request templates read
+  empty, non-JSON, and broken-JSON bodies as API Gateway does instead of answering 500.
+
 - Resource policies and request validators were silently ignored because the REST export did
   not request them. The export now uses `extensions=apigateway,authorizers`; routes under a
   resource policy answer 403 and routes with a request validator answer 501 until those
