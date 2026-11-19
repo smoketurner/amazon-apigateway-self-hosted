@@ -177,6 +177,13 @@ process, and the function URL rewrites requests before `apigw` sees them (it low
 header names, for example). A function URL has no address filter, so the gateway is as public
 as the API it mirrors; the admin listener is not exposed.
 
+What to expect when comparing it with the real API: status codes and bodies match, as on ECS,
+but the function URL remaps the gateway's own `x-amzn-RequestId`, `Date`, and `Content-Length`
+response headers to `x-amzn-Remapped-*` and adds its own, and it lower-cases request header
+names. Routes with an `HTTP_PROXY` integration answer `502` from the function URL itself even
+though `apigw` answered correctly (its log shows the real status): those responses already carry
+`x-amzn-Remapped-*` headers from the backend, which is the likely cause but is not confirmed.
+
 The function needs its image to exist, so it takes two applies:
 
 ```bash
