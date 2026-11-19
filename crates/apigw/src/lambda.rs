@@ -108,7 +108,7 @@ impl LambdaProxy {
         )
         .map_err(|reason| {
             tracing::error!(route = %route.key, function = %self.function, reason, "malformed Lambda proxy response");
-            GatewayError::IntegrationFailure
+            GatewayError::MalformedIntegrationResponse
         })?;
         Self::remap_headers(ctx.api.kind, &mut response);
         Ok(response)

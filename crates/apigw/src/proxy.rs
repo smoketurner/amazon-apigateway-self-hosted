@@ -287,8 +287,12 @@ impl HttpProxy {
     /// and `X-Forwarded-Port` are what Regional endpoints send to HTTP backends;
     /// the port is the one in the `Host` header, `443` when it names none.
     fn add_rest_headers(headers: &mut HeaderMap, ctx: &RequestContext) {
-        if let Ok(id) = HeaderValue::try_from(ctx.api.api_id.as_str()) {
-            headers.insert(HeaderName::from_static("x-amzn-apigateway-api-id"), id);
+        // Only when the client sent none: a deployed API passes the client's.
+        const API_ID: HeaderName = HeaderName::from_static("x-amzn-apigateway-api-id");
+        if !headers.contains_key(API_ID)
+            && let Ok(id) = HeaderValue::try_from(ctx.api.api_id.as_str())
+        {
+            headers.insert(API_ID, id);
         }
         if !headers.contains_key(header::USER_AGENT)
             && let Ok(agent) = HeaderValue::try_from(format!("AmazonAPIGateway_{}", ctx.api.api_id))
@@ -1009,6 +1013,15 @@ mod tests {
             );
         }
         assert_eq!(headers["x-amzn-apigateway-api-id"], "abc123");
+        let mut named = incoming(&[], None);
+        named
+            .headers
+            .insert("x-amzn-apigateway-api-id", HeaderValue::from_static("mine"));
+        let sent = HttpProxy::request_headers(&route("/x", &target), &named);
+        assert_eq!(
+            sent["x-amzn-apigateway-api-id"], "mine",
+            "a deployed API passes the client's own value"
+        );
         assert_eq!(headers["user-agent"], "curl/8");
         assert_eq!(headers["x-forwarded-proto"], "https");
         assert_eq!(headers["x-forwarded-port"], "8443");

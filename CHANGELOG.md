@@ -308,7 +308,10 @@ All notable changes to this project are documented here. The format follows
   empty, non-JSON, and broken-JSON bodies as API Gateway does instead of answering 500. REST
   responses carry `x-amz-apigw-id`, `X-Amzn-Trace-Id` after an integration, and the remapped
   request ID and length of an `HTTP_PROXY` backend; a generated response to `HEAD` has no length;
-  and `$context.resourceId` is filled in when the gateway may call `GetResources`.
+  and `$context.resourceId` is filled in when the gateway may call `GetResources`. A Lambda proxy
+  status outside 100-599 or a function error is a 502 `InternalServerErrorException`;
+  `X-HTTP-Method-Override` is consumed; `TRACE` is answered 405; and an `Authorization` header no
+  route claims gets API Gateway's incomplete-signature answer.
 
 - Resource policies and request validators were silently ignored because the REST export did
   not request them. The export now uses `extensions=apigateway,authorizers`; routes under a

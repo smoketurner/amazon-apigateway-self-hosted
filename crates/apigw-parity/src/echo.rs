@@ -320,7 +320,11 @@ async fn lambda_invoke(body: Bytes) -> Response {
             (false, None) => payload_response(&event),
         };
     }
-    let payload = Steering::from_event(&event).lambda_payload(&String::from_utf8_lossy(&body));
+    let steer = Steering::from_event(&event);
+    if let Some(ref text) = steer.unparsed_status {
+        return function_error(&format!("invalid literal for int() with base 10: '{text}'"));
+    }
+    let payload = steer.lambda_payload(&String::from_utf8_lossy(&body));
     payload_response(&payload)
 }
 
@@ -463,6 +467,9 @@ struct Steering {
     status: StatusCode,
     binary: bool,
     content_type: String,
+    /// An `echo_status` that is not an integer, which the reference function
+    /// fails on (`int()` raises).
+    unparsed_status: Option<String>,
 }
 
 impl Steering {
@@ -471,6 +478,7 @@ impl Steering {
             status: StatusCode::OK,
             binary: false,
             content_type: "image/png".to_owned(),
+            unparsed_status: None,
         }
     }
 
@@ -506,6 +514,8 @@ impl Steering {
                     .and_then(|code| StatusCode::from_u16(code).ok())
                 {
                     self.status = status;
+                } else if value.parse::<i64>().is_err() {
+                    self.unparsed_status = Some(value.to_owned());
                 }
             }
             "echo_binary" => self.binary = value == "1",

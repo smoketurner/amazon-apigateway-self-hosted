@@ -411,3 +411,59 @@ cases:
       body: ignore
       echo: {headers: [via]}
 
+  # A function error is an INTEGRATION_FAILURE; a response nothing can be made
+  # from (above) is only a DEFAULT_5XX. Both are a 502 InternalServerErrorException
+  - name: rest-lambda-proxy-function-error
+    api: rest
+    path: /lambda-proxy/x?echo_status=abc
+    compare:
+      headers: [content-type, x-amzn-errortype, x-reference-gateway-response]
+
+  # An Authorization header no route claims is read as a failed signature
+  - name: rest-unknown-route-bearer-token
+    api: rest
+    path: /does-not-exist
+    headers: {Authorization: Bearer abc}
+    compare:
+      headers: [content-type, x-amzn-errortype]
+
+  - name: rest-unknown-route-partial-signature
+    api: rest
+    path: /does-not-exist
+    headers: {Authorization: X Credential=a}
+    compare:
+      headers: [content-type, x-amzn-errortype]
+
+  - name: rest-wrong-method-with-authorization
+    api: rest
+    method: POST
+    path: /authz/token
+    headers: {Authorization: allow}
+    compare:
+      headers: [content-type, x-amzn-errortype]
+
+  - name: rest-lambda-proxy-head
+    api: rest
+    method: HEAD
+    path: /lambda-proxy/x
+    compare:
+      headers: [content-type, x-amzn-remapped-content-length, x-amz-apigw-id]
+
+  - name: rest-lambda-nonproxy-null-body
+    api: rest
+    method: POST
+    path: /lambda-nonproxy
+    headers: {content-type: application/json}
+    body: "null"
+    compare:
+      headers: [content-type]
+
+  - name: rest-lambda-nonproxy-keeps-nulls
+    api: rest
+    method: POST
+    path: /lambda-nonproxy
+    headers: {content-type: application/json}
+    body: '{"a":null,"b":[null,1]}'
+    compare:
+      headers: [content-type]
+

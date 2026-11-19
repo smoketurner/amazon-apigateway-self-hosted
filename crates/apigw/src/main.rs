@@ -21,6 +21,7 @@ mod header_case;
 mod header_policy;
 mod http_routes;
 mod identity;
+mod incomplete_signature;
 mod integration;
 mod integration_tls;
 mod lambda;
