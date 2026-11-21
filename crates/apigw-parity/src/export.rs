@@ -16,6 +16,16 @@ const ANY_METHOD_KEY: &str = "x-amazon-apigateway-any-method";
 const INTEGRATION_KEY: &str = "x-amazon-apigateway-integration";
 const AUTHORIZER_KEY: &str = "x-amazon-apigateway-authorizer";
 const HTTP_API_DEFAULT_PATH: &str = "/$default";
+const CORS_KEY: &str = "x-amazon-apigateway-cors";
+/// `get-api`'s `CorsConfiguration` members and their `x-amazon-apigateway-cors` names.
+const CORS_MEMBERS: [(&str, &str); 6] = [
+    ("AllowOrigins", "allowOrigins"),
+    ("AllowMethods", "allowMethods"),
+    ("AllowHeaders", "allowHeaders"),
+    ("ExposeHeaders", "exposeHeaders"),
+    ("MaxAge", "maxAge"),
+    ("AllowCredentials", "allowCredentials"),
+];
 const HTTP_METHODS: [&str; 7] = ["get", "put", "post", "delete", "options", "head", "patch"];
 
 /// One API's export and the stage variables it was deployed with.
@@ -72,8 +82,10 @@ impl ExportStore {
 }
 
 /// The files an operator downloads for one API: `<api>.openapi.json` from
-/// `aws apigateway get-export` (or `aws apigatewayv2 export-api`), and optionally
-/// `<api>.stage.json` from `get-stage`.
+/// `aws apigateway get-export` (or `aws apigatewayv2 export-api`), optionally
+/// `<api>.stage.json` from `get-stage`, and for an HTTP API optionally
+/// `<api>.api.json` from `aws apigatewayv2 get-api`, whose CORS configuration the
+/// export leaves out.
 #[derive(Debug, Clone)]
 pub(crate) struct ExportInput {
     dir: PathBuf,
@@ -101,6 +113,10 @@ impl ExportInput {
         let Some(mut openapi) = read_optional_json(&openapi_path)? else {
             return Ok(None);
         };
+        let api_path = self.dir.join(format!("{}.api.json", api.file_stem()));
+        if let Some(described) = read_optional_json(&api_path)? {
+            add_cors(&mut openapi, &described);
+        }
         redactor.redact_json(&mut openapi);
         let stage_path = self.dir.join(format!("{}.stage.json", api.file_stem()));
         let mut stage_variables = match read_optional_json(&stage_path)? {
@@ -134,6 +150,26 @@ impl ExportInput {
         }
         out
     }
+}
+
+/// Copies `get-api`'s `CorsConfiguration` into the export as
+/// `x-amazon-apigateway-cors`, as `apigw` does when it reads a live HTTP API. A
+/// configuration already in the export wins.
+fn add_cors(openapi: &mut Value, described: &Value) {
+    let Some(Value::Object(cors)) = described.get("CorsConfiguration") else {
+        return;
+    };
+    let Value::Object(root) = openapi else {
+        return;
+    };
+    if root.contains_key(CORS_KEY) {
+        return;
+    }
+    let extension: serde_json::Map<String, Value> = CORS_MEMBERS
+        .iter()
+        .filter_map(|(from, to)| Some(((*to).to_owned(), cors.get(*from)?.clone())))
+        .collect();
+    root.insert(CORS_KEY.to_owned(), Value::Object(extension));
 }
 
 fn read_optional_json(path: &Path) -> Result<Option<Value>> {
@@ -391,6 +427,39 @@ mod tests {
                 .record(ApiName::Http, "ref", &fallback, &redactor)
                 .unwrap()
                 .is_none()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn get_api_cors_joins_an_http_export_that_lacks_it() {
+        let dir =
+            std::env::temp_dir().join(format!("apigw-parity-export-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("http.openapi.json"), r#"{"paths":{}}"#).unwrap();
+        std::fs::write(
+            dir.join("http.api.json"),
+            r#"{"ApiId":"a1","CorsConfiguration":{"AllowOrigins":["https://example.com"],"AllowMethods":["GET"],"MaxAge":300,"AllowCredentials":false}}"#,
+        )
+        .unwrap();
+        let record = ExportInput::new(&dir)
+            .record(ApiName::Http, "ref", &BTreeMap::new(), &Redactor::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            record.openapi[CORS_KEY],
+            json!({"allowOrigins": ["https://example.com"], "allowMethods": ["GET"],
+                   "maxAge": 300, "allowCredentials": false})
+        );
+
+        let mut own = json!({CORS_KEY: {"allowOrigins": ["https://other.example"]}});
+        add_cors(
+            &mut own,
+            &json!({"CorsConfiguration": {"AllowOrigins": ["x"]}}),
+        );
+        assert_eq!(
+            own[CORS_KEY]["allowOrigins"],
+            json!(["https://other.example"])
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

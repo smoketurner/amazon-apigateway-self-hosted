@@ -26,14 +26,18 @@ pub(crate) enum Outcome {
     StaleGap {
         issue: String,
     },
+    /// Marked `unrecorded` and has no fixture yet: nothing to compare.
+    Unrecorded,
+    /// Marked `unrecorded` but has a fixture: the marker is stale.
+    StaleUnrecorded,
     Error(String),
 }
 
 impl Outcome {
     pub(crate) fn is_failure(&self) -> bool {
         match self {
-            Self::Fail(_) | Self::StaleGap { .. } | Self::Error(_) => true,
-            Self::Pass | Self::KnownGap { .. } => false,
+            Self::Fail(_) | Self::StaleGap { .. } | Self::StaleUnrecorded | Self::Error(_) => true,
+            Self::Pass | Self::KnownGap { .. } | Self::Unrecorded => false,
         }
     }
 
@@ -42,7 +46,8 @@ impl Outcome {
             Self::Pass => "PASS",
             Self::Fail(_) => "FAIL",
             Self::KnownGap { .. } => "GAP ",
-            Self::StaleGap { .. } => "STALE",
+            Self::StaleGap { .. } | Self::StaleUnrecorded => "STALE",
+            Self::Unrecorded => "NEW ",
             Self::Error(_) => "ERROR",
         }
     }
@@ -116,6 +121,14 @@ impl ReplayReport {
                         writeln!(out, "       {mismatch}")?;
                     }
                 }
+                Outcome::Unrecorded => {
+                    writeln!(out, "{label} {} (not recorded yet)", result.name)?;
+                }
+                Outcome::StaleUnrecorded => writeln!(
+                    out,
+                    "{label} {} has a fixture, so unrecorded should be removed",
+                    result.name
+                )?,
                 Outcome::Error(message) => writeln!(out, "{label} {}: {message}", result.name)?,
             }
         }
@@ -129,9 +142,14 @@ impl ReplayReport {
             .iter()
             .filter(|r| matches!(r.outcome, Outcome::KnownGap { .. }))
             .count();
+        let new = self
+            .results
+            .iter()
+            .filter(|r| matches!(r.outcome, Outcome::Unrecorded))
+            .count();
         writeln!(
             out,
-            "{} cases: {passed} passed, {gaps} known gaps, {} failed",
+            "{} cases: {passed} passed, {gaps} known gaps, {new} not recorded, {} failed",
             self.results.len(),
             self.failures()
         )
@@ -190,7 +208,12 @@ impl Replay {
         normalizer: &Normalizer,
         expander: &Expander<ProcessEnv>,
     ) -> Result<Outcome> {
-        let fixture = self.fixtures.load(&case.name)?;
+        let fixture = match (self.fixtures.load(&case.name), case.unrecorded) {
+            (Ok(_), true) => return Ok(Outcome::StaleUnrecorded),
+            (Err(ParityError::MissingFixture(_)), true) => return Ok(Outcome::Unrecorded),
+            (Ok(fixture), false) => fixture,
+            (Err(error), _) => return Err(error),
+        };
         let request = case.request(expander)?;
         let raw = process
             .requester()
@@ -257,6 +280,15 @@ mod tests {
     }
 
     #[test]
+    fn unrecorded_cases_are_new_until_a_fixture_exists() {
+        assert!(!Outcome::Unrecorded.is_failure());
+        assert!(Outcome::StaleUnrecorded.is_failure());
+        let case: Case =
+            serde_saphyr::from_str("name: c\napi: rest\npath: /x\nunrecorded: true\n").unwrap();
+        assert!(case.unrecorded);
+    }
+
+    #[test]
     fn report_lists_every_case_and_counts_failures() {
         let report = ReplayReport {
             results: vec![
@@ -282,7 +314,7 @@ mod tests {
         assert!(text.contains("PASS c"));
         assert!(text.contains("response.status: expected 200, got 500"));
         assert!(text.contains("known gap #9"));
-        assert!(text.ends_with("3 cases: 1 passed, 1 known gaps, 1 failed\n"));
+        assert!(text.ends_with("3 cases: 1 passed, 1 known gaps, 0 not recorded, 1 failed\n"));
         assert_eq!(report.failures(), 1);
     }
 }

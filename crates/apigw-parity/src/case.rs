@@ -202,6 +202,11 @@ pub(crate) struct Case {
     /// so the marker cannot go stale.
     #[serde(default)]
     pub(crate) known_gap: Option<String>,
+    /// Set on a case added to the reference stack but not recorded yet. Replay
+    /// reports it as new instead of failing on the missing fixture, and fails once
+    /// a fixture exists, so the marker cannot outlive the recording.
+    #[serde(default)]
+    pub(crate) unrecorded: bool,
 }
 
 #[derive(Debug, Deserialize)]
