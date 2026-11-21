@@ -225,6 +225,90 @@ paths:
             statusCode: "400"
             responseTemplates:
               application/json: '{"upstreamStatus":"client-error"}'
+  # Non-proxy HTTP with no Content-Type mapping and no request template: the
+  # response reports which headers and body reached the backend.
+  /http-nonproxy-headers/{id}:
+    get:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: x-from-client
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "what the backend received"
+      x-amazon-apigateway-integration:
+        type: http
+        httpMethod: POST
+        uri: "https://$${stageVariables.echo_host}/http-nonproxy-headers/{backendId}"
+        passthroughBehavior: when_no_match
+        timeoutInMillis: 5000
+        requestParameters:
+          integration.request.path.backendId: "method.request.path.id"
+          integration.request.header.x-echo-secret: "stageVariables.echo_secret"
+          integration.request.header.x-mapped-header: "method.request.header.x-from-client"
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                {"contentType":$input.json("$.headers['content-type']"),"accept":$input.json('$.headers.accept'),"fromClient":$input.json("$.headers['x-from-client']"),"mapped":$input.json("$.headers['x-mapped-header']"),"body":$input.json('$.body')}
+    post:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: x-from-client
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "what the backend received"
+      x-amazon-apigateway-integration:
+        type: http
+        httpMethod: POST
+        uri: "https://$${stageVariables.echo_host}/http-nonproxy-headers/{backendId}"
+        passthroughBehavior: when_no_match
+        timeoutInMillis: 5000
+        requestParameters:
+          integration.request.path.backendId: "method.request.path.id"
+          integration.request.header.x-echo-secret: "stageVariables.echo_secret"
+          integration.request.header.x-mapped-header: "method.request.header.x-from-client"
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                {"contentType":$input.json("$.headers['content-type']"),"accept":$input.json('$.headers.accept'),"fromClient":$input.json("$.headers['x-from-client']"),"mapped":$input.json("$.headers['x-mapped-header']"),"body":$input.json('$.body')}
+  # Integrations that cannot be reached, for API Gateway's default 5xx answers
+  /broken/unresolvable:
+    get:
+      responses: {}
+      x-amazon-apigateway-integration:
+        type: http_proxy
+        httpMethod: GET
+        uri: "https://apigw-parity.invalid/unresolvable"
+        passthroughBehavior: when_no_match
+        timeoutInMillis: 5000
+  /broken/unset-host:
+    get:
+      responses: {}
+      x-amazon-apigateway-integration:
+        type: http_proxy
+        httpMethod: GET
+        uri: "https://$${stageVariables.unset_host}/unset-host"
+        passthroughBehavior: when_no_match
+        timeoutInMillis: 5000
   /lambda-nonproxy:
     post:
       responses:

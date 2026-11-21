@@ -42,7 +42,7 @@ the environment pins exact versions and configures the provider and backend.
 
 | Area | Resources |
 |---|---|
-| REST API (`<prefix>-rest`) | `HTTP_PROXY`, `AWS_PROXY` (payload 1.0), `MOCK` (plain, non-200, VTL-rendered), `HTTP` and `AWS` non-proxy integrations with mapping templates, request validators and a body model, gateway responses, binary media types, API key + usage plan, TOKEN and REQUEST Lambda authorizers, a Cognito authorizer (with and without scopes), CORS, stage variables, method settings and throttling, optional access logs, optional cache cluster, optional VPC-link route |
+| REST API (`<prefix>-rest`) | `HTTP_PROXY`, `AWS_PROXY` (payload 1.0), `MOCK` (plain, non-200, VTL-rendered), `HTTP` and `AWS` non-proxy integrations with mapping templates (one of them reports the headers and body its backend received), two `HTTP_PROXY` routes that cannot reach a backend (an unresolvable host and an unset stage variable host), request validators and a body model, gateway responses, binary media types, API key + usage plan, TOKEN and REQUEST Lambda authorizers, a Cognito authorizer (with and without scopes), CORS, stage variables, method settings and throttling, optional access logs, optional cache cluster, optional VPC-link route |
 | REST API with a resource policy (`<prefix>-rest-policy`) | Separate API so the policy cannot block the others. `/open` is allowed, `/ip-restricted` is denied outside `policy_restricted_cidrs`, `/ip-denied` is always denied |
 | HTTP API (`<prefix>-http`) | `HTTP_PROXY`, `AWS_PROXY` 1.0 and 2.0, the `$default` route, parameter mapping (path, query, header, response), CORS, JWT authorizer (with and without scopes), Lambda authorizers (simple response and IAM policy), route throttling, optional access logs |
 | Backends | Python echo Lambda (returns the event it received); the same echo behind a Lambda function URL that requires a shared-secret `x-echo-secret` header, used as the HTTP backend through the `echo_host` and `echo_secret` stage variables; a deterministic authorizer Lambda |
@@ -56,8 +56,8 @@ stock so their default form can be recorded.
 
 The echo Lambda accepts `echo_status=<code>`, `echo_binary=1`, and `echo_content_type=<mime>`
 query parameters to control the response, and redacts the shared secret from the event it
-returns. The authorizer returns Allow for the credential `allow`, Deny for `deny`, and raises
-(401) for anything else; the credential is the `Authorization` token for the TOKEN
+returns. The authorizer returns Allow for the credential `allow`, Deny for `deny`, a response without
+a policy document for `malformed`, and raises (401) for anything else; the credential is the `Authorization` token for the TOKEN
 authorizer and the `x-auth` header for the REQUEST and HTTP API authorizers.
 
 ## Apply
@@ -223,7 +223,7 @@ with:
 | Secret | `PARITY_COGNITO_PASSWORD` | `cognito_test_password` |
 
 The role can only read the reference APIs' stage and export (`apigateway:GET` on
-`/restapis/<id>/stages/<stage>`, `.../exports/*`, `/apis/<id>/exports/*`, and
+`/restapis/<id>/stages/<stage>`, `.../exports/*`, `/apis/<id>`, `/apis/<id>/exports/*`, and
 `/apis/<id>/stages/<stage>`). It cannot invoke or modify anything.
 
 ## Destroy

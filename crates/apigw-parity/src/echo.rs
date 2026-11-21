@@ -404,6 +404,10 @@ async fn authorizer_invoke(body: Bytes) -> Response {
     let effect = match credential {
         Some("allow") => "Allow",
         Some("deny") => "Deny",
+        // A response without a policy document, which API Gateway cannot use.
+        Some("malformed") => {
+            return payload_response(&json!({"principalId": "parity-user", "context": claims}));
+        }
         Some(_) | None => return function_error("Unauthorized"),
     };
     let method_arn = event
@@ -769,6 +773,10 @@ mod tests {
         assert_eq!(allow["context"]["credential"], "allow");
         let (_, deny) = call(token("deny")).await;
         assert_eq!(deny["policyDocument"]["Statement"][0]["Effect"], "Deny");
+        let (failed, malformed) = call(token("malformed")).await;
+        assert!(!failed);
+        assert!(malformed.get("policyDocument").is_none());
+        assert_eq!(malformed["principalId"], "parity-user");
         let (failed, error) = call(token("other")).await;
         assert!(failed);
         assert_eq!(error["errorMessage"], "Unauthorized");

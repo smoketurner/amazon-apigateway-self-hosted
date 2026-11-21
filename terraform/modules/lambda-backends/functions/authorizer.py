@@ -1,8 +1,9 @@
 """Deterministic Lambda authorizer for the parity reference stack.
 
 The decision depends only on the credential value: "allow" authorizes, "deny"
-returns a Deny policy (or isAuthorized=false), anything else raises, which API
-Gateway reports as 401 Unauthorized. The credential is the authorizationToken of
+returns a Deny policy (or isAuthorized=false), "malformed" returns a REST
+authorizer response without a policy document, and anything else raises, which
+API Gateway reports as 401 Unauthorized. The credential is the authorizationToken of
 a TOKEN authorizer, or the x-auth header of a REQUEST authorizer.
 """
 
@@ -48,4 +49,6 @@ def handler(event, context):
         return _policy("Allow", event["methodArn"], claims)
     if credential == "deny":
         return _policy("Deny", event["methodArn"], claims)
+    if credential == "malformed":
+        return {"principalId": PRINCIPAL, "context": claims}
     raise Exception("Unauthorized")

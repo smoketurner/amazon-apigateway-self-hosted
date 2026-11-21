@@ -66,6 +66,10 @@ class AuthorizerTests(unittest.TestCase):
             {"type": "TOKEN", "authorizationToken": "deny", "methodArn": METHOD_ARN}, None
         )
         self.assertEqual(deny["policyDocument"]["Statement"][0]["Effect"], "Deny")
+        malformed = authorizer.handler(
+            {"type": "TOKEN", "authorizationToken": "malformed", "methodArn": METHOD_ARN}, None
+        )
+        self.assertNotIn("policyDocument", malformed)
         with self.assertRaisesRegex(Exception, "^Unauthorized$"):
             authorizer.handler(
                 {"type": "TOKEN", "authorizationToken": "other", "methodArn": METHOD_ARN}, None

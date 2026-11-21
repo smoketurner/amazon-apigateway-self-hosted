@@ -467,3 +467,57 @@ cases:
     compare:
       headers: [content-type]
 
+
+  # Non-proxy HTTP with no Content-Type mapping: which client headers and which
+  # Content-Type reach the backend (the template reports what the echo received)
+  - name: rest-http-nonproxy-headers-get
+    api: rest
+    path: /http-nonproxy-headers/42
+    headers: {x-from-client: abc, accept: application/json}
+    unrecorded: true
+    compare:
+      headers: [content-type]
+
+  - name: rest-http-nonproxy-headers-post-text
+    api: rest
+    method: POST
+    path: /http-nonproxy-headers/42
+    headers: {x-from-client: abc, content-type: text/plain}
+    body: hello
+    unrecorded: true
+    compare:
+      headers: [content-type]
+
+  - name: rest-http-nonproxy-headers-post-json
+    api: rest
+    method: POST
+    path: /http-nonproxy-headers/42
+    headers: {content-type: application/json}
+    body: '{"a":1}'
+    unrecorded: true
+    compare:
+      headers: [content-type]
+
+  # Default 5xx answers, seen through the DEFAULT_5XX customization, which
+  # reports $context.error.messageString and responseType
+  - name: rest-token-authorizer-malformed
+    api: rest
+    path: /authz/token
+    headers: {Authorization: malformed}
+    unrecorded: true
+    compare:
+      headers: [content-type, x-amzn-errortype, x-reference-gateway-response]
+
+  - name: rest-http-proxy-unresolvable-host
+    api: rest
+    path: /broken/unresolvable
+    unrecorded: true
+    compare:
+      headers: [content-type, x-amzn-errortype, x-reference-gateway-response]
+
+  - name: rest-http-proxy-unset-stage-variable-host
+    api: rest
+    path: /broken/unset-host
+    unrecorded: true
+    compare:
+      headers: [content-type, x-amzn-errortype, x-reference-gateway-response]
