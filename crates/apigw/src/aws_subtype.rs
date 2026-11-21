@@ -18,7 +18,7 @@ use serde_json::{Map, Value};
 use crate::aws::RoleArn;
 use crate::aws_service::{Protocol, Service, ServiceCall};
 use crate::gateway::{ApiContext, GatewayError};
-use crate::mapping::ServiceParameters;
+use crate::mapping::{ResponseMapping, ServiceParameters};
 use crate::pipeline::RequestContext;
 use crate::proxy::UrlEncoder;
 
@@ -379,6 +379,8 @@ impl Form {
 pub(crate) struct SubtypeIntegration {
     pub(crate) subtype: Subtype,
     parameters: ServiceParameters,
+    /// `responseParameters`, by the service's response status code.
+    pub(crate) response_mapping: ResponseMapping,
     pub(crate) role: Option<RoleArn>,
     timeout: Duration,
 }
@@ -387,12 +389,14 @@ impl SubtypeIntegration {
     pub(crate) fn new(
         subtype: Subtype,
         parameters: ServiceParameters,
+        response_mapping: ResponseMapping,
         role: Option<RoleArn>,
         timeout: Duration,
     ) -> Self {
         Self {
             subtype,
             parameters,
+            response_mapping,
             role,
             timeout,
         }

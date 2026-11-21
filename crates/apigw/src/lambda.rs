@@ -791,6 +791,7 @@ mod tests {
     use crate::client_cert::tests::certificate;
     use crate::header_case::HeaderCase;
     use crate::integration::Integration;
+    use crate::mapping::ResponseMapping;
     use crate::model::{MethodMatch, Protections, RouteKey, RoutePath};
     use crate::payload::PayloadSettings;
     use crate::pipeline::context::tests::request;
@@ -1182,6 +1183,7 @@ mod tests {
             payload: PayloadVersion::V1,
             timeout: Duration::from_secs(5),
             transfer,
+            response_mapping: ResponseMapping::default(),
         }
     }
 

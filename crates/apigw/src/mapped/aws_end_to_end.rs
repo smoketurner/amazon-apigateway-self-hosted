@@ -900,3 +900,63 @@ async fn unknown_subtypes_and_rest_apis_are_reported_on_the_route() {
         "{summaries:?}"
     );
 }
+
+#[tokio::test]
+async fn subtype_responses_follow_response_parameters() {
+    let (mock, _) = mock_service().await;
+    let mut integration = subtype(
+        "SQS-SendMessage",
+        &json!({
+            "QueueUrl": "https://sqs.us-east-1.amazonaws.com/1/q",
+            "MessageBody": "$request.body",
+        }),
+    );
+    integration["responseParameters"] = json!({"200": {
+        "overwrite:statuscode": "202",
+        "append:header.x-sent": "$response.body.ok",
+        "overwrite:header.x-stage": "$stageVariables.missing",
+    }});
+    let (router, _) = http_api(&integration, &mock, "sqs");
+    let reply = post(&router, "{}").await;
+    assert_eq!(reply.status, StatusCode::ACCEPTED, "{}", reply.body);
+    assert_eq!(reply.header("x-sent"), Some("true"));
+    assert_eq!(reply.json(), json!({"ok": true}));
+}
+
+#[tokio::test]
+async fn http_api_lambda_responses_follow_response_parameters() {
+    let (emulator, _) = lambda_emulator().await;
+    let integration = json!({
+        "type": "aws_proxy",
+        "uri": "arn:aws:lambda:us-east-1:123456789012:function:pets",
+        "payloadFormatVersion": "2.0",
+        "responseParameters": {
+            "200": {
+                "overwrite:statuscode": "201",
+                "overwrite:header.x-version": "$response.body.echo.version",
+                "append:header.x-request": "$context.requestId",
+            },
+            "500": {"overwrite:statuscode": "418"},
+        },
+    });
+    let document = json!({"paths": {"/x": {"post": {
+        "x-amazon-apigateway-integration": integration,
+    }}}});
+    let lambdas = LambdaEndpoints::from_iter([("pets".to_owned(), emulator.join("ok").unwrap())]);
+    let (router, summaries) = serve_kind(
+        ApiKind::Http,
+        &document,
+        &[],
+        &[],
+        Some(clients(&[], lambdas)),
+    );
+    assert!(
+        summaries.iter().all(|s| s.problems.is_empty()),
+        "{summaries:?}"
+    );
+    let reply = post(&router, r#"{"id":7}"#).await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    assert_eq!(reply.header("x-version"), Some("2.0"));
+    assert!(reply.header("x-request").is_some_and(|id| !id.is_empty()));
+    assert_eq!(reply.json()["echo"]["body"], json!(r#"{"id":7}"#));
+}

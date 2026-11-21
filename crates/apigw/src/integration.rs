@@ -229,6 +229,7 @@ impl Integration {
                     payload,
                     timeout,
                     transfer,
+                    response_mapping: ResponseMapping::compile(&spec.response_parameters),
                 }))
             }
             IntegrationType::Aws => Self::compile_aws(spec, uri, timeout),
@@ -248,6 +249,7 @@ impl Integration {
         Ok(Self::AwsSubtype(Box::new(SubtypeIntegration::new(
             subtype,
             ServiceParameters::compile(&spec.request_parameters),
+            ResponseMapping::compile(&spec.response_parameters),
             integration_role(spec)?,
             timeout,
         ))))
@@ -461,6 +463,8 @@ pub(crate) struct LambdaProxy {
     pub(crate) timeout: Duration,
     /// `Stream` invokes with `InvokeWithResponseStream` and streams the output.
     pub(crate) transfer: ResponseTransferMode,
+    /// HTTP API `responseParameters`, by the function's response status code.
+    pub(crate) response_mapping: ResponseMapping,
 }
 
 /// A Lambda integration URI split into the function and how it is invoked.

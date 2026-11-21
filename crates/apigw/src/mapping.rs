@@ -10,7 +10,9 @@
 
 use std::collections::BTreeMap;
 
+use axum::body::Body;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::response::Response;
 use serde_json::Value;
 
 use crate::pipeline::RequestContext;
@@ -558,12 +560,7 @@ impl StatusMapping {
 
     /// Applies the mappings to `response`, which carries the backend's status
     /// and headers. `body` is the buffered backend body when [`Self::reads_body`].
-    pub(crate) fn apply(
-        &self,
-        ctx: &RequestContext,
-        body: Option<&[u8]>,
-        response: &mut axum::response::Response,
-    ) {
+    pub(crate) fn apply(&self, ctx: &RequestContext, body: Option<&[u8]>, response: &mut Response) {
         let original = response.headers().clone();
         let scope = Scope {
             request: ctx,
@@ -651,6 +648,29 @@ impl ResponseMapping {
     /// The mappings for a backend response with `status`.
     pub(crate) fn for_status(&self, status: StatusCode) -> Option<&StatusMapping> {
         self.0.get(&status.as_u16())
+    }
+
+    /// Applies the mappings for `response`'s status to a response whose body
+    /// is already in memory: an HTTP API Lambda or AWS service reply, which
+    /// HTTP APIs never stream.
+    pub(crate) async fn apply_buffered(
+        &self,
+        ctx: &RequestContext,
+        mut response: Response,
+    ) -> Result<Response, axum::Error> {
+        let Some(mapping) = self.for_status(response.status()) else {
+            return Ok(response);
+        };
+        if !mapping.reads_body() {
+            mapping.apply(ctx, None, &mut response);
+            return Ok(response);
+        }
+        let (parts, body) = response.into_parts();
+        let body = axum::body::to_bytes(body, usize::MAX).await?;
+        let mut response = Response::from_parts(parts, Body::empty());
+        mapping.apply(ctx, Some(&body), &mut response);
+        *response.body_mut() = Body::from(body);
+        Ok(response)
     }
 }
 

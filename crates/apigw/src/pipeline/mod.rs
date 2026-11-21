@@ -26,6 +26,7 @@ use crate::digest::Sha256Digest;
 use crate::gateway::{ApiContext, AuthorizationMode, GatewayError, MAX_BODY_BYTES};
 use crate::gateway_response::Failure;
 use crate::integration::Integration;
+use crate::mapping::ResponseMapping;
 use crate::model::{
     ApiKeySource, ApiKind, Protection, ResponseTransferMode, ResponseType, RoutePath,
 };
@@ -362,16 +363,35 @@ impl<'a> Pipeline<'a> {
                 target.forward(&self.api.http, self.route, ctx).await
             }
             Integration::Lambda(ref target) => {
-                target
+                let response = target
                     .invoke(&self.api.aws, self.route, ctx, &self.api.stage_variables)
+                    .await?;
+                self.map_response(&target.response_mapping, ctx, response)
                     .await
             }
             Integration::Mapped(ref mapped) => mapped.run(self.api, self.route, ctx).await,
-            Integration::AwsSubtype(ref subtype) => subtype.call(self.api, ctx).await,
+            Integration::AwsSubtype(ref subtype) => {
+                let response = subtype.call(self.api, ctx).await?;
+                self.map_response(&subtype.response_mapping, ctx, response)
+                    .await
+            }
             Integration::Unsupported { ref reason } => {
                 tracing::warn!(route = %self.route.key, reason, "unsupported integration invoked");
                 Err(GatewayError::UnsupportedIntegration)
             }
         }
+    }
+
+    /// Applies HTTP API `responseParameters` to a Lambda or AWS service reply.
+    async fn map_response(
+        &self,
+        mapping: &ResponseMapping,
+        ctx: &RequestContext,
+        response: Response,
+    ) -> Result<Response, GatewayError> {
+        mapping.apply_buffered(ctx, response).await.map_err(|err| {
+            tracing::warn!(route = %self.route.key, %err, "integration response could not be read");
+            GatewayError::IntegrationFailure
+        })
     }
 }
