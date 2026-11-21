@@ -4,15 +4,18 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use aws_sdk_apigatewayv2::types::Cors;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::{ApiKind, DeploymentStamp, StageSettings};
+use crate::model::{ApiKind, CorsConfig, DeploymentStamp, StageSettings};
 
 /// `apigateway` includes every API Gateway extension (integrations, request
 /// validators, resource policy, gateway responses, ...); `authorizers` adds the
 /// authorizer definitions.
 const REST_EXPORT_EXTENSIONS: &str = "apigateway,authorizers";
+/// Where an HTTP API definition carries its CORS configuration.
+const CORS_EXTENSION: &str = "x-amazon-apigateway-cors";
 /// The most resources `GetResources` returns in one page.
 const RESOURCE_PAGE_SIZE: i32 = 500;
 
@@ -318,16 +321,60 @@ impl Fetcher {
             .await
             .map_err(SourceError::aws)?;
         let body = export.body.ok_or(SourceError::EmptyExport)?;
+        let mut openapi = Export::parse(body.as_ref())?.0;
+        if let Some(cors) = self.http_cors(api_id).await {
+            add_cors(&mut openapi, &cors);
+        }
         Ok(Fetch::Changed(Box::new(Snapshot {
             kind: ApiKind::Http,
             api_id: api_id.to_owned(),
             stage: Some(stage.to_owned()),
             stamp,
             stage_settings: StageSettings::from(&stage_info),
-            openapi: Export::parse(body.as_ref())?.0,
+            openapi,
             resource_ids: BTreeMap::new(),
             canary: None,
         })))
+    }
+
+    /// The HTTP API's CORS configuration, which `ExportApi` leaves out of the
+    /// export. Optional: without `apigateway:GET` on the API, CORS is not applied.
+    async fn http_cors(&self, api_id: &str) -> Option<CorsConfig> {
+        match self.http.get_api().api_id(api_id).send().await {
+            Ok(api) => api.cors_configuration.as_ref().map(cors_config),
+            Err(error) => {
+                tracing::warn!(api_id, error = %SourceError::aws(error), "the API's CORS configuration could not be read; CORS requests will not be answered");
+                None
+            }
+        }
+    }
+}
+
+fn cors_config(cors: &Cors) -> CorsConfig {
+    CorsConfig {
+        allow_origins: cors.allow_origins().to_vec(),
+        allow_methods: cors.allow_methods().to_vec(),
+        allow_headers: cors.allow_headers().to_vec(),
+        expose_headers: cors.expose_headers().to_vec(),
+        max_age: cors.max_age().and_then(|age| u64::try_from(age).ok()),
+        allow_credentials: cors.allow_credentials().unwrap_or(false),
+    }
+}
+
+/// Adds `cors` to an HTTP API export as `x-amazon-apigateway-cors`, the form an
+/// imported definition carries it in. A configuration already in the export wins.
+fn add_cors(openapi: &mut Value, cors: &CorsConfig) {
+    let Value::Object(root) = openapi else {
+        return;
+    };
+    if root.contains_key(CORS_EXTENSION) {
+        return;
+    }
+    match serde_json::to_value(cors) {
+        Ok(value) => {
+            root.insert(CORS_EXTENSION.to_owned(), value);
+        }
+        Err(error) => tracing::warn!(%error, "the CORS configuration could not be added"),
     }
 }
 
@@ -376,12 +423,17 @@ impl Snapshot {
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests assert on known-good fixtures")]
 #[expect(clippy::panic, reason = "tests fail loudly on unexpected variants")]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "tests index exports of known shape"
+)]
 mod tests {
     use std::collections::BTreeMap;
 
     use serde_json::json;
 
     use super::*;
+    use crate::model::{ApiModel, IntegrationOverrides};
 
     fn scratch(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("apigw-{}-{name}", uuid::Uuid::now_v7()))
@@ -404,6 +456,45 @@ mod tests {
             resource_ids: BTreeMap::new(),
             canary: None,
         }
+    }
+
+    #[test]
+    fn cors_from_get_api_joins_the_export_unless_it_has_its_own() {
+        let cors = cors_config(
+            &Cors::builder()
+                .allow_origins("https://example.com")
+                .allow_methods("GET")
+                .allow_headers("content-type")
+                .expose_headers("x-exposed")
+                .max_age(300)
+                .build(),
+        );
+        assert!(!cors.allow_credentials);
+        let mut export = json!({"openapi": "3.0.1", "paths": {}});
+        add_cors(&mut export, &cors);
+        assert_eq!(
+            export[CORS_EXTENSION],
+            json!({
+                "allowOrigins": ["https://example.com"], "allowMethods": ["GET"],
+                "allowHeaders": ["content-type"], "exposeHeaders": ["x-exposed"],
+                "maxAge": 300, "allowCredentials": false,
+            })
+        );
+        let model = ApiModel::import(
+            &export,
+            ApiKind::Http,
+            StageSettings::default(),
+            &IntegrationOverrides::default(),
+        )
+        .unwrap();
+        assert_eq!(model.settings.cors, Some(cors.clone()));
+
+        let mut own = json!({CORS_EXTENSION: {"allowOrigins": ["https://other.example"]}});
+        add_cors(&mut own, &cors);
+        assert_eq!(
+            own[CORS_EXTENSION]["allowOrigins"],
+            json!(["https://other.example"])
+        );
     }
 
     #[tokio::test]

@@ -148,6 +148,7 @@ Always set `AWS_REGION` to the API's region.
 | `apigateway:GET` | the same two resources for the stage named by `--canary-export-stage` | canary releases from a shadow stage |
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/usageplans`, `.../usageplans/*/keys`, `.../apikeys` | API keys and usage plans of a REST API stage |
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/apis/<id>/exports/OAS30`, `.../apis/<id>/stages/<stage>` | HTTP APIs |
+| `apigateway:GET` | `arn:aws:apigateway:<region>::/apis/<id>` | The CORS configuration of an HTTP API, which `ExportApi` leaves out; optional, CORS is not applied without it |
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/v2/domainnames/<domain>`, `.../apimappings`, `.../routingrules`, `arn:aws:apigateway:<region>::/restapis/<id>` | `--domain-name` |
 | `s3:GetObject` | the truststore object of each mutual TLS domain (`s3:GetObjectVersion` when the domain pins a `truststoreVersion`) | mutual TLS |
 | `lambda:InvokeFunction` | each integrated function (and its aliases) and each Lambda authorizer function | `AWS_PROXY` and non-proxy `AWS` routes and Lambda authorizers; the same action covers `InvokeWithResponseStream` for streaming routes |
