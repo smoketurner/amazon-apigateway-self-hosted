@@ -685,27 +685,40 @@ async fn connect_state(config: &Config) -> anyhow::Result<Arc<StateBackend>> {
     Ok(Arc::new(StateBackend::Valkey(valkey)))
 }
 
-/// The OpenTelemetry pipelines, whose metrics become the process-wide ones,
-/// and the CloudWatch and X-Ray delivery that records into them.
-fn start_telemetry(
-    config: &Config,
-    sdk_config: &aws_config::SdkConfig,
-) -> anyhow::Result<(Telemetry, Arc<Observability>)> {
+/// The OpenTelemetry pipelines, whose metrics become the process-wide ones.
+/// Started before anything records a metric (certificates do as they load).
+fn start_telemetry(config: &Config) -> anyhow::Result<Telemetry> {
     let env = |name: &str| std::env::var(name).ok();
     let telemetry = Telemetry::start(&config.otel(env)?, env)?;
     telemetry.metrics().install();
-    let observability = Observability::start(
-        sdk_config.clone(),
-        config.observability(env("HOSTNAME").as_deref()),
-        Instrumentation {
-            metrics: telemetry.metrics(),
-            tracer: telemetry.tracer(),
-        },
-    );
-    Ok((telemetry, observability))
+    Ok(telemetry)
+}
+
+/// Binds the admin listener; the returned future serves it until `shutdown`.
+async fn serve_admin(
+    addr: std::net::SocketAddr,
+    config: &Config,
+    tls: &Tls,
+    admin_app: Router,
+    shutdown: &CancellationToken,
+) -> anyhow::Result<impl Future<Output = ()> + use<>> {
+    let admin = TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("failed to bind admin listener {addr}"))?;
+    tracing::info!(%addr, "serving admin endpoints over TLS");
+    Ok(listener::serve(
+        admin,
+        tls.clone(),
+        admin_app,
+        ConnLimits::DEFAULT,
+        config.max_connections,
+        Edge::direct(),
+        shutdown.clone(),
+    ))
 }
 
 pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
+    let telemetry = start_telemetry(&config)?;
     let tls = Tls::with_domains(
         &config.tls_cert,
         &config.tls_key,
@@ -733,7 +746,14 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         http.clone(),
         config.issuer_endpoints.iter().cloned(),
     ));
-    let (telemetry, observability) = start_telemetry(&config, &sdk_config)?;
+    let observability = Observability::start(
+        sdk_config.clone(),
+        config.observability(std::env::var("HOSTNAME").ok().as_deref()),
+        Instrumentation {
+            metrics: telemetry.metrics(),
+            tracer: telemetry.tracer(),
+        },
+    );
     let state = connect_state(&config).await?;
     let builder = Builder {
         observability: Arc::clone(&observability),
@@ -779,19 +799,7 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         shutdown.clone(),
     ));
     if let Some(addr) = config.admin_listen {
-        let admin = TcpListener::bind(addr)
-            .await
-            .with_context(|| format!("failed to bind admin listener {addr}"))?;
-        tracing::info!(%addr, "serving admin endpoints over TLS");
-        tasks.spawn(listener::serve(
-            admin,
-            tls.clone(),
-            admin_app,
-            ConnLimits::DEFAULT,
-            config.max_connections,
-            Edge::direct(),
-            shutdown.clone(),
-        ));
+        tasks.spawn(serve_admin(addr, &config, &tls, admin_app, &shutdown).await?);
     }
     tasks.spawn(tls.watch(CERT_POLL_INTERVAL, shutdown.clone()));
 

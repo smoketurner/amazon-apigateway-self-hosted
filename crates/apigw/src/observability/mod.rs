@@ -18,6 +18,7 @@ pub(crate) mod testing;
 mod trace;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use aws_sdk_cloudwatchlogs::config::Region;
@@ -128,6 +129,7 @@ pub(crate) struct Observability {
     aggregator_task: Mutex<Option<JoinHandle<()>>>,
     publishing: CancellationToken,
     closed: CancellationToken,
+    poller_started: AtomicBool,
 }
 
 impl Observability {
@@ -154,9 +156,9 @@ impl Observability {
             aggregator_task: Mutex::new(None),
             publishing: CancellationToken::new(),
             closed: CancellationToken::new(),
+            poller_started: AtomicBool::new(false),
         });
         observability.start_metrics_publisher();
-        observability.start_rule_poller();
         observability
     }
 
@@ -197,6 +199,7 @@ impl Observability {
             aggregator_task: Mutex::new(None),
             publishing: CancellationToken::new(),
             closed: CancellationToken::new(),
+            poller_started: AtomicBool::new(false),
         })
     }
 
@@ -226,9 +229,13 @@ impl Observability {
         &self.instrumentation
     }
 
-    /// Polls X-Ray for sampling rules while segments go to X-Ray.
+    /// Polls X-Ray for sampling rules while segments go to X-Ray, from the
+    /// first time a stage with tracing enabled is loaded.
     fn start_rule_poller(&self) {
-        if self.settings.tracing != TraceDelivery::Aws || !self.settings.sampling_rules {
+        if self.settings.tracing != TraceDelivery::Aws
+            || !self.settings.sampling_rules
+            || self.poller_started.swap(true, Ordering::Relaxed)
+        {
             return;
         }
         let poller = RulePoller::new(
@@ -326,7 +333,9 @@ impl Observability {
         }
     }
 
+    /// The sampler of stages with tracing enabled.
     pub(crate) fn sampler(&self) -> Arc<Sampler> {
+        self.start_rule_poller();
         Arc::clone(&self.sampler)
     }
 

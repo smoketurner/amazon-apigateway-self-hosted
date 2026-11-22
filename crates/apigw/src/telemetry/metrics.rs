@@ -205,6 +205,7 @@ pub(crate) struct GatewayMetrics {
 }
 
 static GLOBAL: OnceLock<GatewayMetrics> = OnceLock::new();
+static NOOP: OnceLock<GatewayMetrics> = OnceLock::new();
 
 /// The version this binary reports; `APIGW_GIT_COMMIT` is set by the image
 /// builds.
@@ -425,11 +426,13 @@ impl GatewayMetrics {
         at.as_duration().as_secs_f64()
     }
 
-    /// The process's instruments: those [`Self::install`] set, else instruments
-    /// that record nothing.
+    /// The process's instruments: those [`Self::install`] set, else (before
+    /// then, and in tests) instruments that record nothing.
     pub(crate) fn global() -> &'static Self {
-        GLOBAL.get_or_init(|| {
-            Self::new(&opentelemetry::metrics::noop::NoopMeterProvider::new().meter("apigw"))
+        GLOBAL.get().unwrap_or_else(|| {
+            NOOP.get_or_init(|| {
+                Self::new(&opentelemetry::metrics::noop::NoopMeterProvider::new().meter("apigw"))
+            })
         })
     }
 

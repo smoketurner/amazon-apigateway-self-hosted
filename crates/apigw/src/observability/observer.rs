@@ -74,11 +74,11 @@ pub(crate) struct ExecutionRecord {
 }
 
 /// Whether the stage traces requests itself or only continues its callers'.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 enum TracingMode {
     /// The stage has tracing enabled: requests are sampled here when the
     /// caller made no decision.
-    Active,
+    Active(Arc<Sampler>),
     /// X-Ray's passive mode: only requests the caller sampled are traced.
     Passive,
 }
@@ -87,7 +87,6 @@ enum TracingMode {
 #[derive(Debug)]
 struct Tracing {
     mode: TracingMode,
-    sampler: Arc<Sampler>,
     queue: LogQueue,
     /// The segment name, `{api name}/{stage}`.
     segment_name: String,
@@ -107,11 +106,11 @@ impl Tracing {
         let header = |name: &HeaderName| request.headers().get(name).and_then(|v| v.to_str().ok());
         let now = jiff::Timestamp::now();
         let trace = match self.mode {
-            TracingMode::Active => Trace::start(
+            TracingMode::Active(ref sampler) => Trace::start(
                 header(&Self::TRACE_HEADER),
                 header(&Self::TRACEPARENT),
                 || {
-                    self.sampler.sample(
+                    sampler.sample(
                         &SamplingRequest {
                             service_name: &self.segment_name,
                             host: header(&header::HOST).unwrap_or_default(),
@@ -263,7 +262,7 @@ impl StageObserver {
         });
 
         let mode = if model.stage.tracing_enabled {
-            Some(TracingMode::Active)
+            Some(TracingMode::Active(observability.sampler()))
         } else {
             observability
                 .passive_tracing()
@@ -273,7 +272,6 @@ impl StageObserver {
             .and_then(|mode| Some((mode, observability.trace_queue()?)))
             .map(|(mode, queue)| Tracing {
                 mode,
-                sampler: observability.sampler(),
                 queue,
                 segment_name: format!(
                     "{}/{}",
