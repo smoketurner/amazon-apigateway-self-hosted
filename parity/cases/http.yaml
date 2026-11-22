@@ -228,3 +228,13 @@ cases:
     path: /broken/unresolvable
     compare:
       headers: [content-type]
+
+  # Whether request parameter mapping reaches a Lambda proxy event
+  - name: http-lambda-v2-request-mapping
+    api: http
+    path: /lambda-mapped/42
+    query: {q: "1"}
+    headers: {x-remove-me: gone}
+    unrecorded: true
+    compare:
+      body: json

@@ -28,6 +28,20 @@ paths:
         uri: "${echo_invocation_uri}"
         credentials: "${invoke_role_arn}"
         payloadFormatVersion: "1.0"
+  # Request parameter mapping on a Lambda proxy integration, for whether API
+  # Gateway applies it to the event
+  /lambda-mapped/{id}:
+    get:
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        payloadFormatVersion: "2.0"
+        requestParameters:
+          "append:header.x-mapped": "$request.path.id"
+          "overwrite:querystring.fixed": "literal"
+          "remove:header.x-remove-me": ""
   /http-proxy/{proxy+}:
     x-amazon-apigateway-any-method:
       x-amazon-apigateway-integration:
