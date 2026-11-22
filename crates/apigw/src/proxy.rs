@@ -127,6 +127,15 @@ impl HttpProxy {
         {
             headers.insert(header::CONTENT_TYPE, content_type);
         }
+        // Unless mapped, the backend is asked for the integration request's content
+        // type, else JSON (measured against a deployed REST API).
+        if !headers.contains_key(header::ACCEPT) {
+            let accept = headers
+                .get(header::CONTENT_TYPE)
+                .cloned()
+                .unwrap_or(HeaderValue::from_static("application/json"));
+            headers.insert(header::ACCEPT, accept);
+        }
         self.add_gateway_headers(&mut headers, ctx);
         let outgoing = Outgoing {
             headers,
