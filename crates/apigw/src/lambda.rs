@@ -16,7 +16,7 @@ use tokio::time::Instant as TokioInstant;
 
 use crate::authz::MethodArn;
 use crate::aws::AwsClients;
-use crate::gateway::GatewayError;
+use crate::gateway::{GatewayError, HeaderNameExt as _};
 use crate::header_case::HeaderCase;
 use crate::header_policy::{Flavor, IamAuthorization};
 use crate::integration::{LambdaProxy, StageVariables};
@@ -580,7 +580,8 @@ impl<'a> ProxyEvent<'a> {
         };
         let mut headers = MultiValues::default();
         for (name, value) in allowed.iter() {
-            if GATEWAY_EVENT_HEADERS.contains(&name.as_str()) {
+            // Measured: no event carries a hop-by-hop header the client sent.
+            if GATEWAY_EVENT_HEADERS.contains(&name.as_str()) || name.is_hop_by_hop() {
                 continue;
             }
             // An HTTP API reports the length it read, not what the client claimed.
@@ -855,6 +856,43 @@ mod tests {
         ProxyEvent::new(ctx, &variables())
             .with_account("123456789012")
             .render(version)
+    }
+
+    /// Measured against deployed REST and HTTP APIs: Lambda events leave out the
+    /// hop-by-hop headers a client sends.
+    #[test]
+    fn events_leave_out_hop_by_hop_headers() {
+        let mut ctx = incoming(b"");
+        for name in [
+            "connection",
+            "keep-alive",
+            "te",
+            "upgrade",
+            "proxy-connection",
+        ] {
+            ctx.headers.insert(name, HeaderValue::from_static("x"));
+        }
+        for kind in [ApiKind::Rest, ApiKind::Http] {
+            ctx.api.kind = kind;
+            for version in [PayloadVersion::V1, PayloadVersion::V2] {
+                let event = event(&ctx, version);
+                let headers = event["headers"].as_object().unwrap();
+                for name in headers.keys() {
+                    let lower = name.to_ascii_lowercase();
+                    assert!(
+                        ![
+                            "connection",
+                            "keep-alive",
+                            "te",
+                            "upgrade",
+                            "proxy-connection"
+                        ]
+                        .contains(&lower.as_str()),
+                        "{kind:?} {version:?} kept {name}"
+                    );
+                }
+            }
+        }
     }
 
     /// Measured against a deployed HTTP API: payload 1.0 carries repeated
