@@ -20,7 +20,9 @@ matches answer `403 {"message":"Forbidden"}`.
   ascending priority: header conditions (name case-insensitive, value case-sensitive, a `*`
   wildcard at the start and/or end), a base path condition, and `stripBasePath`. A rule or mapping
   whose API fails to load answers 503 until it loads.
-- **`/ping` and `/sping`** are reserved on every domain and answer `200` with `healthy`.
+- **`/ping` and `/sping`** are reserved on every domain: `/ping` answers `200` with
+  `Healthy Connection` and no `Content-Type`, `/sping` answers `200` with `healthy` and
+  `Content-Type: null`, as API Gateway does.
 - **REST and HTTP APIs** can be mapped to the same domain. Mappings do not say which kind an API
   is, so each API ID is looked up as a REST API first.
 - **Certificates:** a client that asks for a domain name (SNI) gets that domain's certificate,
