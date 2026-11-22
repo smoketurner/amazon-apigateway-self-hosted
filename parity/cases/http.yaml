@@ -256,3 +256,26 @@ cases:
     unrecorded: true
     compare:
       body: json
+
+  # Repeated request headers: each value is sent as its own header line
+  - name: http-lambda-v2-repeated-headers
+    api: http
+    path: /lambda-v2/x
+    headers: {X-Multi: [a, b], Cookie: [a=1, b=2]}
+    compare:
+      body: json
+
+  - name: http-lambda-v1-repeated-headers
+    api: http
+    path: /lambda-v1/x
+    headers: {X-Multi: [a, b], Cookie: [a=1, b=2]}
+    compare:
+      body: json
+
+  - name: http-http-proxy-repeated-headers
+    api: http
+    path: /http-proxy/x
+    headers: {X-Multi: [a, b]}
+    compare:
+      body: ignore
+      echo: {headers: [x-multi]}

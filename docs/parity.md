@@ -195,6 +195,10 @@ also leaves `'` bare; `apigw` sends `%27`.
   `Authorization`; HTTP API payload 1.0 does the same and also spells `Cookie` and
   `Content-Length` itself and lower-cases `accept`; payload 2.0 is lower case.
 - REST events leave out `Content-Length`; HTTP API events always carry it, `0` for no body.
+- A repeated request header is its last value in payload 1.0 `headers` and every value in
+  `multiValueHeaders`, REST and HTTP alike, except that an HTTP API's payload 1.0 joins repeated
+  `Cookie` headers into one `a=1; b=2` value. Payload 2.0 joins repeats with commas. A REST
+  `method.request.header.*` mapping takes the last value (`*-repeated-*` cases).
 - REST `requestContext` has no `authorizer` key when no authorizer ran, carries
   `authorizer.integrationLatency` when a Lambda authorizer did, and names the `deploymentId` and,
   when the gateway may call `GetResources`, the `resourceId`.
