@@ -23,7 +23,8 @@ pub enum ParseError {
         /// The nesting limit that was exceeded.
         limit: usize,
     },
-    /// A Velocity directive that API Gateway mapping templates are not evaluated with here.
+    /// `#parse` or `#include`, which load other templates: API Gateway answers templates that
+    /// use them with a 500.
     #[error("unsupported directive #{name} at line {line}")]
     UnsupportedDirective {
         /// The directive name, without the `#`.
@@ -31,8 +32,8 @@ pub enum ParseError {
         /// One-based line of the directive.
         line: usize,
     },
-    /// An integer literal outside the range of a 64-bit integer.
-    #[error("integer literal {literal} at line {line} does not fit in 64 bits")]
+    /// An integer literal with more digits than this crate computes with (32,768 bits).
+    #[error("integer literal {literal} at line {line} is too large")]
     IntegerLiteralTooLarge {
         /// The literal as written.
         literal: String,
@@ -81,10 +82,18 @@ pub enum RenderError {
     /// A list was modified while a `#foreach` was iterating over it.
     #[error("list modified during #foreach")]
     ConcurrentModification,
-    /// Integer arithmetic left the range of a 64-bit integer, where Java promotes to
-    /// `BigInteger`.
-    #[error("integer overflow")]
-    IntegerOverflow,
+    /// A `BigInteger` or `BigDecimal` grew beyond the size this crate computes with (32,768
+    /// bits, or a scale of 10,000), where Java would keep allocating.
+    #[error("number too large")]
+    NumberTooLarge,
+    /// An arithmetic operation Java rejects with `ArithmeticException` or
+    /// `NumberFormatException`, such as `BigInteger.mod` of a negative modulus or `%` of a
+    /// `BigDecimal`.
+    #[error("arithmetic failed: {message}")]
+    Arithmetic {
+        /// Why it failed.
+        message: String,
+    },
     /// A collection was stored inside itself, which Java allows but which cannot be freed or
     /// printed.
     #[error("a collection cannot contain itself")]

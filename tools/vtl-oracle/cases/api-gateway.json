@@ -1,0 +1,10 @@
+[
+  {"name": "aws-macro", "template": "#macro(greet $who)hello $who#end#greet('a') #greet($input.path('$.body.name'))", "body": "{\"body\":{\"name\":\"n\",\"store\":{\"books\":[{\"price\":1},{\"price\":2.5}],\"bike\":{\"price\":3}}}}"},
+  {"name": "aws-define", "template": "#define($block)x=$x#end#set($x = 1)$block #set($x = 2)$block", "body": "{\"body\":{\"name\":\"n\",\"store\":{\"books\":[{\"price\":1},{\"price\":2.5}],\"bike\":{\"price\":3}}}}"},
+  {"name": "aws-evaluate", "template": "#set($t = '#set($y = 3)$y')#evaluate($t) #evaluate('$input.path(\"$.body.name\")')", "body": "{\"body\":{\"name\":\"n\",\"store\":{\"books\":[{\"price\":1},{\"price\":2.5}],\"bike\":{\"price\":3}}}}"},
+  {"name": "aws-bigint", "template": "#set($a = 9223372036854775807)#set($b = $a + 1)$b #set($c = $a * $a)$c #if($b > $a)greater#end", "body": "{\"body\":{\"name\":\"n\",\"store\":{\"books\":[{\"price\":1},{\"price\":2.5}],\"bike\":{\"price\":3}}}}"},
+  {"name": "aws-int-overflow", "template": "#set($i = 2147483647)#set($j = $i + 1)$j #set($k = $i * 2)$k", "body": "{\"body\":{\"name\":\"n\",\"store\":{\"books\":[{\"price\":1},{\"price\":2.5}],\"bike\":{\"price\":3}}}}"},
+  {"name": "aws-map-keys", "template": "#set($m = {1: 'int', '1': 'string', true: 'bool'})$m $m.get(1) $m.get('1') $m.size()", "body": "{\"body\":{\"name\":\"n\",\"store\":{\"books\":[{\"price\":1},{\"price\":2.5}],\"bike\":{\"price\":3}}}}"},
+  {"name": "aws-deep-scan-functions", "template": "$input.json('$.body..price.length()') $input.json('$.body..price.sum()') $input.json('$.body..price.max()')", "body": "{\"body\":{\"name\":\"n\",\"store\":{\"books\":[{\"price\":1},{\"price\":2.5}],\"bike\":{\"price\":3}}}}"},
+  {"name": "aws-input", "template": "$input.json('$.body') $input.path('$.body.name') $input.json('$.body.absent') [$input.path('$.body.absent')] $input.params('missing')", "body": "{\"body\":{\"name\":\"n\",\"store\":{\"books\":[{\"price\":1},{\"price\":2.5}],\"bike\":{\"price\":3}}}}"}
+]

@@ -4,9 +4,17 @@
 //! which characters continue an identifier, that `-1` is a single number token, that method
 //! arguments are not full expressions, how backslashes escape references and directives, and
 //! which whitespace around directives is swallowed.
+//!
+//! Velocity's lexer has states of its own that outlive the reference that entered them. After
+//! `$a.b`, it stays in a reference state across `#set` and comments, so a following `(` opens an
+//! argument list that nothing closes, and from then on only some characters lex. [`Lexer`]
+//! follows those states for the text between directives and references.
 
-use crate::ast::{BinaryOp, Block, Expr, Foreach, If, Node, Reference, Set, Step};
+use std::sync::Arc;
+
+use crate::ast::{BinaryOp, Block, Define, Expr, Foreach, If, Node, Reference, Set, Step};
 use crate::error::ParseError;
+use crate::number::BigInt;
 use crate::value::Value;
 
 /// Deepest nesting of directives, expressions, collections, and interpolated strings.
@@ -18,6 +26,11 @@ const fn is_ident_start(c: char) -> bool {
 
 const fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
+/// A character of a directive word, such as a macro name: `-` is not one.
+const fn is_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '@'
 }
 
 /// Why a block of nodes ended.
@@ -39,7 +52,10 @@ enum Directive {
     Foreach,
     Break,
     Stop,
-    /// `#macro`, `#parse`, `#include`, `#evaluate`, and `#define`.
+    Define,
+    /// `#macro`: API Gateway parses a definition and ignores it.
+    Macro,
+    /// `#parse` and `#include`.
     Unsupported,
 }
 
@@ -52,6 +68,65 @@ struct DirectiveToken {
     end: usize,
 }
 
+/// Velocity's lexical states for the text between tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Plain text.
+    Default,
+    /// Just after a reference that ended in its name, a method call, or an index.
+    Reference,
+    /// Just after a reference that ended in `.property`.
+    RefModifier,
+    /// Inside the argument list of a method call that never started: only identifiers,
+    /// numbers, string literals, `.name`, references, and directives lex here.
+    RefMod2,
+}
+
+/// Velocity's lexer state and the stack of states it returns to.
+#[derive(Debug, Clone)]
+struct Lexer {
+    mode: Mode,
+    saved: Vec<Mode>,
+}
+
+impl Lexer {
+    const fn new() -> Self {
+        Self {
+            mode: Mode::Default,
+            saved: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, next: Mode) {
+        self.saved.push(self.mode);
+        self.mode = next;
+    }
+
+    fn pop(&mut self) {
+        self.mode = self.saved.pop().unwrap_or(Mode::Default);
+    }
+
+    /// The state a reference leaves the lexer in: after `.name` it is still reading
+    /// modifiers, otherwise it is in the plain reference state. An index returns to the
+    /// state before it.
+    fn after_reference(&mut self, steps: &[Step]) {
+        let property = steps
+            .iter()
+            .rev()
+            .find(|step| !matches!(step, Step::Index(_)))
+            .is_some_and(|step| matches!(step, Step::Property(_)));
+        self.mode = if property {
+            Mode::RefModifier
+        } else {
+            Mode::Reference
+        };
+    }
+
+    const fn in_reference(&self) -> bool {
+        matches!(self.mode, Mode::Reference | Mode::RefModifier)
+    }
+}
+
 /// Accumulates the nodes of one block.
 struct BlockBuilder {
     nodes: Vec<Node>,
@@ -59,21 +134,6 @@ struct BlockBuilder {
     /// Whether the current text run started right after a token that is not text: a reference,
     /// a directive, or a comment. Whitespace alone in such a run before `#set` is dropped.
     after_token: bool,
-    /// Whether the last text or reference was a reference, so that a `[` would start an index:
-    /// Velocity's lexer stays in that state across directives and comments.
-    reference_pending: PendingReference,
-    /// The value of `reference_pending` before the current text run began.
-    pending_before_text: PendingReference,
-}
-
-/// A reference that the lexer is still "inside" until text follows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PendingReference {
-    None,
-    /// The reference ended in a property: `##` is then text, not a comment.
-    Property,
-    /// Any other reference; only `[` is affected.
-    Other,
 }
 
 impl BlockBuilder {
@@ -82,8 +142,6 @@ impl BlockBuilder {
             nodes: Vec::new(),
             text: String::new(),
             after_token,
-            reference_pending: PendingReference::None,
-            pending_before_text: PendingReference::None,
         }
     }
 
@@ -110,24 +168,15 @@ impl BlockBuilder {
             && self.text.chars().all(|c| c == ' ' || c == '\t')
         {
             self.text.clear();
-            self.reference_pending = self.pending_before_text;
         }
     }
 
     fn add_text(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        if self.text.is_empty() {
-            self.pending_before_text = self.reference_pending;
-        }
-        self.reference_pending = PendingReference::None;
         self.text.push_str(text);
     }
 
     fn add_char(&mut self, c: char) {
-        let mut buffer = [0_u8; 4];
-        self.add_text(c.encode_utf8(&mut buffer));
+        self.text.push(c);
     }
 
     fn finish(mut self) -> Block {
@@ -143,11 +192,18 @@ enum Dollar {
     Text,
 }
 
+/// An argument of a directive such as `#macro`: a bare word or a value.
+enum DirectiveArg {
+    Word,
+    Value(Expr),
+}
+
 pub(crate) struct Parser {
     chars: Vec<char>,
     pos: usize,
     depth: usize,
     first_line: usize,
+    lex: Lexer,
 }
 
 impl Parser {
@@ -155,8 +211,8 @@ impl Parser {
     ///
     /// # Errors
     ///
-    /// Returns [`ParseError`] for anything Velocity 1.7 rejects, for directives that are not
-    /// supported, and for templates nested beyond [`MAX_PARSE_DEPTH`].
+    /// Returns [`ParseError`] for anything Velocity 1.7 rejects, for `#parse` and `#include`,
+    /// and for templates nested beyond [`MAX_PARSE_DEPTH`].
     pub(crate) fn parse(source: &str) -> Result<Block, ParseError> {
         Self::parse_at(source, 0, 1)
     }
@@ -167,6 +223,7 @@ impl Parser {
             pos: 0,
             depth,
             first_line,
+            lex: Lexer::new(),
         };
         let (block, end) = parser.parse_block(false)?;
         match end {
@@ -317,6 +374,12 @@ impl Parser {
         Some(name)
     }
 
+    fn source(&self, start: usize) -> String {
+        self.chars
+            .get(start..self.pos)
+            .map_or_default(|slice| slice.iter().collect())
+    }
+
     // ----- text, references, directives -----
 
     fn parse_block(&mut self, nested: bool) -> Result<(Block, BlockEnd), ParseError> {
@@ -329,9 +392,6 @@ impl Parser {
     fn parse_block_inner(&mut self, nested: bool) -> Result<(Block, BlockEnd), ParseError> {
         let mut builder = BlockBuilder::new(nested);
         while let Some(c) = self.peek() {
-            if c == '[' && builder.reference_pending != PendingReference::None {
-                return Err(self.error("unexpected '[' after a reference"));
-            }
             match c {
                 '\\' => {
                     if let Some(end) = self.parse_backslashes(&mut builder)? {
@@ -344,13 +404,151 @@ impl Parser {
                         return Ok((builder.finish(), end));
                     }
                 }
-                other => {
-                    builder.add_char(other);
+                other => self.parse_text_char(&mut builder, other)?,
+            }
+        }
+        Ok((builder.finish(), BlockEnd::Eof))
+    }
+
+    /// One character of text, read in the lexer's current state.
+    fn parse_text_char(&mut self, builder: &mut BlockBuilder, c: char) -> Result<(), ParseError> {
+        if self.lex.mode == Mode::Default {
+            builder.add_char(c);
+            self.advance();
+            return Ok(());
+        }
+        if matches!(c, ' ' | '\t') && self.set_after_blanks() {
+            while matches!(self.peek(), Some(' ' | '\t')) {
+                self.advance();
+            }
+            return Ok(());
+        }
+        if is_ident_start(c) {
+            return self.parse_runt(builder);
+        }
+        let alpha_after = self
+            .peek_at(1)
+            .is_some_and(|next| next.is_ascii_alphabetic());
+        match (self.lex.mode, c) {
+            (_, '.') if alpha_after => {
+                builder.add_char('.');
+                self.advance();
+                self.lex.mode = Mode::RefModifier;
+            }
+            (Mode::RefModifier, '(') => {
+                builder.add_char('(');
+                self.advance();
+                self.lex.mode = Mode::RefMod2;
+            }
+            (Mode::Reference | Mode::RefModifier, '{') => {
+                builder.add_char('{');
+                self.advance();
+            }
+            (Mode::Reference | Mode::RefModifier, '}') => {
+                builder.add_char('}');
+                self.advance();
+                self.lex.pop();
+            }
+            (Mode::Reference | Mode::RefModifier, '[') => {
+                return Err(self.error("unexpected '[' after a reference"));
+            }
+            (Mode::Reference | Mode::RefModifier, _) => self.lex.pop(),
+            (Mode::RefMod2, '\'' | '"') => self.parse_stray_string(builder)?,
+            (Mode::RefMod2, _) if self.number_starts_here() => self.parse_stray_number(builder)?,
+            (Mode::RefMod2 | Mode::Default, _) => {
+                return Err(self.error("unexpected character in an unclosed method call"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether spaces and tabs from here lead to a `#set(`, which swallows them.
+    fn set_after_blanks(&mut self) -> bool {
+        let start = self.pos;
+        while matches!(self.peek(), Some(' ' | '\t')) {
+            self.advance();
+        }
+        let set = self.peek() == Some('#')
+            && self
+                .directive_at(true)
+                .is_some_and(|token| token.directive == Directive::Set);
+        self.pos = start;
+        set
+    }
+
+    /// An identifier where the lexer reads identifiers: Velocity parses it as a reference
+    /// without a `$`, which renders as its own name, whatever follows it in the chain.
+    fn parse_runt(&mut self, builder: &mut BlockBuilder) -> Result<(), ParseError> {
+        let Some(name) = self.parse_identifier() else {
+            return Ok(());
+        };
+        if name == "true" || name == "false" {
+            return Err(self.error("unexpected boolean after a reference"));
+        }
+        if self.lex.mode == Mode::RefMod2 && self.peek() == Some('[') {
+            return Err(self.error("unexpected '[' in an unclosed method call"));
+        }
+        let steps = self.parse_chain()?;
+        builder.add_text(&name);
+        builder.mark_token();
+        if !steps.is_empty() {
+            self.lex.after_reference(&steps);
+        }
+        Ok(())
+    }
+
+    /// A string literal where the lexer reads literals: it renders as written.
+    fn parse_stray_string(&mut self, builder: &mut BlockBuilder) -> Result<(), ParseError> {
+        let start = self.pos;
+        let Some(quote) = self.peek() else {
+            return Ok(());
+        };
+        self.advance();
+        loop {
+            match self.peek() {
+                Some(c) if c == quote => {
+                    self.advance();
+                    if !self.eat(quote) {
+                        break;
+                    }
+                }
+                Some(_) => self.advance(),
+                None => return Err(self.error("unterminated string")),
+            }
+        }
+        builder.add_text(&self.source(start));
+        builder.mark_token();
+        Ok(())
+    }
+
+    /// A number where the lexer reads numbers: it renders as written.
+    fn parse_stray_number(&mut self, builder: &mut BlockBuilder) -> Result<(), ParseError> {
+        let start = self.pos;
+        self.eat('-');
+        while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+            self.advance();
+        }
+        if self.starts_with("..") {
+            return Err(self.error("unexpected '..' in an unclosed method call"));
+        }
+        if self.eat('.') {
+            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                self.advance();
+            }
+        }
+        if self.peek().is_some_and(|c| c == 'e' || c == 'E') {
+            let signed = matches!(self.peek_at(1), Some('+' | '-'));
+            let digit_at = if signed { 2 } else { 1 };
+            if self.peek_at(digit_at).is_some_and(|c| c.is_ascii_digit()) {
+                self.pos = self.pos.saturating_add(digit_at);
+                while self.peek().is_some_and(|c| c.is_ascii_digit()) {
                     self.advance();
                 }
             }
         }
-        Ok((builder.finish(), BlockEnd::Eof))
+        builder.add_text(&self.source(start));
+        builder.mark_token();
+        Ok(())
     }
 
     fn parse_dollar_in_text(
@@ -358,21 +556,25 @@ impl Parser {
         builder: &mut BlockBuilder,
         backslashes: usize,
     ) -> Result<(), ParseError> {
+        if self.lex.mode == Mode::Reference {
+            self.lex.pop();
+        }
+        self.lex.push(Mode::Reference);
         match self.parse_dollar(backslashes)? {
             Dollar::Reference(reference) => {
                 let formal =
                     reference.source.starts_with("${") || reference.source.starts_with("$!{");
-                let pending = if formal {
-                    PendingReference::None
-                } else if matches!(reference.steps.last(), Some(Step::Property(_))) {
-                    PendingReference::Property
+                if formal {
+                    self.lex.pop();
                 } else {
-                    PendingReference::Other
-                };
+                    self.lex.after_reference(&reference.steps);
+                }
                 builder.push_node(Node::Reference(reference));
-                builder.reference_pending = pending;
             }
-            Dollar::Text => builder.add_char('$'),
+            Dollar::Text => {
+                self.lex.pop();
+                builder.add_char('$');
+            }
         }
         Ok(())
     }
@@ -383,10 +585,21 @@ impl Parser {
         builder: &mut BlockBuilder,
     ) -> Result<Option<BlockEnd>, ParseError> {
         let mut count = 0_usize;
-        while self.peek() == Some('\\') {
+        while self.peek_at(count) == Some('\\') {
             count = count.saturating_add(1);
-            self.advance();
         }
+        let before_dollar = self.peek_at(count) == Some('$');
+        match self.lex.mode {
+            Mode::Reference | Mode::RefModifier if !before_dollar => {
+                self.lex.pop();
+                return Ok(None);
+            }
+            Mode::RefMod2 if !before_dollar => {
+                return Err(self.error("unexpected '\\' in an unclosed method call"));
+            }
+            Mode::Default | Mode::Reference | Mode::RefModifier | Mode::RefMod2 => {}
+        }
+        self.pos = self.pos.saturating_add(count);
         match self.peek() {
             Some('$') => {
                 self.parse_dollar_in_text(builder, count)?;
@@ -430,10 +643,7 @@ impl Parser {
         if formal && !self.eat('}') {
             return Err(self.error("expected '}' to close ${...}"));
         }
-        let source: String = self
-            .chars
-            .get(start..self.pos)
-            .map_or_default(|slice| slice.iter().collect());
+        let source = self.source(start);
         Ok(Dollar::Reference(Reference {
             head: head.into(),
             steps,
@@ -443,24 +653,16 @@ impl Parser {
         }))
     }
 
-    /// Whether the `(` under the cursor is followed by a directive without arguments and then by
-    /// something other than a space, `.`, or `:`. Velocity looks three tokens ahead to tell a
-    /// method call from a property, and a directive cannot start an argument, so the `(` is then
-    /// plain text; the text after the directive decides whether the rest still lexes.
-    fn directive_after_paren(&mut self) -> bool {
-        if self.peek_at(1) != Some('#') {
-            return false;
+    /// Whether the `(` under the cursor starts text rather than a method call. Velocity looks
+    /// three tokens ahead to tell a method call from a property, and a directive, a comment,
+    /// or `.name` cannot start an argument, so the `(` is then plain text, read in the state of
+    /// an argument list that never closes.
+    fn paren_is_text(&self) -> bool {
+        match self.peek_at(1) {
+            Some('#') => true,
+            Some('.') => self.peek_at(2).is_some_and(|c| c.is_ascii_alphabetic()),
+            _ => false,
         }
-        let saved = self.pos;
-        self.advance();
-        let token = self.directive_at(false);
-        self.pos = saved;
-        token.is_some_and(|token| {
-            matches!(
-                token.directive,
-                Directive::End | Directive::Else | Directive::Break | Directive::Stop
-            ) && !matches!(self.chars.get(token.end), Some(' ' | '\t' | '.' | ':'))
-        })
     }
 
     /// Parses `.name`, `.name(args)`, and `[index]` steps.
@@ -473,7 +675,7 @@ impl Parser {
                     let Some(name) = self.parse_identifier() else {
                         break;
                     };
-                    if self.peek() == Some('(') && self.directive_after_paren() {
+                    if self.peek() == Some('(') && self.paren_is_text() {
                         steps.push(Step::Property(name.into()));
                         break;
                     }
@@ -542,6 +744,13 @@ impl Parser {
     }
 
     fn parse_arguments(&mut self) -> Result<Vec<Expr>, ParseError> {
+        self.enter()?;
+        let result = self.parse_arguments_inner();
+        self.leave();
+        result
+    }
+
+    fn parse_arguments_inner(&mut self) -> Result<Vec<Expr>, ParseError> {
         self.expect('(')?;
         let mut args = Vec::new();
         self.skip_whitespace();
@@ -569,18 +778,8 @@ impl Parser {
         if backslashes == 0 && self.peek_at(1).is_none() {
             return Err(self.error("a template cannot end with '#'"));
         }
-        if backslashes == 0
-            && self.peek_at(1) == Some('#')
-            && builder.reference_pending == PendingReference::Property
-        {
-            builder.add_text("##");
-            self.pos = self.pos.saturating_add(2);
-            return Ok(None);
-        }
         if backslashes == 0 && self.peek_at(1) == Some('#') {
-            self.skip_line_comment();
-            builder.mark_token();
-            return Ok(None);
+            return Ok(self.parse_line_comment(builder));
         }
         if backslashes == 0 && self.peek_at(1) == Some('*') {
             self.skip_block_comment();
@@ -592,31 +791,17 @@ impl Parser {
             self.copy_unparsed(builder)?;
             return Ok(None);
         }
-        let Some(token) = self.directive_at(backslashes.is_multiple_of(2)) else {
+        let token = self.directive_at(backslashes.is_multiple_of(2));
+        if token
+            .as_ref()
+            .is_none_or(|token| token.directive != Directive::Set)
+            && self.lex.in_reference()
+        {
+            self.lex.pop();
+        }
+        let Some(token) = token else {
             if backslashes == 0 {
-                self.advance();
-                let mut token = String::from("#");
-                while let Some(c) = self
-                    .peek()
-                    .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
-                {
-                    token.push(c);
-                    self.advance();
-                }
-                if token.len() > 1 {
-                    builder.flush();
-                    builder.add_text(&token);
-                    if token
-                        .chars()
-                        .nth(1)
-                        .is_some_and(|c| c.is_ascii_alphabetic())
-                    {
-                        self.parse_macro_call_text(builder)?;
-                    }
-                    builder.mark_token();
-                } else {
-                    builder.add_char('#');
-                }
+                self.parse_unknown_directive(builder)?;
             }
             return Ok(None);
         };
@@ -638,29 +823,139 @@ impl Parser {
         self.run_directive(builder, &token)
     }
 
-    /// `#name(args)` for a name that is not a directive is a call of a macro that is not defined,
-    /// which renders as written; arguments that do not parse are an error.
-    fn parse_macro_call_text(&mut self, builder: &mut BlockBuilder) -> Result<(), ParseError> {
-        if self.peek() != Some('(') {
-            return Ok(());
+    /// `##`: a comment to the end of the line, except where the lexer is still in a reference
+    /// that ended in a property, which reads it as text.
+    fn parse_line_comment(&mut self, builder: &mut BlockBuilder) -> Option<BlockEnd> {
+        match self.lex.mode {
+            Mode::RefModifier | Mode::RefMod2 => {
+                if self.lex.mode == Mode::RefModifier {
+                    self.lex.pop();
+                }
+                builder.add_text("##");
+                self.pos = self.pos.saturating_add(2);
+            }
+            Mode::Default | Mode::Reference => {
+                if self.lex.mode == Mode::Reference {
+                    self.lex.pop();
+                }
+                self.skip_line_comment();
+                builder.mark_token();
+            }
         }
+        None
+    }
+
+    /// A `#` that starts no directive: `#name` is a macro call, which API Gateway renders as
+    /// written, `#@name(...)...#end` a block macro call that renders as written with its
+    /// body, and anything else is text.
+    fn parse_unknown_directive(&mut self, builder: &mut BlockBuilder) -> Result<(), ParseError> {
         let start = self.pos;
         self.advance();
+        if self.peek() == Some('@') && self.peek_at(1).is_some_and(is_ident_start) {
+            return self.parse_block_macro_call(builder, start);
+        }
+        let mut token = String::from("#");
+        while let Some(c) = self
+            .peek()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        {
+            token.push(c);
+            self.advance();
+        }
+        if token.len() > 1 {
+            builder.flush();
+            builder.add_text(&token);
+            if token
+                .chars()
+                .nth(1)
+                .is_some_and(|c| c.is_ascii_alphabetic())
+            {
+                self.parse_macro_call_text(builder)?;
+            }
+            builder.mark_token();
+        } else {
+            builder.add_char('#');
+        }
+        Ok(())
+    }
+
+    fn parse_block_macro_call(
+        &mut self,
+        builder: &mut BlockBuilder,
+        start: usize,
+    ) -> Result<(), ParseError> {
+        self.advance();
+        while self.peek().is_some_and(is_word_char) {
+            self.advance();
+        }
+        let name_end = self.pos;
+        self.skip_whitespace();
+        if self.peek() != Some('(') {
+            self.pos = name_end;
+            builder.add_text(&self.source(start));
+            builder.mark_token();
+            return Ok(());
+        }
+        self.parse_directive_args()?;
+        self.eat_line_end();
+        let (_, end) = self.parse_block(true)?;
+        if !matches!(end, BlockEnd::End) {
+            return Err(self.error("missing #end for a block macro call"));
+        }
+        builder.flush();
+        builder.add_text(&self.source(start));
+        builder.mark_token();
+        Ok(())
+    }
+
+    /// `#name(args)` for a name that is not a directive is a call of a macro, which renders as
+    /// written; arguments that do not parse are an error.
+    fn parse_macro_call_text(&mut self, builder: &mut BlockBuilder) -> Result<(), ParseError> {
+        let start = self.pos;
+        self.skip_whitespace();
+        if self.peek() != Some('(') {
+            self.pos = start;
+            return Ok(());
+        }
+        self.parse_directive_args()?;
+        builder.add_text(&self.source(start));
+        Ok(())
+    }
+
+    /// The parenthesized arguments of a directive: words and values separated by whitespace
+    /// or commas.
+    fn parse_directive_args(&mut self) -> Result<Vec<DirectiveArg>, ParseError> {
+        self.enter()?;
+        let result = self.parse_directive_args_inner();
+        self.leave();
+        result
+    }
+
+    fn parse_directive_args_inner(&mut self) -> Result<Vec<DirectiveArg>, ParseError> {
+        self.expect('(')?;
+        let mut args = Vec::new();
         loop {
             self.skip_whitespace();
             if self.eat(')') {
-                break;
+                return Ok(args);
             }
-            self.eat(',');
-            self.skip_whitespace();
-            self.parse_parameter()?;
+            if self.eat(',') {
+                self.skip_whitespace();
+            }
+            if self
+                .peek()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '@')
+                && !self.word_ahead("true")
+                && !self.word_ahead("false")
+            {
+                while self.peek().is_some_and(is_word_char) {
+                    self.advance();
+                }
+                args.push(DirectiveArg::Word);
+            } else {
+                args.push(DirectiveArg::Value(self.parse_parameter()?));
+            }
         }
-        let call: String = self
-            .chars
-            .get(start..self.pos)
-            .map_or_default(|s| s.iter().collect());
-        builder.add_text(&call);
-        Ok(())
     }
 
     fn skip_line_comment(&mut self) {
@@ -740,7 +1035,9 @@ impl Parser {
             "foreach" => Directive::Foreach,
             "break" => Directive::Break,
             "stop" => Directive::Stop,
-            "macro" | "parse" | "include" | "evaluate" | "define" => Directive::Unsupported,
+            "define" => Directive::Define,
+            "macro" => Directive::Macro,
+            "parse" | "include" => Directive::Unsupported,
             _ => return None,
         };
         if directive == Directive::Set && set_needs_paren {
@@ -788,26 +1085,35 @@ impl Parser {
             Directive::If => {
                 let node = self.parse_if()?;
                 builder.push_node(Node::If(node));
-                builder.reference_pending = PendingReference::None;
                 Ok(None)
             }
             Directive::Foreach => {
                 let node = self.parse_foreach()?;
                 builder.push_node(Node::Foreach(node));
-                builder.reference_pending = PendingReference::None;
+                Ok(None)
+            }
+            Directive::Define => {
+                let node = self.parse_define()?;
+                builder.push_node(Node::Define(node));
+                Ok(None)
+            }
+            Directive::Macro => {
+                self.parse_macro()?;
+                builder.mark_token();
                 Ok(None)
             }
             Directive::Break | Directive::Stop if self.peek() == Some('(') => {
                 Err(self.error("unexpected '(' after a directive without arguments"))
             }
-            Directive::Break => {
-                builder.push_node(Node::Break);
-                self.eat_line_end();
-                Ok(None)
-            }
-            Directive::Stop => {
-                builder.push_node(Node::Stop);
-                self.eat_line_end();
+            Directive::Break | Directive::Stop => {
+                builder.push_node(if token.directive == Directive::Break {
+                    Node::Break
+                } else {
+                    Node::Stop
+                });
+                if self.lex.mode != Mode::RefMod2 {
+                    self.eat_line_end();
+                }
                 Ok(None)
             }
             Directive::End => {
@@ -924,18 +1230,70 @@ impl Parser {
         self.skip_whitespace();
         self.expect(')')?;
         self.eat_line_end();
+        let body = self.parse_block_to_end("#foreach")?;
+        Ok(Foreach {
+            var: var.into(),
+            source,
+            body,
+        })
+    }
+
+    /// The body of a block directive, which must end with `#end`.
+    fn parse_block_to_end(&mut self, directive: &str) -> Result<Block, ParseError> {
         let (body, end) = self.parse_block(true)?;
         match end {
-            BlockEnd::End => Ok(Foreach {
-                var: var.into(),
-                source,
-                body,
-            }),
-            BlockEnd::Eof => Err(self.error("missing #end for #foreach")),
+            BlockEnd::End => Ok(body),
+            BlockEnd::Eof => Err(self.error(&format!("missing #end for {directive}"))),
             BlockEnd::Else | BlockEnd::ElseIf(_) => {
-                Err(self.error("#else is not allowed in #foreach"))
+                Err(self.error(&format!("#else is not allowed in {directive}")))
             }
         }
+    }
+
+    /// `#define($name)...#end`. The block's variable is the reference's name; Velocity takes it
+    /// from the reference's first token, so `$a.b` defines `$a`, and a quiet, formal, or
+    /// non-reference argument names no variable a template can reach.
+    fn parse_define(&mut self) -> Result<Define, ParseError> {
+        self.skip_whitespace();
+        if self.peek() != Some('(') {
+            return Err(self.error("#define needs a reference"));
+        }
+        let args = self.parse_directive_args()?;
+        let name = match args.as_slice() {
+            [DirectiveArg::Value(Expr::Reference(reference))] => {
+                let plain = !reference.quiet && !reference.source.starts_with("${");
+                plain.then(|| Arc::clone(&reference.head))
+            }
+            [DirectiveArg::Value(_)] => None,
+            [DirectiveArg::Word] => return Err(self.error("invalid argument to #define")),
+            _ => return Err(self.error("#define takes exactly one reference")),
+        };
+        self.eat_line_end();
+        let body = self.parse_block_to_end("#define")?;
+        Ok(Define {
+            name,
+            body: Arc::new(body),
+        })
+    }
+
+    /// `#macro(name $arg ...)...#end`. API Gateway does not define inline macros: the
+    /// definition is parsed, checked as Velocity checks it, and ignored.
+    fn parse_macro(&mut self) -> Result<(), ParseError> {
+        self.skip_whitespace();
+        if self.peek() != Some('(') {
+            return Err(self.error("a macro declaration requires at least a name argument"));
+        }
+        let args = self.parse_directive_args()?;
+        let mut args = args.iter();
+        if !matches!(args.next(), Some(DirectiveArg::Word)) {
+            return Err(self.error("the first argument to #macro must be the macro name"));
+        }
+        if args.any(|arg| matches!(arg, DirectiveArg::Word)) {
+            return Err(self.error("macro arguments must be references"));
+        }
+        self.eat_line_end();
+        self.parse_block_to_end("#macro")?;
+        Ok(())
     }
 
     // ----- expressions -----
@@ -1023,10 +1381,24 @@ impl Parser {
                 _ => return Ok(left),
             };
             self.advance();
+            let right_start = self.pos;
             self.skip_whitespace();
             let right = self.parse_multiplicative()?;
-            left = Expr::Binary(op, Box::new(left), Box::new(right));
+            left = self.sourced_math(op, left, right, right_start);
         }
+    }
+
+    /// An arithmetic node, with the text Velocity prints for it when it is null: its right
+    /// operand and the whitespace around it.
+    fn sourced_math(&mut self, op: BinaryOp, left: Expr, right: Expr, right_start: usize) -> Expr {
+        let operand_end = self.pos;
+        self.skip_whitespace();
+        let text = self.source(right_start);
+        self.pos = operand_end;
+        Expr::Sourced(
+            Box::new(Expr::Binary(op, Box::new(left), Box::new(right))),
+            text.into(),
+        )
     }
 
     fn parse_multiplicative(&mut self) -> Result<Expr, ParseError> {
@@ -1040,9 +1412,10 @@ impl Parser {
                 _ => return Ok(left),
             };
             self.advance();
+            let right_start = self.pos;
             self.skip_whitespace();
             let right = self.parse_unary()?;
-            left = Expr::Binary(op, Box::new(left), Box::new(right));
+            left = self.sourced_math(op, left, right, right_start);
         }
     }
 
@@ -1063,11 +1436,13 @@ impl Parser {
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         if self.peek() == Some('(') {
             self.advance();
+            let start = self.pos;
             self.skip_whitespace();
             let inner = self.parse_expression()?;
             self.skip_whitespace();
+            let text = self.source(start);
             self.expect(')')?;
-            return Ok(inner);
+            return Ok(Expr::Sourced(Box::new(inner), text.into()));
         }
         self.parse_parameter()
     }
@@ -1154,23 +1529,21 @@ impl Parser {
                 }
             }
         }
-        let text: String = self
-            .chars
-            .get(start..self.pos)
-            .map_or_default(|slice| slice.iter().collect());
+        let text = self.source(start);
         if is_float {
             let value: f64 = text
                 .parse()
                 .map_err(|_| self.error("invalid floating point literal"))?;
-            Ok(Expr::Literal(Value::Double(value)))
-        } else {
-            let value: i64 = text
-                .parse()
-                .map_err(|_| ParseError::IntegerLiteralTooLarge {
-                    literal: text.clone(),
-                    line: self.line(),
-                })?;
-            Ok(Expr::Literal(Value::Int(value)))
+            return Ok(Expr::Literal(Value::Double(value)));
+        }
+        // Velocity reads an integer literal as an Integer, else a Long, else a BigInteger.
+        match BigInt::parse(&text) {
+            Ok(Some(value)) => Ok(Expr::Literal(Value::big_integer(value))),
+            Ok(None) => Err(self.error("invalid integer literal")),
+            Err(_) => Err(ParseError::IntegerLiteralTooLarge {
+                literal: text,
+                line: self.line(),
+            }),
         }
     }
 
@@ -1238,8 +1611,13 @@ impl Parser {
             let last = self.parse_parameter()?;
             self.skip_whitespace();
             self.expect(']')?;
-            let valid =
-                |expr: &Expr| matches!(expr, Expr::Literal(Value::Int(_)) | Expr::Reference(_));
+            let valid = |expr: &Expr| {
+                matches!(
+                    expr,
+                    Expr::Literal(Value::Int(_) | Value::Long(_) | Value::BigInt(_))
+                        | Expr::Reference(_)
+                )
+            };
             if !valid(&first) || !valid(&last) {
                 return Err(self.error("a range needs integer or reference endpoints"));
             }

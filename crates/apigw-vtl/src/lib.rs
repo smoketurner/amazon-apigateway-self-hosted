@@ -8,31 +8,48 @@
 //! The behavior is that of the real engine, including its quirks: an undefined reference renders
 //! as its own source text (`$!x` renders nothing), directive-only lines vanish, `#foreach` stops
 //! after 1,000 iterations, `#if` treats literals as false, and values print like Java
-//! (`{k=v}`, `[a, b]`, `1.0E10`). Templates are checked against output produced by Apache
-//! Velocity 1.7 itself; see `tools/vtl-oracle` in the repository.
+//! (`{k=v}`, `[a, b]`, `1.0E10`). Arithmetic follows Velocity's `MathUtils`: `Integer` widens to
+//! `Long`, a `long` that overflows becomes a `BigInteger`, and a `BigInteger` meeting a `double`
+//! computes as `BigDecimal`. Map keys keep their Java types, so `{1: 'a'}` and `{'1': 'a'}` are
+//! different maps. Templates are checked against output produced by Apache Velocity 1.7 itself;
+//! see `tools/vtl-oracle` in the repository.
+//!
+//! # API Gateway's own behavior
+//!
+//! Where a deployed API Gateway was recorded to differ from Velocity's defaults, this crate does
+//! what API Gateway does (the recordings are `parity/fixtures/rest-vtl-*.json`):
+//!
+//! - `#macro` definitions are parsed and ignored, so a macro call renders as written; `#evaluate`
+//!   renders as written; `#define` binds a block that renders each time its reference is used.
+//! - `#parse` and `#include` are [`ParseError::UnsupportedDirective`]; API Gateway answers such
+//!   templates with a 500.
+//! - `$input.path` of a definite path that addresses nothing is an empty string, and
+//!   `$input.json` of such a path, or of a path whose function fails (`$.a..price.sum()`), is
+//!   `""`.
+//! - API Gateway renders a `null` reference as nothing; [`NullReferences::Empty`] selects that,
+//!   and the default, [`NullReferences::Literal`], is Velocity's.
 //!
 //! # Differences from Velocity and Java
 //!
 //! Output is compared with Apache Velocity 1.7 and Jayway `JsonPath` 2.9 (see `tools/vtl-oracle`).
 //! What is known to differ:
 //!
-//! - `#macro`, `#parse`, `#include`, `#evaluate`, and `#define` are rejected as
-//!   [`ParseError::UnsupportedDirective`].
-//! - Integer arithmetic that leaves 64 bits is a [`RenderError::IntegerOverflow`]; Java promotes to
-//!   `BigInteger`. JSON integers beyond 64 bits become doubles.
-//! - `Map` keys are strings, so `{1: 'a'}` and `$m.get('1')` agree where Java distinguishes them.
+//! - Numbers are bounded: a `BigInteger` or `BigDecimal` beyond 32,768 bits or a scale of 10,000
+//!   is a [`RenderError::NumberTooLarge`], and a JSON number written with more than 4,096
+//!   characters makes the body invalid.
 //! - There is no reflection (`$x.class`, `getClass()`), and arrays are lists: `split` prints as a
 //!   list instead of `[Ljava.lang.String;@...`. `Map.keySet()`, `values()`, and `entrySet()` are
-//!   snapshots without `get(int)` or `[i]`, as the Java collections have none.
+//!   snapshots without `get(int)` or `[i]`, as the Java collections have none. A `#define` block
+//!   has no `equals` or `hashCode`.
 //! - Only the methods templates use are implemented, for the JDK 8 API. A call that matches no
 //!   method renders as written, as in Velocity; Velocity instead throws for a single-overload
 //!   method called with the wrong arguments.
-//! - Lexer states that make Velocity's output depend on earlier tokens are reproduced for the
-//!   common cases (whitespace before `#set`, `##` after a property, `[` after a reference and a
-//!   directive). Odd sequences such as `$#set(...)` or `# #set(...)` are not.
-//! - JSON paths: functions after `..`, such as `$..price.max()`, are rejected, and Jayway's lenient
-//!   handling of some malformed paths is an error here. `$util.parseJson` accepts strict JSON, not
-//!   json-smart's permissive syntax.
+//! - Velocity's lexer states that outlive a reference are reproduced: whitespace before `#set`,
+//!   `##` after a property, and the reference and method-argument states that `#set`, comments,
+//!   and a `(` left open after `$a.b` carry into the following text. Odd sequences such as
+//!   `$#set(...)` or `# #set(...)` are not.
+//! - JSON paths: Jayway's lenient handling of some malformed paths is an error here.
+//!   `$util.parseJson` accepts strict JSON, not json-smart's permissive syntax.
 //! - `$input.json` returns compact JSON and `$input.params(name)` matches headers
 //!   case-insensitively; both follow API Gateway's documentation but have not been compared with a
 //!   live API.
@@ -54,8 +71,10 @@
 mod ast;
 mod error;
 mod eval;
+mod json;
 mod jsonpath;
 mod methods;
+mod number;
 mod ops;
 mod parser;
 mod util;
@@ -65,7 +84,8 @@ use std::str::FromStr;
 
 pub use error::{ParseError, RenderError};
 pub use jsonpath::{JsonPath, JsonPathError};
-pub use value::{DepthExceeded, List, Map, MapEntry, Value};
+pub use number::{BigDecimal, BigInt, NumberTooLarge};
+pub use value::{BlockRef, DepthExceeded, List, Map, MapEntry, Value};
 
 /// A parsed template, ready to be rendered any number of times.
 #[derive(Debug, Clone)]
@@ -78,9 +98,8 @@ impl Template {
     ///
     /// # Errors
     ///
-    /// Returns [`ParseError`] when Velocity 1.7 would reject the template, when it uses a
-    /// directive this crate does not evaluate (`#macro`, `#parse`, `#include`, `#evaluate`,
-    /// `#define`), or when it nests too deeply.
+    /// Returns [`ParseError`] when Velocity 1.7 would reject the template, when it uses
+    /// `#parse` or `#include`, or when it nests too deeply.
     pub fn parse(source: &str) -> Result<Self, ParseError> {
         Ok(Self {
             block: parser::Parser::parse(source)?,
@@ -196,6 +215,19 @@ impl Default for Limits {
     }
 }
 
+/// How a reference renders when it is `null`: undefined, or a method or path that found
+/// nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum NullReferences {
+    /// As written, as Apache Velocity 1.7 renders it: `$missing` renders `$missing`, and the
+    /// quiet form `$!missing` renders nothing.
+    #[default]
+    Literal,
+    /// As nothing, as API Gateway renders it.
+    Empty,
+}
+
 /// Renders templates for one request.
 ///
 /// `$context` and `$stageVariables` are maps the gateway owns: the renderer shares them, so
@@ -206,12 +238,14 @@ pub struct Renderer<'a> {
     context: Map,
     stage_variables: Map,
     limits: Limits,
+    null_references: NullReferences,
 }
 
 impl std::fmt::Debug for Renderer<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Renderer")
             .field("limits", &self.limits)
+            .field("null_references", &self.null_references)
             .finish_non_exhaustive()
     }
 }
@@ -225,6 +259,7 @@ impl<'a> Renderer<'a> {
             context: Map::new(),
             stage_variables: Map::new(),
             limits: Limits::default(),
+            null_references: NullReferences::default(),
         }
     }
 
@@ -249,6 +284,14 @@ impl<'a> Renderer<'a> {
         self
     }
 
+    /// Sets how a `null` reference renders: as written, as Velocity does (the default), or as
+    /// nothing, as API Gateway does.
+    #[must_use]
+    pub const fn with_null_references(mut self, null_references: NullReferences) -> Self {
+        self.null_references = null_references;
+        self
+    }
+
     /// Renders `template`.
     ///
     /// # Errors
@@ -261,6 +304,7 @@ impl<'a> Renderer<'a> {
             self.context.clone(),
             self.stage_variables.clone(),
             self.limits,
+            self.null_references,
         )
         .render(&template.block)
     }

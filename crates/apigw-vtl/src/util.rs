@@ -46,7 +46,7 @@ pub(crate) fn call(name: &str, args: &[Value]) -> Result<Option<Value>, RenderEr
     };
     let result = match name {
         "escapeJavaScript" => Value::from(escape_java_script(text)),
-        "parseJson" => Value::from_json(text).map_err(|err| fail(name, err.to_string()))?,
+        "parseJson" => Value::from_json(text).map_err(|err| fail(name, err))?,
         "urlEncode" => Value::from(url_encode(text)),
         "urlDecode" => Value::from(url_decode(text).map_err(|message| fail(name, message))?),
         "base64Encode" => Value::from(STANDARD.encode(text.as_bytes())),

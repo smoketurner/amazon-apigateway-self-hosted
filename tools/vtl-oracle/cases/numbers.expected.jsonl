@@ -1,0 +1,45 @@
+{"name":"bigint-literal","output":"99999999999999999999-99999999999999999999","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigint-literal-long-edge","output":"9223372036854775808-9223372036854775809-9223372036854775808","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigint-add-overflow","output":"9223372036854775808","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigint-sub-overflow","output":"-9223372036854775809-9223372036854775809","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigint-mul-overflow","output":"8507059173023461584739690778423250124918446744073709551616","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigint-mul-signs","output":"-1844674407370955161618446744073709551616","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigint-mul-near-limit","output":"9223372037000250000","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigint-min-long","output":"-92233720368547758080-92233720368547758089223372036854775808","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigint-divide","output":"14285714285714285714-1428571428571428571433333333333","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigint-modulo","output":"16999999999","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigint-modulo-negative","error":"ArithmeticException"}
+{"name":"bigint-divide-zero","output":"[$b][$c]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigint-compare","output":"gt eq   gtd ltd","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigint-zero","output":"0 zero1","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigint-string","output":"99999999999999999999x99999999999999999999","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigint-methods","output":"99999999999999999999 7766279631452241919 1661992959 1.0E20 1 true -99999999999999999999 99999999999999999999","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigint-collections","output":"[99999999999999999999, 1] trueb {99999999999999999999=b}","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigint-index","output":"[$l[$a]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigint-truth","output":"T false","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigint-power","output":"99999999999999999996000000000000000000059999999999999999999600000000000000000001","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigint-context","output":"99999999999999999999","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}},"n":99999999999999999999,"d":99999999999999999999.5}}
+{"name":"bigdecimal-add","output":"99999999999999999999.599999999999999999999.1000000000000000055511151231257827021181583404541015625-99999999999999999998.75","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigdecimal-multiply","output":"1999999999999999999981.00000000000000008332642060758598535009797182079279464885519642328017597038656121078373451154810112873061456184586859308183193206787109375E-109.999999999999999292828793998801450030377163250631722239580257710413103132112952839317783497723966011367257688737102217587000840826050307441619224846363067626953125E-21","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigdecimal-divide","output":"333333333333333333330.0","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigdecimal-modulo","error":"ArithmeticException"}
+{"name":"bigdecimal-chain","output":"299999999999999999998.524999999999999999999.9100000000000000000000.75","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigdecimal-round","output":"333333333333333333316666666666666666670","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigdecimal-compare","output":"gt eq","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"bigdecimal-methods","output":"99999999999999999999.5 1 1.0E20 1661992959 7766279631452241919 1 99999999999999999999.5","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"int-long-types","output":"21474836481false","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"int-long-contains","output":"truefalse false","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"long-method-argument","output":"$s.substring($k)","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"long-value","output":"false 5","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"int-size","output":"x","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"long-division","output":"-3-13.50.5","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"json-big-integer","output":"123456789012345678901234567890123456789012345678901234567891 {\"n\":123456789012345678901234567890}","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"json-unsigned-long","output":"1844674407370955161518446744073709551616","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"json-long-max","output":"92233720368547758079223372036854775808","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"json-negative-big","output":"-123456789012345678901234567890","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"json-long-decimal","output":"1.23456789012345678901 0.1 Infinity {\"n\":1.23456789012345678901,\"m\":0.1,\"k\":Infinity}","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"json-decimal-arithmetic","output":"1.2345678901234567892.234567890123456789","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"json-decimal-divide","output":"2.000000000000000000020.33333333333333333334","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"json-exponents","output":"100.0 12345678901234567890.123 -0.0","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"json-number-types","output":"truetrue","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"parse-json-big","output":"123456789012345678901234567890 1.23456789012345678901","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}

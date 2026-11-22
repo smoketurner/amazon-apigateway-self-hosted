@@ -10,8 +10,9 @@ use apigw_regex::{JavaRegex, Replacement};
 
 use crate::error::RenderError;
 use crate::eval::Interpreter;
+use crate::json;
 use crate::jsonpath::{JsonPath, JsonPathError};
-use crate::ops::int_to_f64;
+use crate::ops::{double_to_int, double_to_long, long_to_f64};
 use crate::util;
 use crate::value::{List, Map, MapEntry, Value};
 
@@ -45,7 +46,7 @@ fn void() -> MethodResult {
 }
 
 fn int(value: usize) -> Value {
-    Value::Int(i64::try_from(value).unwrap_or(i64::MAX))
+    Value::Int(i32::try_from(value).unwrap_or(i32::MAX))
 }
 
 impl Interpreter<'_> {
@@ -77,9 +78,16 @@ impl Interpreter<'_> {
                 Self::map_method(map, name, args)
             }
             Value::Entry(entry) => Self::entry_method(entry, name, args),
-            Value::Int(_) | Value::Double(_) | Value::Bool(_) => {
-                Self::scalar_method(target, name, args)
-            }
+            Value::Int(_)
+            | Value::Long(_)
+            | Value::BigInt(_)
+            | Value::Double(_)
+            | Value::BigDecimal(_)
+            | Value::Bool(_) => Self::scalar_method(target, name, args),
+            Value::Block(block) => match (name, args) {
+                ("toString", []) => Ok(self.block_to_string(block)?.map(Value::from)),
+                _ => Ok(None),
+            },
             Value::Input => self.input_method(name, args),
             Value::Util => util::call(name, args),
             Value::Null | Value::Loop(_) => Ok(None),
@@ -164,7 +172,7 @@ impl Interpreter<'_> {
                 })
             }
             ("hashCode", []) => ok(Value::Int(java_hash(units))),
-            ("codePointAt", [Value::Int(index)]) if fits_i32(*index) => {
+            ("codePointAt", [Value::Int(index)]) => {
                 let at = usize::try_from(*index).ok().filter(|i| *i < units.len());
                 let Some(at) = at else {
                     return Err(fail(
@@ -174,11 +182,11 @@ impl Interpreter<'_> {
                 };
                 let scalar = char::decode_utf16(units.iter().skip(at).copied()).next();
                 ok(Value::Int(match scalar {
-                    Some(Ok(c)) => i64::from(u32::from(c)),
-                    _ => units.get(at).map_or(0, |unit| i64::from(*unit)),
+                    Some(Ok(c)) => i32::try_from(u32::from(c)).unwrap_or(0),
+                    _ => units.get(at).map_or(0, |unit| i32::from(*unit)),
                 }))
             }
-            ("charAt", [Value::Int(index)]) if fits_i32(*index) => {
+            ("charAt", [Value::Int(index)]) => {
                 let unit = usize::try_from(*index)
                     .ok()
                     .and_then(|i| units.get(i))
@@ -191,26 +199,22 @@ impl Interpreter<'_> {
                     )),
                 }
             }
-            ("substring", [Value::Int(begin)]) if fits_i32(*begin) => {
-                Self::substring(units, *begin, None)
-            }
-            ("substring", [Value::Int(begin), Value::Int(end)])
-                if fits_i32(*begin) && fits_i32(*end) =>
-            {
-                Self::substring(units, *begin, Some(*end))
+            ("substring", [Value::Int(begin)]) => Self::substring(units, i64::from(*begin), None),
+            ("substring", [Value::Int(begin), Value::Int(end)]) => {
+                Self::substring(units, i64::from(*begin), Some(i64::from(*end)))
             }
             ("indexOf", [Value::Str(needle)]) => ok(index_of(units, needle, 0)),
-            ("indexOf", [Value::Str(needle), Value::Int(from)]) if fits_i32(*from) => {
-                ok(index_of(units, needle, *from))
+            ("indexOf", [Value::Str(needle), Value::Int(from)]) => {
+                ok(index_of(units, needle, i64::from(*from)))
             }
             ("lastIndexOf", [Value::Str(needle)]) => ok(last_index_of(units, needle, i64::MAX)),
-            ("lastIndexOf", [Value::Str(needle), Value::Int(from)]) if fits_i32(*from) => {
-                ok(last_index_of(units, needle, *from))
+            ("lastIndexOf", [Value::Str(needle), Value::Int(from)]) => {
+                ok(last_index_of(units, needle, i64::from(*from)))
             }
             ("contains", [Value::Str(part)]) => ok(text.contains(&**part)),
             ("startsWith", [Value::Str(prefix)]) => ok(text.starts_with(&**prefix)),
-            ("startsWith", [Value::Str(prefix), Value::Int(offset)]) if fits_i32(*offset) => {
-                ok(starts_with_at(units, prefix, *offset))
+            ("startsWith", [Value::Str(prefix), Value::Int(offset)]) => {
+                ok(starts_with_at(units, prefix, i64::from(*offset)))
             }
             ("endsWith", [Value::Str(suffix)]) => ok(text.ends_with(&**suffix)),
             _ => Ok(None),
@@ -267,8 +271,8 @@ impl Interpreter<'_> {
                     .map_err(|err| fail(name, err.to_string()))?)
             }
             ("split", [Value::Str(pattern)]) => self.split(text, pattern, 0),
-            ("split", [Value::Str(pattern), Value::Int(limit)]) if fits_i32(*limit) => {
-                self.split(text, pattern, i32::try_from(*limit).unwrap_or(0))
+            ("split", [Value::Str(pattern), Value::Int(limit)]) => {
+                self.split(text, pattern, *limit)
             }
 
             _ => Ok(None),
@@ -317,7 +321,7 @@ impl Interpreter<'_> {
             ("size", []) => ok(int(list.len())),
             ("isEmpty", []) => ok(list.is_empty()),
             ("toString", []) => ok(Value::List(list.clone()).to_java_string()?),
-            ("get", [Value::Int(index)]) if fits_i32(*index) => {
+            ("get", [Value::Int(index)]) => {
                 let len = list.len();
                 let resolved = usize::try_from(*index).ok().filter(|i| *i < len);
                 match resolved.and_then(|i| list.get(i)) {
@@ -330,15 +334,15 @@ impl Interpreter<'_> {
                 list.snapshot()
                     .iter()
                     .position(|v| v.java_equals(item))
-                    .map_or(-1, |i| i64::try_from(i).unwrap_or(-1)),
+                    .map_or(-1, |i| i32::try_from(i).unwrap_or(-1)),
             )),
             ("lastIndexOf", [item]) => ok(Value::Int(
                 list.snapshot()
                     .iter()
                     .rposition(|v| v.java_equals(item))
-                    .map_or(-1, |i| i64::try_from(i).unwrap_or(-1)),
+                    .map_or(-1, |i| i32::try_from(i).unwrap_or(-1)),
             )),
-            ("subList", [Value::Int(from), Value::Int(to)]) if fits_i32(*from) && fits_i32(*to) => {
+            ("subList", [Value::Int(from), Value::Int(to)]) => {
                 let len = list.len();
                 let (Ok(from), Ok(to)) = (usize::try_from(*from), usize::try_from(*to)) else {
                     return Err(fail(name, "negative index"));
@@ -378,7 +382,7 @@ impl Interpreter<'_> {
                 list.push(item.clone());
                 ok(true)
             }
-            ("add", [Value::Int(index), item]) if fits_i32(*index) => {
+            ("add", [Value::Int(index), item]) => {
                 let len = list.len();
                 let at = usize::try_from(*index).ok().filter(|i| *i <= len);
                 let Some(at) = at else {
@@ -393,7 +397,7 @@ impl Interpreter<'_> {
                 list.with(|items| items.extend(extra));
                 ok(changed)
             }
-            ("remove", [Value::Int(index)]) if fits_i32(*index) => {
+            ("remove", [Value::Int(index)]) => {
                 let len = list.len();
                 let at = usize::try_from(*index).ok().filter(|i| *i < len);
                 match at {
@@ -415,7 +419,7 @@ impl Interpreter<'_> {
                 list.with(Vec::clear);
                 void()
             }
-            ("set", [Value::Int(index), item]) if fits_i32(*index) => {
+            ("set", [Value::Int(index), item]) => {
                 let len = list.len();
                 let at = usize::try_from(*index).ok().filter(|i| *i < len);
                 match at {
@@ -438,45 +442,32 @@ impl Interpreter<'_> {
             ("size", []) => ok(int(map.len())),
             ("isEmpty", []) => ok(map.is_empty()),
             ("toString", []) => ok(Value::Map(map.clone()).to_java_string()?),
-            ("get", [key]) => ok(Self::map_key(key)?.and_then(|k| map.get(&k))),
-            ("getOrDefault", [key, default]) => ok(Self::map_key(key)?
-                .and_then(|k| map.get(&k))
-                .unwrap_or_else(|| default.clone())),
-            ("containsKey", [key]) => ok(Self::map_key(key)?.is_some_and(|k| map.contains_key(&k))),
+            ("get", [key]) => ok(map.get_value(key)),
+            ("getOrDefault", [key, default]) => {
+                ok(map.get_value(key).unwrap_or_else(|| default.clone()))
+            }
+            ("containsKey", [key]) => ok(map.contains_value_key(key)),
             ("containsValue", [value]) => {
                 ok(map.entries().iter().any(|(_, v)| v.java_equals(value)))
             }
-            ("put", [key, value]) => {
-                let Some(key) = Self::map_key(key)? else {
-                    return ok(Value::Null);
-                };
-                ok(map.insert(key, value.clone()))
-            }
-            ("putIfAbsent", [key, value]) => {
-                let Some(key) = Self::map_key(key)? else {
-                    return ok(Value::Null);
-                };
-                match map.get(&key) {
-                    Some(existing) if !existing.is_null() => ok(existing),
-                    _ => ok(map.insert(key, value.clone())),
-                }
-            }
-            ("remove", [key]) => ok(Self::map_key(key)?.and_then(|k| map.remove(&k))),
+            ("put", [key, value]) => ok(map.insert_value(key.clone(), value.clone())),
+            ("putIfAbsent", [key, value]) => match map.get_value(key) {
+                Some(existing) if !existing.is_null() => ok(existing),
+                _ => ok(map.insert_value(key.clone(), value.clone())),
+            },
+            ("remove", [key]) => ok(map.remove_value(key)),
             ("putAll", [Value::Map(other)]) => {
                 for (key, value) in other.entries() {
-                    map.insert(key, value);
+                    map.insert_value(key, value);
                 }
                 void()
             }
             ("clear", []) => {
-                map.with(indexmap::IndexMap::clear);
+                map.clear();
                 void()
             }
             ("keySet", []) => ok(Value::List(List::collection(
-                map.entries()
-                    .into_iter()
-                    .map(|(key, _)| Value::Str(key))
-                    .collect(),
+                map.entries().into_iter().map(|(key, _)| key).collect(),
             ))),
             ("values", []) => ok(Value::List(List::collection(
                 map.entries().into_iter().map(|(_, v)| v).collect(),
@@ -494,7 +485,7 @@ impl Interpreter<'_> {
 
     fn entry_method(entry: &Arc<MapEntry>, name: &str, args: &[Value]) -> MethodResult {
         match (name, args) {
-            ("getKey", []) => ok(Value::Str(Arc::clone(&entry.key))),
+            ("getKey", []) => ok(entry.key.clone()),
             ("getValue", []) => ok(entry.value.clone()),
             ("toString", []) => ok(Value::Entry(Arc::clone(entry)).to_java_string()?),
             _ => Ok(None),
@@ -507,19 +498,40 @@ impl Interpreter<'_> {
         match (target, name, args) {
             (_, "toString", []) => ok(target.to_java_string()?),
             (_, "equals", [other]) => ok(target.java_equals(other)),
-            (Value::Int(n), "intValue", []) => ok(Value::Int(i64::from(int_value(*n)))),
-            (Value::Int(n), "longValue", []) => ok(Value::Int(*n)),
-            (Value::Int(n), "doubleValue", []) => ok(Value::Double(int_to_f64(*n))),
+            (Value::Int(n), "intValue", []) => ok(Value::Int(*n)),
+            (Value::Int(n), "longValue", []) => ok(Value::Long(i64::from(*n))),
+            (Value::Int(n), "doubleValue", []) => ok(Value::Double(f64::from(*n))),
             (Value::Int(n), "compareTo", [Value::Int(other)]) => {
-                ok(Value::Int(i64::from(n.cmp(other) as i8)))
+                ok(Value::Int(i32::from(n.cmp(other) as i8)))
             }
+            (Value::Long(n), "intValue", []) => ok(Value::Int(low_int(*n))),
+            (Value::Long(n), "longValue", []) => ok(Value::Long(*n)),
+            (Value::Long(n), "doubleValue", []) => ok(Value::Double(long_to_f64(*n))),
+            (Value::Long(n), "compareTo", [Value::Long(other)]) => {
+                ok(Value::Int(i32::from(n.cmp(other) as i8)))
+            }
+            (Value::BigInt(n), "intValue", []) => ok(Value::Int(n.int_value())),
+            (Value::BigInt(n), "longValue", []) => ok(Value::Long(n.long_value())),
+            (Value::BigInt(n), "doubleValue", []) => ok(Value::Double(n.to_f64())),
+            (Value::BigInt(n), "signum", []) => ok(Value::Int(n.signum())),
+            (Value::BigInt(n), "negate", []) => ok(Value::BigInt(Arc::new(n.negate()))),
+            (Value::BigInt(n), "abs", []) => ok(Value::BigInt(Arc::new(n.abs()))),
+            (Value::BigInt(n), "compareTo", [Value::BigInt(other)]) => {
+                ok(Value::Int(i32::from(n.cmp(other) as i8)))
+            }
+            (Value::BigDecimal(d), "intValue", []) => ok(Value::Int(d.int_value())),
+            (Value::BigDecimal(d), "longValue", []) => ok(Value::Long(d.long_value())),
+            (Value::BigDecimal(d), "doubleValue", []) => ok(Value::Double(d.to_f64())),
+            (Value::BigDecimal(d), "signum", []) => ok(Value::Int(d.signum())),
+            (Value::BigDecimal(d), "scale", []) => ok(Value::Int(d.scale())),
+            (Value::BigDecimal(d), "toPlainString", []) => ok(d.to_plain_string()),
             (Value::Double(d), "intValue", []) => ok(Value::Int(double_to_int(*d))),
-            (Value::Double(d), "longValue", []) => ok(Value::Int(double_to_long(*d))),
+            (Value::Double(d), "longValue", []) => ok(Value::Long(double_to_long(*d))),
             (Value::Double(d), "doubleValue", []) => ok(Value::Double(*d)),
             (Value::Double(d), "isNaN", []) => ok(d.is_nan()),
             (Value::Double(d), "isInfinite", []) => ok(d.is_infinite()),
             (Value::Double(d), "compareTo", [Value::Double(other)]) => {
-                ok(Value::Int(i64::from(d.total_cmp(other) as i8)))
+                ok(Value::Int(i32::from(d.total_cmp(other) as i8)))
             }
             (Value::Bool(b), "booleanValue", []) => ok(*b),
             _ => Ok(None),
@@ -553,7 +565,10 @@ impl Interpreter<'_> {
                             .header
                             .entries()
                             .into_iter()
-                            .find(|(name, _)| name.eq_ignore_ascii_case(key))
+                            .find(|(name, _)| {
+                                name.as_str()
+                                    .is_some_and(|name| name.eq_ignore_ascii_case(key))
+                            })
                             .map(|(_, value)| value)
                     });
                 match found {
@@ -564,19 +579,25 @@ impl Interpreter<'_> {
             ("path", [Value::Str(path)]) => {
                 self.charge_for_size(self.input.body().len())?;
                 let document = self.body_document()?;
-                ok(evaluate_path(path, &document)?)
-            }
-            ("json", [Value::Str(path)]) => {
-                self.charge_for_size(self.input.body().len())?;
-                let document = self.body_document()?;
-                // A definite path that addresses nothing renders as an empty JSON string, not
-                // `null` (measured against a deployed REST API).
+                // A definite path that addresses nothing is an empty string, not `null`
+                // (parity/fixtures/rest-vtl-input.json).
                 match parse_path(path)?
                     .find(&document)
                     .map_err(|err| invalid_path(path, &err))?
                 {
-                    Some(value) => ok(value.to_json()?),
-                    None => ok("\"\"".to_owned()),
+                    Some(value) => ok(value),
+                    None => ok(""),
+                }
+            }
+            ("json", [Value::Str(path)]) => {
+                self.charge_for_size(self.input.body().len())?;
+                let document = self.body_document()?;
+                // A definite path that addresses nothing, or a function that fails on what the
+                // path found, renders as an empty JSON string (measured against a deployed REST
+                // API: parity/fixtures/rest-vtl-input.json, rest-vtl-deep-scan-functions.json).
+                match parse_path(path)?.find(&document) {
+                    Ok(Some(value)) => ok(value.to_json()?),
+                    Ok(None) | Err(_) => ok("\"\"".to_owned()),
                 }
             }
             _ => Ok(None),
@@ -609,12 +630,7 @@ fn parse_body(body: &str) -> Result<Value, RenderError> {
         return Ok(Value::Map(Map::new()));
     }
     if text.starts_with(['{', '[', '"']) {
-        let mut values = serde_json::Deserializer::from_str(text).into_iter::<serde_json::Value>();
-        return match values.next() {
-            Some(Ok(first)) => Ok(Value::from(&first)),
-            Some(Err(err)) => Err(RenderError::InvalidBodyJson(err.to_string())),
-            None => Err(RenderError::InvalidBodyJson("no value".to_owned())),
-        };
+        return json::parse_first(text).map_err(RenderError::InvalidBodyJson);
     }
     Ok(match Value::from_json(text) {
         // A body of `null` reads as no body at all.
@@ -622,12 +638,6 @@ fn parse_body(body: &str) -> Result<Value, RenderError> {
         Ok(scalar) => scalar,
         Err(_) => Value::string(body),
     })
-}
-
-fn evaluate_path(path: &str, document: &Value) -> Result<Value, RenderError> {
-    parse_path(path)?
-        .evaluate(document)
-        .map_err(|err| invalid_path(path, &err))
 }
 
 fn parse_path(path: &str) -> Result<JsonPath, RenderError> {
@@ -661,41 +671,17 @@ const fn string_method_arity(name: &str) -> Option<&'static [usize]> {
     }
 }
 
-/// Whether a Java `Integer` can hold the value; Velocity does not narrow a `Long` argument.
-const fn fits_i32(value: i64) -> bool {
-    value >= -2_147_483_648 && value <= 2_147_483_647
-}
-
 /// `String.hashCode`.
-fn java_hash(units: &[u16]) -> i64 {
-    let hash = units.iter().fold(0_i32, |acc, unit| {
+fn java_hash(units: &[u16]) -> i32 {
+    units.iter().fold(0_i32, |acc, unit| {
         acc.wrapping_mul(31).wrapping_add(i32::from(*unit))
-    });
-    i64::from(hash)
+    })
 }
 
 /// `Long.intValue`: keeps the low 32 bits.
-fn int_value(value: i64) -> i32 {
+fn low_int(value: i64) -> i32 {
     let [a, b, c, d, ..] = value.to_le_bytes();
     i32::from_le_bytes([a, b, c, d])
-}
-
-/// `(int) double`: truncates, saturates, and maps NaN to zero.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "Java's narrowing from double saturates the same way"
-)]
-fn double_to_int(value: f64) -> i64 {
-    i64::from(value as i32)
-}
-
-/// `(long) double`: truncates, saturates, and maps NaN to zero.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "Java's narrowing from double saturates the same way"
-)]
-const fn double_to_long(value: f64) -> i64 {
-    value as i64
 }
 
 fn index_of(units: &[u16], needle: &str, from: i64) -> Value {
@@ -703,14 +689,14 @@ fn index_of(units: &[u16], needle: &str, from: i64) -> Value {
     let start = usize::try_from(from.max(0)).unwrap_or(usize::MAX);
     if start > units.len() {
         return Value::Int(if needle.is_empty() {
-            i64::try_from(units.len()).unwrap_or(-1)
+            i32::try_from(units.len()).unwrap_or(-1)
         } else {
             -1
         });
     }
     let found = (start..=units.len().saturating_sub(needle.len()))
         .find(|i| units.get(*i..i.saturating_add(needle.len())) == Some(needle.as_slice()));
-    Value::Int(found.map_or(-1, |i| i64::try_from(i).unwrap_or(-1)))
+    Value::Int(found.map_or(-1, |i| i32::try_from(i).unwrap_or(-1)))
 }
 
 fn last_index_of(units: &[u16], needle: &str, from: i64) -> Value {
@@ -723,7 +709,7 @@ fn last_index_of(units: &[u16], needle: &str, from: i64) -> Value {
     let found = (0..=start)
         .rev()
         .find(|i| units.get(*i..i.saturating_add(needle.len())) == Some(needle.as_slice()));
-    Value::Int(found.map_or(-1, |i| i64::try_from(i).unwrap_or(-1)))
+    Value::Int(found.map_or(-1, |i| i32::try_from(i).unwrap_or(-1)))
 }
 
 fn starts_with_at(units: &[u16], prefix: &str, offset: i64) -> bool {
@@ -745,13 +731,13 @@ fn equals_ignore_case(a: &str, b: &str) -> bool {
 fn compare_to(a: &[u16], b: &[u16]) -> Value {
     for (x, y) in a.iter().zip(b) {
         if x != y {
-            return Value::Int(i64::from(*x).saturating_sub(i64::from(*y)));
+            return Value::Int(i32::from(*x).saturating_sub(i32::from(*y)));
         }
     }
     Value::Int(
-        i64::try_from(a.len())
-            .unwrap_or(0)
-            .saturating_sub(i64::try_from(b.len()).unwrap_or(0)),
+        i32::try_from(a.len())
+            .unwrap_or(i32::MAX)
+            .saturating_sub(i32::try_from(b.len()).unwrap_or(i32::MAX)),
     )
 }
 

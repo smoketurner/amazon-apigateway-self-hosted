@@ -1,6 +1,6 @@
 #![no_main]
 
-use apigw_vtl::{InputParams, Limits, Renderer, SimpleInput, Template};
+use apigw_vtl::{InputParams, Limits, NullReferences, Renderer, SimpleInput, Template};
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
@@ -8,6 +8,7 @@ use libfuzzer_sys::fuzz_target;
 struct Request {
     template: String,
     body: String,
+    empty_nulls: bool,
 }
 
 fuzz_target!(|request: Request| {
@@ -19,5 +20,15 @@ fuzz_target!(|request: Request| {
         .with_output_bytes(1 << 20)
         .with_steps(200_000)
         .with_depth(64);
-    drop(Renderer::new(&input).with_limits(limits).render(&template));
+    let null_references = if request.empty_nulls {
+        NullReferences::Empty
+    } else {
+        NullReferences::Literal
+    };
+    drop(
+        Renderer::new(&input)
+            .with_limits(limits)
+            .with_null_references(null_references)
+            .render(&template),
+    );
 });
