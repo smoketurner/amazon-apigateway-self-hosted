@@ -11,6 +11,7 @@ mod format;
 mod metrics;
 mod observer;
 mod queue;
+mod sampling;
 #[cfg(test)]
 #[expect(clippy::panic, reason = "a test helper that fails loudly on timeout")]
 pub(crate) mod testing;
@@ -33,7 +34,7 @@ use crate::telemetry::{GatewayMetrics, RequestTracer};
 use destination::Destination;
 use metrics::MetricsAggregator;
 use queue::{CloudWatchShipper, FirehoseShipper, LogQueue, Shipper, Worker, XRayShipper};
-use trace::Sampler;
+use sampling::{RulePoller, Sampler};
 
 /// Where one kind of log goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -86,8 +87,13 @@ pub(crate) struct Settings {
     pub(crate) metrics: Option<MetricsSettings>,
     pub(crate) tracing: TraceDelivery,
     /// Percentage of requests sampled once the first request of each second
-    /// has been, for requests whose caller made no sampling decision.
+    /// has been, for requests whose caller made no sampling decision and
+    /// no X-Ray sampling rule applies.
     pub(crate) sampling_percent: u8,
+    /// Read X-Ray's sampling rules and reservoir quotas (with `tracing: Aws`).
+    pub(crate) sampling_rules: bool,
+    /// Trace requests the caller sampled on stages without tracing enabled.
+    pub(crate) passive: bool,
     pub(crate) stream: StreamName,
 }
 
@@ -150,6 +156,7 @@ impl Observability {
             closed: CancellationToken::new(),
         });
         observability.start_metrics_publisher();
+        observability.start_rule_poller();
         observability
     }
 
@@ -173,6 +180,8 @@ impl Observability {
                 metrics: None,
                 tracing: TraceDelivery::Off,
                 sampling_percent: 0,
+                sampling_rules: false,
+                passive: false,
                 stream: StreamName::for_pod(
                     Some("test"),
                     None,
@@ -215,6 +224,41 @@ impl Observability {
 
     pub(crate) fn instrumentation(&self) -> &Instrumentation {
         &self.instrumentation
+    }
+
+    /// Polls X-Ray for sampling rules while segments go to X-Ray.
+    fn start_rule_poller(&self) {
+        if self.settings.tracing != TraceDelivery::Aws || !self.settings.sampling_rules {
+            return;
+        }
+        let poller = RulePoller::new(
+            aws_sdk_xray::Client::new(&self.sdk_config),
+            Arc::clone(&self.sampler),
+        );
+        let publishing = self.publishing.clone();
+        self.workers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .spawn(poller.run(publishing));
+    }
+
+    /// Whether stages without tracing continue traces their callers sampled.
+    pub(crate) fn passive_tracing(&self) -> bool {
+        self.settings.passive && self.settings.tracing != TraceDelivery::Off
+    }
+
+    /// `arn:{partition}:apigateway:{region}::/restapis/{api_id}/stages/{stage}`,
+    /// the resource X-Ray sampling rules match.
+    pub(crate) fn stage_arn(&self, api_id: &str, stage: &str) -> String {
+        let region = self.sdk_config.region().map_or("", Region::as_ref);
+        let partition = if region.starts_with("cn-") {
+            "aws-cn"
+        } else if region.starts_with("us-gov-") {
+            "aws-us-gov"
+        } else {
+            "aws"
+        };
+        format!("arn:{partition}:apigateway:{region}::/restapis/{api_id}/stages/{stage}")
     }
 
     /// The aggregator requests record metrics into, when metrics are on.

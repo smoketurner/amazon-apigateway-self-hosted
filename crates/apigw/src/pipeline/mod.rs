@@ -132,6 +132,7 @@ impl<'a> Pipeline<'a> {
             return self.encode(ctx, hit).await;
         }
         let started = Instant::now();
+        let started_at = jiff::Timestamp::now();
         let span = ctx.otel.as_ref().map(|server| {
             server.integration(&SpanTarget {
                 kind: self.route.integration.kind(),
@@ -140,7 +141,12 @@ impl<'a> Pipeline<'a> {
         });
         ctx.otel_integration.clone_from(&span);
         let result = self.integrate(ctx).await;
-        let timing = IntegrationTiming(started.elapsed());
+        let timing = IntegrationTiming {
+            started_at,
+            elapsed: started.elapsed(),
+            status: ctx.integration.status,
+            failed: result.is_err(),
+        };
         ctx.otel_integration = None;
         if let Some(span) = span {
             if let Some(status) = ctx.integration.status {

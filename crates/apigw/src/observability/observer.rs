@@ -15,7 +15,8 @@ use super::exec::Outcome;
 use super::format::AccessLogFormat;
 use super::metrics::{MetricKey, MetricsAggregator, RequestMetrics, RouteDimensions};
 use super::queue::{LogEvent, LogQueue};
-use super::trace::{Sampler, SegmentOutcome, Trace};
+use super::sampling::{Sampler, SamplingRequest};
+use super::trace::{IntegrationCall, SegmentOutcome, Trace};
 use super::{Instrumentation, Observability};
 use crate::cache::CacheOutcome;
 use crate::canary::Release;
@@ -29,10 +30,18 @@ use crate::telemetry::{
     ApiStage, RequestLabels, RequestOutcome, RequestSpan, RequestTracer, ServerRequest,
 };
 
-/// How long the integration of a request took, attached to the response by the
-/// pipeline so the observer can report `$context.integrationLatency`.
+/// The integration call of a request, attached to the response by the
+/// pipeline so the observer can report `$context.integrationLatency` and the
+/// X-Ray integration subsegment.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct IntegrationTiming(pub(crate) Duration);
+pub(crate) struct IntegrationTiming {
+    pub(crate) started_at: jiff::Timestamp,
+    pub(crate) elapsed: Duration,
+    /// The backend's status, when it answered.
+    pub(crate) status: Option<u16>,
+    /// The call failed without a usable answer.
+    pub(crate) failed: bool,
+}
 
 /// Methods that may appear as the `Method` metric dimension. A route that
 /// accepts any method would otherwise let clients create a metric per
@@ -53,13 +62,26 @@ struct Metrics {
     api: String,
 }
 
+/// Whether the stage traces requests itself or only continues its callers'.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TracingMode {
+    /// The stage has tracing enabled: requests are sampled here when the
+    /// caller made no decision.
+    Active,
+    /// X-Ray's passive mode: only requests the caller sampled are traced.
+    Passive,
+}
+
 /// X-Ray tracing for the stage.
 #[derive(Debug)]
 struct Tracing {
+    mode: TracingMode,
     sampler: Arc<Sampler>,
     queue: LogQueue,
     /// The segment name, `{api name}/{stage}`.
     segment_name: String,
+    /// The stage's ARN, which sampling rules may match.
+    resource_arn: String,
 }
 
 impl Tracing {
@@ -72,12 +94,31 @@ impl Tracing {
     /// an unusable header get a new trace.
     fn start(&self, request: &mut Request) -> Option<Trace> {
         let header = |name: &HeaderName| request.headers().get(name).and_then(|v| v.to_str().ok());
-        let trace = Trace::start(
-            header(&Self::TRACE_HEADER),
-            header(&Self::TRACEPARENT),
-            &self.sampler,
-            jiff::Timestamp::now(),
-        )?;
+        let now = jiff::Timestamp::now();
+        let trace = match self.mode {
+            TracingMode::Active => Trace::start(
+                header(&Self::TRACE_HEADER),
+                header(&Self::TRACEPARENT),
+                || {
+                    self.sampler.sample(
+                        &SamplingRequest {
+                            service_name: &self.segment_name,
+                            host: header(&header::HOST).unwrap_or_default(),
+                            method: request.method().as_str(),
+                            url_path: request.uri().path(),
+                            resource_arn: &self.resource_arn,
+                        },
+                        now,
+                    )
+                },
+                now,
+            ),
+            TracingMode::Passive => Trace::continue_sampled(
+                header(&Self::TRACE_HEADER),
+                header(&Self::TRACEPARENT),
+                now,
+            ),
+        }?;
         match HeaderValue::try_from(trace.header().to_string()) {
             Ok(value) => {
                 request.headers_mut().insert(Self::TRACE_HEADER, value);
@@ -132,6 +173,8 @@ pub(crate) struct Pending {
     otel: Option<RequestSpan>,
     /// The request body's length, when known before it is read.
     request_bytes: u64,
+    /// The route's integration type and backend, for the X-Ray subsegment.
+    integration: Option<(&'static str, Option<String>)>,
 }
 
 impl StageObserver {
@@ -202,12 +245,17 @@ impl StageObserver {
             api: Self::api_dimension(model, api_id),
         });
 
-        let tracing = model
-            .stage
-            .tracing_enabled
-            .then(|| observability.trace_queue())
-            .flatten()
-            .map(|queue| Tracing {
+        let mode = if model.stage.tracing_enabled {
+            Some(TracingMode::Active)
+        } else {
+            observability
+                .passive_tracing()
+                .then_some(TracingMode::Passive)
+        };
+        let tracing = mode
+            .and_then(|mode| Some((mode, observability.trace_queue()?)))
+            .map(|(mode, queue)| Tracing {
+                mode,
                 sampler: observability.sampler(),
                 queue,
                 segment_name: format!(
@@ -215,6 +263,7 @@ impl StageObserver {
                     Self::api_dimension(model, api_id),
                     api.stage_name()
                 ),
+                resource_arn: observability.stage_arn(api_id, api.stage_name()),
             });
 
         let labels = ApiStage::new(api_id, Some(api.stage_name()));
@@ -294,6 +343,7 @@ impl StageObserver {
             labels,
             otel,
             request_bytes: Self::request_length(request),
+            integration: route.map(|route| (route.integration.kind(), route.integration.target())),
         })
     }
 
@@ -315,7 +365,7 @@ impl StageObserver {
         };
         let timing = response.extensions_mut().remove::<IntegrationTiming>();
         let latency_ms = Self::millis(pending.started.elapsed());
-        let integration_ms = timing.map(|t| Self::millis(t.0));
+        let integration_ms = timing.map(|t| Self::millis(t.elapsed));
         let status = response.status().as_u16();
         let settings = pending.route.as_ref().and_then(|key| inner.routes.get(key));
         let response_length = Self::response_length(&response);
@@ -328,7 +378,7 @@ impl StageObserver {
             RequestOutcome {
                 status,
                 latency: pending.started.elapsed(),
-                integration_latency: timing.map(|t| t.0),
+                integration_latency: timing.map(|t| t.elapsed),
                 cache_hit: cache.map(|c| c == CacheOutcome::Hit),
                 data_processed,
             },
@@ -377,14 +427,16 @@ impl StageObserver {
             pending.trace.filter(Trace::is_sampled),
             inner.tracing.as_ref(),
         ) {
+            let call = Self::integration_call(timing, pending.integration.as_ref(), &context);
             let segment = trace.segment(
                 &tracing.segment_name,
                 &context,
-                SegmentOutcome {
+                &SegmentOutcome {
                     started: pending.started_at,
                     ended: jiff::Timestamp::now(),
                     status,
                     content_length: Self::response_length(&response),
+                    integration: call,
                 },
             );
             tracing.queue.push(LogEvent::now(segment));
@@ -402,6 +454,30 @@ impl StageObserver {
             }
         }
         response
+    }
+
+    /// The integration call to report as an X-Ray subsegment: one that went to
+    /// a backend (not `MOCK`).
+    fn integration_call<'a>(
+        timing: Option<IntegrationTiming>,
+        integration: Option<&'a (&'static str, Option<String>)>,
+        context: &'a RequestContext,
+    ) -> Option<IntegrationCall<'a>> {
+        timing
+            .zip(integration)
+            .filter(|(_, (kind, _))| *kind != "MOCK")
+            .map(|(timing, (kind, target))| IntegrationCall {
+                kind,
+                target: target.as_deref(),
+                method: context.method.as_str(),
+                started: timing.started_at,
+                ended: timing
+                    .started_at
+                    .checked_add(timing.elapsed)
+                    .unwrap_or(timing.started_at),
+                status: timing.status,
+                failed: timing.failed,
+            })
     }
 
     /// The request's `$context` plus what is only known once the response is.
@@ -541,7 +617,7 @@ mod tests {
     use crate::model::{
         AccessLogSettings, IntegrationOverrides, MethodSettings, SettingsScope, StageSettings,
     };
-    use crate::observability::testing::MockAws;
+    use crate::observability::testing::{MockAws, Reply};
     use crate::observability::{
         Delivery, LogGroup, MetricsDestination, MetricsNamespace, MetricsSettings, Settings,
         StreamName, TraceDelivery,
@@ -599,6 +675,8 @@ mod tests {
             execution_logs: execution,
             tracing: TraceDelivery::Aws,
             sampling_percent: 100,
+            sampling_rules: false,
+            passive: false,
             metrics: metrics.then(|| MetricsSettings {
                 destination: MetricsDestination::LogGroup(LogGroup::new("metrics-group")),
                 namespace: MetricsNamespace::default(),
@@ -1001,18 +1079,119 @@ mod tests {
         assert_eq!(segment["http"]["request"]["user_agent"], "curl/8");
         assert!(segment.get("parent_id").is_none());
         let trace_id = segment["trace_id"].as_str().unwrap();
-        let segment_id = segment["id"].as_str().unwrap();
+        let subsegment = &segment["subsegments"][0];
+        assert_eq!(subsegment["name"], "127.0.0.1");
+        assert_eq!(subsegment["namespace"], "remote");
+        assert_eq!(subsegment["http"]["request"]["method"], "GET");
+        assert_eq!(subsegment["http"]["response"]["status"], 200);
+        assert!(
+            subsegment["start_time"].as_f64().unwrap() >= segment["start_time"].as_f64().unwrap()
+        );
+        let parent = subsegment["id"].as_str().unwrap();
+        assert_ne!(parent, segment["id"].as_str().unwrap());
         assert_eq!(
             seen["x-amzn-trace-id"],
-            format!("Root={trace_id};Parent={segment_id};Sampled=1")
+            format!("Root={trace_id};Parent={parent};Sampled=1"),
+            "the backend's parent is the integration subsegment"
         );
         let traceparent = seen["traceparent"].as_str().unwrap();
         assert_eq!(
             traceparent,
             format!(
-                "00-{}-{segment_id}-01",
+                "00-{}-{parent}-01",
                 trace_id.strip_prefix("1-").unwrap().replace('-', "")
             )
+        );
+    }
+
+    fn passive() -> Settings {
+        Settings {
+            passive: true,
+            ..settings(Delivery::Off, Delivery::Off, false)
+        }
+    }
+
+    #[tokio::test]
+    async fn passive_mode_traces_only_what_callers_sampled_on_untraced_stages() {
+        let aws = MockAws::start().await;
+        let addr = upstream().await;
+        let (router, observability) = serve_doc(
+            &aws,
+            &proxy_doc(addr),
+            ApiKind::Rest,
+            StageSettings::default(),
+            passive(),
+        );
+        let (_, untouched) = traced_get(&router, &[]).await;
+        assert!(
+            untouched.get("x-amzn-trace-id").is_none(),
+            "no trace is started"
+        );
+        let declined = format!("Root={ROOT};Sampled=0");
+        let (_, passed) = traced_get(&router, &[("x-amzn-trace-id", &declined)]).await;
+        assert_eq!(
+            passed["x-amzn-trace-id"], declined,
+            "left as the caller sent it"
+        );
+        let sampled = format!("Root={ROOT};Parent={PARENT};Sampled=1");
+        let (_, continued) = traced_get(&router, &[("x-amzn-trace-id", &sampled)]).await;
+        observability.close().await;
+        let segments = segments(&aws);
+        assert_eq!(segments.len(), 1, "{segments:?}");
+        assert_eq!(segments[0]["trace_id"], ROOT);
+        assert_eq!(segments[0]["parent_id"], PARENT);
+        assert!(
+            continued["x-amzn-trace-id"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("Root={ROOT};Parent=")),
+        );
+    }
+
+    #[tokio::test]
+    async fn sampling_rules_are_read_from_x_ray_when_tracing_to_aws() {
+        let aws = MockAws::start().await;
+        aws.reply(
+            "/GetSamplingRules",
+            Reply::json(
+                &json!({"SamplingRuleRecords": [{"SamplingRule": {
+                    "RuleName": "none", "ResourceARN": "*", "Priority": 1, "FixedRate": 0.0,
+                    "ReservoirSize": 0, "ServiceName": "Traced/*", "ServiceType": "*",
+                    "Host": "*", "HTTPMethod": "*", "URLPath": "*", "Version": 1}}]})
+                .to_string(),
+            ),
+        );
+        let addr = upstream().await;
+        let (router, observability) = serve_doc(
+            &aws,
+            &proxy_doc(addr),
+            ApiKind::Rest,
+            tracing_stage(),
+            Settings {
+                sampling_rules: true,
+                ..settings(Delivery::Off, Delivery::Off, false)
+            },
+        );
+        aws.wait_for("/GetSamplingRules", 1).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let sampled: usize = {
+            let mut sampled = 0;
+            for _ in 0..5 {
+                let (_, seen) = traced_get(&router, &[]).await;
+                if seen["x-amzn-trace-id"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with("Sampled=1")
+                {
+                    sampled += 1;
+                }
+            }
+            sampled
+        };
+        observability.close().await;
+        assert!(
+            sampled <= 1,
+            "the rule's 0% rate applies, not --xray-sampling-percent 100 ({sampled} sampled)"
         );
     }
 

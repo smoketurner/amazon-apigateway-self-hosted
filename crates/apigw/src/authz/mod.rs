@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 
+pub(crate) use glob::{CaseSensitivity, Glob};
 pub(crate) use jwt::{Challenge, IssuerEndpoint, KeyStore};
 pub(crate) use policy::MethodArn;
 pub(crate) use resource_policy::{ResourcePolicies, RoutePolicy};

@@ -32,6 +32,10 @@ const STAGE_VARIABLE_ENV_PREFIX: &str = "APIGW_STAGE_VARIABLE_";
 #[derive(Debug, Parser)]
 #[command(version, about)]
 #[command(group(ArgGroup::new("api").required(true).args(["rest_api_id", "http_api_id", "openapi_file", "domain_names"])))]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is an independent command-line switch"
+)]
 pub(crate) struct Config {
     /// REST API (v1) to mirror. Requires --stage.
     #[arg(long, env = "APIGW_REST_API_ID", requires = "stage")]
@@ -288,9 +292,21 @@ pub(crate) struct Config {
     pub(crate) tracing: TraceDelivery,
 
     /// Percentage of requests X-Ray traces after the first request each second,
-    /// when the caller made no sampling decision (X-Ray's default rule is 5).
+    /// when the caller made no sampling decision and no X-Ray sampling rule
+    /// applies (X-Ray's default rule is 5).
     #[arg(long, env = "APIGW_XRAY_SAMPLING_PERCENT", default_value_t = 5, value_parser = clap::value_parser!(u8).range(..=100))]
     pub(crate) xray_sampling_percent: u8,
+
+    /// With `--tracing aws`, read the account's X-Ray sampling rules and
+    /// reservoir quotas (`GetSamplingRules`, `GetSamplingTargets`) instead of
+    /// applying only the default rule.
+    #[arg(long, env = "APIGW_XRAY_SAMPLING_RULES", default_value_t = true, action = clap::ArgAction::Set)]
+    pub(crate) xray_sampling_rules: bool,
+
+    /// X-Ray passive mode: on stages without tracing enabled, trace requests
+    /// whose caller sampled them (`Sampled=1`), and start no traces.
+    #[arg(long, env = "APIGW_XRAY_PASSIVE")]
+    pub(crate) xray_passive: bool,
 
     /// Export metrics and request spans with OpenTelemetry, configured with the
     /// standard `OTEL_*` environment variables (`OTEL_EXPORTER_OTLP_ENDPOINT`,
@@ -395,6 +411,8 @@ impl Config {
                 }),
             tracing: self.tracing,
             sampling_percent: self.xray_sampling_percent,
+            sampling_rules: self.xray_sampling_rules,
+            passive: self.xray_passive,
             stream: StreamName::for_pod(
                 self.log_stream.as_deref(),
                 hostname,
@@ -513,6 +531,21 @@ mod tests {
         );
         let tracing = parse(&["--openapi-file", "a.json", "--tracing", "stdout"]).unwrap();
         assert_eq!(tracing.tracing, TraceDelivery::Stdout);
+    }
+
+    #[test]
+    fn sampling_rules_are_read_unless_turned_off_and_passive_mode_is_opt_in() {
+        let settings = |args: &[&str]| {
+            let mut all = vec!["--openapi-file", "a.json"];
+            all.extend_from_slice(args);
+            parse(&all).unwrap().observability(None)
+        };
+        let default = settings(&[]);
+        assert!(default.sampling_rules);
+        assert!(!default.passive);
+        let tuned = settings(&["--xray-sampling-rules", "false", "--xray-passive"]);
+        assert!(!tuned.sampling_rules);
+        assert!(tuned.passive);
     }
 
     #[test]

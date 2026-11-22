@@ -1294,6 +1294,8 @@ mod tests {
                     }),
                     tracing: TraceDelivery::Off,
                     sampling_percent: 0,
+                    sampling_rules: false,
+                    passive: false,
                     stream: StreamName::for_pod(
                         Some("pod"),
                         None,
