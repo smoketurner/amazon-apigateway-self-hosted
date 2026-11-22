@@ -7,11 +7,89 @@
     "unresolvable_host": "apigw-parity.invalid"
   },
   "openapi": {
-    "openapi": "3.0.1",
+    "components": {},
     "info": {
-      "title": "apigw-ref-rest-policy",
       "description": "REST API with a resource policy, kept apart so the policy cannot block the other reference routes.",
+      "title": "apigw-ref-rest-policy",
       "version": "1.0"
+    },
+    "openapi": "3.0.1",
+    "paths": {
+      "/ip-denied": {
+        "get": {
+          "responses": {
+            "200": {
+              "content": {},
+              "description": "200 response"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "passthroughBehavior": "when_no_match",
+            "requestTemplates": {
+              "application/json": "{\"statusCode\": 200}"
+            },
+            "responses": {
+              "default": {
+                "responseTemplates": {
+                  "application/json": "{\"route\":\"ip-denied\"}"
+                },
+                "statusCode": "200"
+              }
+            },
+            "type": "mock"
+          }
+        }
+      },
+      "/ip-restricted": {
+        "get": {
+          "responses": {
+            "200": {
+              "content": {},
+              "description": "200 response"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "passthroughBehavior": "when_no_match",
+            "requestTemplates": {
+              "application/json": "{\"statusCode\": 200}"
+            },
+            "responses": {
+              "default": {
+                "responseTemplates": {
+                  "application/json": "{\"route\":\"ip-restricted\"}"
+                },
+                "statusCode": "200"
+              }
+            },
+            "type": "mock"
+          }
+        }
+      },
+      "/open": {
+        "get": {
+          "responses": {
+            "200": {
+              "content": {},
+              "description": "200 response"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "passthroughBehavior": "when_no_match",
+            "requestTemplates": {
+              "application/json": "{\"statusCode\": 200}"
+            },
+            "responses": {
+              "default": {
+                "responseTemplates": {
+                  "application/json": "{\"route\":\"open\"}"
+                },
+                "statusCode": "200"
+              }
+            },
+            "type": "mock"
+          }
+        }
+      }
     },
     "servers": [
       {
@@ -23,99 +101,16 @@
         }
       }
     ],
-    "paths": {
-      "/ip-denied": {
-        "get": {
-          "responses": {
-            "200": {
-              "description": "200 response",
-              "content": {}
-            }
-          },
-          "x-amazon-apigateway-integration": {
-            "responses": {
-              "default": {
-                "statusCode": "200",
-                "responseTemplates": {
-                  "application/json": "{\"route\":\"ip-denied\"}"
-                }
-              }
-            },
-            "requestTemplates": {
-              "application/json": "{\"statusCode\": 200}"
-            },
-            "passthroughBehavior": "when_no_match",
-            "type": "mock"
-          }
-        }
-      },
-      "/open": {
-        "get": {
-          "responses": {
-            "200": {
-              "description": "200 response",
-              "content": {}
-            }
-          },
-          "x-amazon-apigateway-integration": {
-            "responses": {
-              "default": {
-                "statusCode": "200",
-                "responseTemplates": {
-                  "application/json": "{\"route\":\"open\"}"
-                }
-              }
-            },
-            "requestTemplates": {
-              "application/json": "{\"statusCode\": 200}"
-            },
-            "passthroughBehavior": "when_no_match",
-            "type": "mock"
-          }
-        }
-      },
-      "/ip-restricted": {
-        "get": {
-          "responses": {
-            "200": {
-              "description": "200 response",
-              "content": {}
-            }
-          },
-          "x-amazon-apigateway-integration": {
-            "responses": {
-              "default": {
-                "statusCode": "200",
-                "responseTemplates": {
-                  "application/json": "{\"route\":\"ip-restricted\"}"
-                }
-              }
-            },
-            "requestTemplates": {
-              "application/json": "{\"statusCode\": 200}"
-            },
-            "passthroughBehavior": "when_no_match",
-            "type": "mock"
-          }
-        }
-      }
-    },
-    "components": {},
-    "x-amazon-apigateway-security-policy": "TLS_1_0",
     "x-amazon-apigateway-policy": {
-      "Version": "2012-10-17",
       "Statement": [
         {
+          "Action": "execute-api:Invoke",
           "Effect": "Allow",
           "Principal": "*",
-          "Action": "execute-api:Invoke",
           "Resource": "arn:aws:execute-api:us-east-1:[account-id]:3wj6q6vhae/*"
         },
         {
-          "Effect": "Deny",
-          "Principal": "*",
           "Action": "execute-api:Invoke",
-          "Resource": "arn:aws:execute-api:us-east-1:[account-id]:3wj6q6vhae/*/GET/ip-denied",
           "Condition": {
             "IpAddress": {
               "aws:SourceIp": [
@@ -123,13 +118,13 @@
                 "::/0"
               ]
             }
-          }
-        },
-        {
+          },
           "Effect": "Deny",
           "Principal": "*",
+          "Resource": "arn:aws:execute-api:us-east-1:[account-id]:3wj6q6vhae/*/GET/ip-denied"
+        },
+        {
           "Action": "execute-api:Invoke",
-          "Resource": "arn:aws:execute-api:us-east-1:[account-id]:3wj6q6vhae/*/GET/ip-restricted",
           "Condition": {
             "NotIpAddress": {
               "aws:SourceIp": [
@@ -137,9 +132,14 @@
                 "::/0"
               ]
             }
-          }
+          },
+          "Effect": "Deny",
+          "Principal": "*",
+          "Resource": "arn:aws:execute-api:us-east-1:[account-id]:3wj6q6vhae/*/GET/ip-restricted"
         }
-      ]
-    }
+      ],
+      "Version": "2012-10-17"
+    },
+    "x-amazon-apigateway-security-policy": "TLS_1_0"
   }
 }

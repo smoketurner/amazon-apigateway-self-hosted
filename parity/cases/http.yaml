@@ -181,9 +181,9 @@ cases:
       Origin: https://example.com
       Access-Control-Request-Method: POST
       Access-Control-Request-Headers: content-type
-    unrecorded: true
     compare:
       headers: [access-control-allow-origin, access-control-allow-methods, access-control-allow-headers, access-control-max-age, access-control-expose-headers, access-control-allow-credentials, vary, content-type]
+      body: ignore
 
   - name: http-cors-preflight-disallowed-origin
     api: http
@@ -192,9 +192,9 @@ cases:
     headers:
       Origin: https://not-allowed.example
       Access-Control-Request-Method: POST
-    unrecorded: true
     compare:
       headers: [access-control-allow-origin, access-control-allow-methods, access-control-allow-headers, access-control-max-age, vary, content-type]
+      body: ignore
 
   - name: http-cors-preflight-disallowed-method
     api: http
@@ -203,15 +203,14 @@ cases:
     headers:
       Origin: https://example.com
       Access-Control-Request-Method: DELETE
-    unrecorded: true
     compare:
       headers: [access-control-allow-origin, access-control-allow-methods, access-control-allow-headers, access-control-max-age, vary, content-type]
+      body: ignore
 
   - name: http-cors-allowed-origin
     api: http
     path: /lambda-v2/x
     headers: {Origin: https://example.com}
-    unrecorded: true
     compare:
       headers: [access-control-allow-origin, access-control-expose-headers, access-control-allow-credentials, vary]
       body: ignore
@@ -220,7 +219,6 @@ cases:
     api: http
     path: /lambda-v2/x
     headers: {Origin: https://not-allowed.example}
-    unrecorded: true
     compare:
       headers: [access-control-allow-origin, access-control-expose-headers, access-control-allow-credentials, vary]
       body: ignore
@@ -228,6 +226,5 @@ cases:
   - name: http-http-proxy-unresolvable-host
     api: http
     path: /broken/unresolvable
-    unrecorded: true
     compare:
       headers: [content-type]

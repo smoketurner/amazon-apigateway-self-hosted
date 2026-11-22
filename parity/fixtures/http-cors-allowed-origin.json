@@ -1,0 +1,15 @@
+{
+  "name": "http-cors-allowed-origin",
+  "source": "recorded",
+  "api": "http",
+  "response": {
+    "status": 200,
+    "headers": {
+      "access-control-allow-origin": "https://example.com",
+      "access-control-expose-headers": "x-reference-exposed",
+      "apigw-requestid": "[masked]",
+      "content-type": "application/json",
+      "date": "[masked]"
+    }
+  }
+}

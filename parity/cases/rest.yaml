@@ -500,7 +500,6 @@ cases:
     api: rest
     path: /http-nonproxy-headers/42
     headers: {accept: text/html}
-    unrecorded: true
     compare:
       headers: [content-type]
 
@@ -510,7 +509,6 @@ cases:
     path: /http-nonproxy-headers/42
     headers: {content-type: application/json, accept: text/html}
     body: '{"a":1}'
-    unrecorded: true
     compare:
       headers: [content-type]
 
