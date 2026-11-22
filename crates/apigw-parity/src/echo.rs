@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
@@ -26,6 +27,8 @@ pub(crate) const LAMBDA_INVOKE_PATH: &str = "/__lambda/invocations";
 /// Where replay points the reference stack's authorizer function.
 pub(crate) const AUTHORIZER_INVOKE_PATH: &str = "/__lambda/authorizer";
 const FUNCTION_ERROR_HEADER: &str = "x-amz-function-error";
+/// The longest `echo_sleep_ms` the reference echo function honors.
+const MAX_SLEEP_MS: u64 = 3000;
 
 /// A Lambda event the echo returns: payload format 2.0 (HTTP API and Lambda
 /// function URLs) or payload format 1.0 (REST API, and HTTP API with payload 1.0).
@@ -248,6 +251,7 @@ async fn respond(request: Request) -> Response {
         .unwrap_or_default();
     let query = parts.uri.query().unwrap_or_default();
     let steer = Steering::from_query(query);
+    tokio::time::sleep(steer.sleep).await;
 
     if steer.binary {
         return steer.binary_response();
@@ -321,6 +325,7 @@ async fn lambda_invoke(body: Bytes) -> Response {
         };
     }
     let steer = Steering::from_event(&event);
+    tokio::time::sleep(steer.sleep).await;
     if let Some(ref text) = steer.unparsed_status {
         return function_error(&format!("invalid literal for int() with base 10: '{text}'"));
     }
@@ -395,6 +400,9 @@ async fn authorizer_invoke(body: Bytes) -> Response {
         "principal": "parity-user",
         "credential": credential.unwrap_or("None"),
     });
+    if credential == Some("error") {
+        return function_error("Error: authorizer failure");
+    }
     if event.get("version").and_then(Value::as_str) == Some("2.0") {
         return payload_response(&json!({
             "isAuthorized": credential == Some("allow"),
@@ -404,6 +412,10 @@ async fn authorizer_invoke(body: Bytes) -> Response {
     let effect = match credential {
         Some("allow") => "Allow",
         Some("deny") => "Deny",
+        // A response without a policy document, which API Gateway cannot use.
+        Some("malformed") => {
+            return payload_response(&json!({"principalId": "parity-user", "context": claims}));
+        }
         Some(_) | None => return function_error("Unauthorized"),
     };
     let method_arn = event
@@ -470,6 +482,8 @@ struct Steering {
     /// An `echo_status` that is not an integer, which the reference function
     /// fails on (`int()` raises).
     unparsed_status: Option<String>,
+    /// How long to wait before answering (`echo_sleep_ms`, at most 3 seconds).
+    sleep: Duration,
 }
 
 impl Steering {
@@ -479,6 +493,7 @@ impl Steering {
             binary: false,
             content_type: "image/png".to_owned(),
             unparsed_status: None,
+            sleep: Duration::ZERO,
         }
     }
 
@@ -520,6 +535,11 @@ impl Steering {
             }
             "echo_binary" => self.binary = value == "1",
             "echo_content_type" => value.clone_into(&mut self.content_type),
+            "echo_sleep_ms" => {
+                if let Ok(millis) = value.parse::<u64>() {
+                    self.sleep = Duration::from_millis(millis.min(MAX_SLEEP_MS));
+                }
+            }
             _ => {}
         }
     }
@@ -769,6 +789,15 @@ mod tests {
         assert_eq!(allow["context"]["credential"], "allow");
         let (_, deny) = call(token("deny")).await;
         assert_eq!(deny["policyDocument"]["Statement"][0]["Effect"], "Deny");
+        let (failed, error) = call(token("error")).await;
+        assert!(failed);
+        assert_eq!(error["errorMessage"], "Error: authorizer failure");
+        let (failed, _) = call(json!({"version": "2.0", "headers": {"x-auth": "error"}})).await;
+        assert!(failed);
+        let (failed, malformed) = call(token("malformed")).await;
+        assert!(!failed);
+        assert!(malformed.get("policyDocument").is_none());
+        assert_eq!(malformed["principalId"], "parity-user");
         let (failed, error) = call(token("other")).await;
         assert!(failed);
         assert_eq!(error["errorMessage"], "Unauthorized");

@@ -27,7 +27,9 @@ echo server that reproduces the echo Lambda's output. Replay exits non-zero when
 differs from its fixture.
 
 Output per case: `PASS`, `FAIL` (with the differing fields), `GAP` (a known gap that still
-differs), `STALE` (a known gap that now matches), or `ERROR` (for example a missing fixture).
+differs), `NEW` (a case marked `unrecorded` that has no fixture yet), `STALE` (a known gap that
+now matches, or an `unrecorded` case that has a fixture), or `ERROR` (for example a missing
+fixture).
 
 ## Cases
 
@@ -38,9 +40,12 @@ cases:
     method: GET                        # default GET
     path: /http-proxy/a/b              # relative to the stage URL
     query: {x: "1"}
-    headers: {x-from-client: abc}
+    headers: {x-from-client: abc}      # a list repeats a header: {x-multi: [a, b]}
     body: '{"a":1}'
     known_gap: "#19"                   # optional: an issue for a feature apigw lacks
+    unrecorded: true                   # optional: added to the stack, not recorded yet
+    client_cert: trusted               # optional: trusted | stranger, for mutual TLS cases
+    no_response: true                  # optional: expect no response (a refused handshake)
     compare:
       status: true                     # default true
       headers: [content-type]          # response headers to compare, by name
@@ -55,9 +60,26 @@ Only what `compare` selects can fail a replay; everything else is stored for ref
 (a failure) once they match, so a marker cannot outlive the fix. Remove `known_gap` when the
 issue it names lands.
 
+A case for a route or behavior the committed exports do not have yet is added with
+`unrecorded: true`: replay reports it as `NEW` instead of failing on the missing fixture.
+`record` records it like any other case. Commit the new fixture and export and remove the
+marker in the same change; replay fails while a case with a fixture keeps it.
+
 `{{env:NAME}}` in a path, header, query value, or body is replaced by the environment variable
 `NAME`. `record` requires it to be set; `replay` substitutes a placeholder so fixtures never
 need real credentials. Every substituted value is redacted from what `record` writes.
+
+## Custom domains
+
+Cases with `api: domain` or `api: domain_mtls` go to the custom domains `api.parity.<zone>`
+and `mtls.parity.<zone>` (`custom_domain_zone` in Terraform). Replay cannot serve a custom
+domain offline and lists them as `LIVE`. `make parity-domain-live` instead records them
+against `apigw` on ECS, connecting to the domain container with `--resolve NAME=IP:PORT` (the
+domain name stays the SNI and `Host`) and `--insecure` for its self-signed certificate, with
+the committed fixtures as the baseline: every case it lists answers differently from API
+Gateway. A case with `client_cert` presents the trusted or the stranger certificate from
+`terraform output -json parity_client_certificates`, passed with `--client-certs`. A request
+that gets no response, such as a refused handshake, is reported and the rest go on.
 
 ## Record (needs the deployed stack)
 
@@ -115,7 +137,12 @@ reference APIs answered. A fixture written by hand from documentation would carr
 
 ## Not covered yet
 
-- AWS service integrations (SQS, DynamoDB, Step Functions, EventBridge), which replay has no
-  stand-in for.
+- AWS service integrations and HTTP API integration subtypes, which replay has no stand-in
+  for. `make parity-live` instead sends the same requests to the reference APIs and to `apigw`
+  on ECS, which call the same resources, and compares status, content type, and body with
+  per-request IDs masked.
+- VPC links, which need the optional internal load balancer and a replay stand-in for it.
+- Custom domains and mutual TLS, which need a registered domain, a certificate, and a
+  truststore the reference stack does not create.
 - Responses that need a credential replay cannot mint (a valid Cognito or JWT token).
 - Time-dependent behavior (throttles, quotas, cache TTLs) is covered by property tests, not fixtures.

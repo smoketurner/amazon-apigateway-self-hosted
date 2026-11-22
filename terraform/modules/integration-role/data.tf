@@ -39,17 +39,54 @@ data "aws_iam_policy_document" "invoke" {
   }
 
   statement {
+    actions   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:PurgeQueue"]
+    resources = [var.empty_queue_arn]
+  }
+
+  statement {
     actions   = ["dynamodb:PutItem", "dynamodb:GetItem"]
     resources = [var.table_arn]
   }
 
   statement {
-    actions   = ["states:StartSyncExecution"]
+    actions   = ["states:StartSyncExecution", "states:StartExecution"]
     resources = [var.state_machine_arn]
+  }
+
+  # StopExecution names an execution, not the state machine.
+  statement {
+    actions   = ["states:StopExecution"]
+    resources = ["${replace(var.state_machine_arn, ":stateMachine:", ":execution:")}:*"]
+  }
+
+  statement {
+    actions   = ["appconfig:GetConfiguration"]
+    resources = [var.appconfig_application_arn, "${var.appconfig_application_arn}/*"]
   }
 
   statement {
     actions   = ["events:PutEvents"]
     resources = [var.event_bus_arn]
+  }
+
+  statement {
+    actions   = ["sns:Publish"]
+    resources = [var.topic_arn]
+  }
+
+  statement {
+    actions   = ["kinesis:PutRecord"]
+    resources = [var.stream_arn]
+  }
+
+  statement {
+    actions   = ["s3:PutObject", "s3:GetObject"]
+    resources = ["${var.bucket_arn}/*"]
+  }
+
+  # Without ListBucket, S3 answers a missing object with 403 instead of 404.
+  statement {
+    actions   = ["s3:ListBucket"]
+    resources = [var.bucket_arn]
   }
 }

@@ -13,9 +13,17 @@ spec:
       {{- include "apigw.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- with .Values.podAnnotations }}
+      {{- if or .Values.podAnnotations .Values.metrics.scrapeAnnotations }}
       annotations:
+        {{- if .Values.metrics.scrapeAnnotations }}
+        prometheus.io/scrape: "true"
+        prometheus.io/scheme: https
+        prometheus.io/port: {{ .Values.adminPort | quote }}
+        prometheus.io/path: /metrics
+        {{- end }}
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- end }}
       labels:
         {{- include "apigw.selectorLabels" . | nindent 8 }}
@@ -53,6 +61,49 @@ spec:
               value: /etc/apigw/tls/tls.key
             - name: APIGW_REPLICAS
               value: {{ .Values.replicaCount | quote }}
+            # OpenTelemetry resource attributes (k8s.*), from the downward API.
+            - name: K8S_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: K8S_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: K8S_NAMESPACE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: K8S_CONTAINER_NAME
+              value: apigw
+            - name: K8S_DEPLOYMENT_NAME
+              value: {{ include "apigw.fullname" . | quote }}
+            {{- with .Values.otel }}
+            {{- if .enabled }}
+            - name: APIGW_OTEL
+              value: "true"
+            {{- with .endpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .protocol }}
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .serviceName }}
+            - name: OTEL_SERVICE_NAME
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .resourceAttributes }}
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: {{ include "apigw.resourceAttributes" . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.api.restApiId }}
             - name: APIGW_REST_API_ID
               value: {{ . | quote }}

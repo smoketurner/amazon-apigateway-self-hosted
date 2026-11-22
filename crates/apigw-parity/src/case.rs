@@ -54,16 +54,24 @@ pub(crate) enum ApiName {
     Http,
     /// The REST API that carries a resource policy.
     RestPolicy,
+    /// The custom domain with REST and HTTP API mappings.
+    Domain,
+    /// The custom domain that requires a client certificate.
+    DomainMtls,
 }
 
 impl ApiName {
-    pub(crate) const ALL: [Self; 3] = [Self::Rest, Self::Http, Self::RestPolicy];
+    /// The APIs with an export, which replay serves offline. Custom domains have
+    /// none: their cases are recorded, and compared against a deployed gateway.
+    pub(crate) const EXPORTED: [Self; 3] = [Self::Rest, Self::Http, Self::RestPolicy];
 
-    /// The `--api-type` value apigw needs to serve this API's export.
-    pub(crate) fn api_type(self) -> &'static str {
+    /// The `--api-type` value apigw needs to serve this API's export; `None` for
+    /// a custom domain, which has no export.
+    pub(crate) fn api_type(self) -> Option<&'static str> {
         match self {
-            Self::Rest | Self::RestPolicy => "rest",
-            Self::Http => "http",
+            Self::Rest | Self::RestPolicy => Some("rest"),
+            Self::Http => Some("http"),
+            Self::Domain | Self::DomainMtls => None,
         }
     }
 
@@ -72,8 +80,20 @@ impl ApiName {
             Self::Rest => "rest",
             Self::Http => "http",
             Self::RestPolicy => "rest_policy",
+            Self::Domain => "domain",
+            Self::DomainMtls => "domain_mtls",
         }
     }
+}
+
+/// The client certificate a case presents in the TLS handshake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ClientCert {
+    /// Chained to the mutual TLS domain's truststore.
+    Trusted,
+    /// From a CA the truststore does not hold.
+    Stranger,
 }
 
 impl fmt::Display for ApiName {
@@ -180,6 +200,28 @@ impl Default for Compare {
     }
 }
 
+/// The values a case sends for one header: one, or a list sent as separate header lines in
+/// order, so a case can repeat a header.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(from = "OneOrMany")]
+pub(crate) struct HeaderValues(Vec<String>);
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl From<OneOrMany> for HeaderValues {
+    fn from(values: OneOrMany) -> Self {
+        match values {
+            OneOrMany::One(value) => Self(vec![value]),
+            OneOrMany::Many(values) => Self(values),
+        }
+    }
+}
+
 /// One request and the comparison rules for its response.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -190,7 +232,7 @@ pub(crate) struct Case {
     pub(crate) method: MethodName,
     pub(crate) path: String,
     #[serde(default)]
-    pub(crate) headers: BTreeMap<String, String>,
+    pub(crate) headers: BTreeMap<String, HeaderValues>,
     #[serde(default)]
     pub(crate) query: BTreeMap<String, String>,
     #[serde(default)]
@@ -202,6 +244,18 @@ pub(crate) struct Case {
     /// so the marker cannot go stale.
     #[serde(default)]
     pub(crate) known_gap: Option<String>,
+    /// Set on a case added to the reference stack but not recorded yet. Replay
+    /// reports it as new instead of failing on the missing fixture, and fails once
+    /// a fixture exists, so the marker cannot outlive the recording.
+    #[serde(default)]
+    pub(crate) unrecorded: bool,
+    /// The client certificate to present; none by default.
+    #[serde(default)]
+    pub(crate) client_cert: Option<ClientCert>,
+    /// The request is expected to get no response at all, such as a TLS
+    /// handshake the server refuses; an answer is drift.
+    #[serde(default)]
+    pub(crate) no_response: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -287,9 +341,24 @@ impl<E: EnvSource> Expander<E> {
 pub(crate) struct RequestSpec {
     pub(crate) method: reqwest::Method,
     pub(crate) path: String,
-    pub(crate) headers: BTreeMap<String, String>,
+    /// Header lines in the order they are sent; a name can repeat.
+    pub(crate) headers: Vec<(String, String)>,
     pub(crate) query: BTreeMap<String, String>,
     pub(crate) body: Option<String>,
+}
+
+impl RequestSpec {
+    /// The values sent for `name`, in order.
+    #[cfg(test)]
+    pub(crate) fn header(&self, name: &str) -> Vec<&str> {
+        let mut values = Vec::new();
+        for (sent, value) in &self.headers {
+            if sent == name {
+                values.push(value.as_str());
+            }
+        }
+        values
+    }
 }
 
 /// A [`RequestSpec`] plus the secret values that were substituted into it.
@@ -304,9 +373,11 @@ impl Case {
         let mut secrets = Vec::new();
         let mut expand = |text: &str| expander.expand(&self.name, text, &mut secrets);
         let path = expand(&self.path)?;
-        let mut headers = BTreeMap::new();
-        for (name, value) in &self.headers {
-            headers.insert(name.to_ascii_lowercase(), expand(value)?);
+        let mut headers = Vec::new();
+        for (name, values) in &self.headers {
+            for value in &values.0 {
+                headers.push((name.to_ascii_lowercase(), expand(value)?));
+            }
         }
         let mut query = BTreeMap::new();
         for (name, value) in &self.query {
@@ -490,11 +561,26 @@ mod tests {
     }
 
     #[test]
+    fn a_header_given_a_list_is_sent_once_per_value() {
+        let yaml = "cases:
+  - name: repeated
+    api: rest
+    path: /p
+    headers: {X-Multi: [a, '{{env:SEG}}'], Accept: text/plain}
+";
+        let case = parse(yaml).unwrap().cases.into_iter().next().unwrap();
+        let expander = Expander::new(env(&[("SEG", "b")]), UnsetEnv::Fail);
+        let request = case.request(&expander).unwrap();
+        assert_eq!(request.spec.header("x-multi"), ["a", "b"]);
+        assert_eq!(request.spec.header("accept"), ["text/plain"]);
+    }
+
+    #[test]
     fn placeholders_expand_everywhere_and_report_secrets() {
         let expander = Expander::new(env(&[("TOKEN", "s3cr3t"), ("SEG", "x")]), UnsetEnv::Fail);
         let request = case_with_placeholders().request(&expander).unwrap();
         assert_eq!(request.spec.path, "/p/x");
-        assert_eq!(request.spec.headers["authorization"], "Bearer s3cr3t");
+        assert_eq!(request.spec.header("authorization"), ["Bearer s3cr3t"]);
         assert_eq!(request.spec.query["k"], "x-s3cr3t");
         assert_eq!(request.spec.body.as_deref(), Some("s3cr3t"));
         assert!(request.secrets.contains(&"s3cr3t".to_owned()));
@@ -509,7 +595,7 @@ mod tests {
         ));
         let lenient = Expander::new(env(&[("SEG", "x")]), UnsetEnv::Placeholder);
         let request = case_with_placeholders().request(&lenient).unwrap();
-        assert_eq!(request.spec.headers["authorization"], "Bearer unset-env");
+        assert_eq!(request.spec.header("authorization"), ["Bearer unset-env"]);
         assert!(request.secrets.iter().all(|s| s == "x"));
     }
 

@@ -28,6 +28,12 @@ module "integration_role" {
   table_arn            = module.service_targets.table_arn
   state_machine_arn    = module.service_targets.state_machine_arn
   event_bus_arn        = module.service_targets.event_bus_arn
+  empty_queue_arn      = module.service_targets.empty_queue_arn
+  topic_arn            = module.service_targets.topic_arn
+  stream_arn           = module.service_targets.stream_arn
+  bucket_arn           = module.service_targets.bucket_arn
+
+  appconfig_application_arn = module.service_targets.appconfig_application_arn
 
   trusted_principal_arns = local.gateway_role_arns
 }
@@ -63,6 +69,9 @@ module "rest_api" {
   table_name                = module.service_targets.table_name
   state_machine_arn         = module.service_targets.state_machine_arn
   event_bus_name            = module.service_targets.event_bus_name
+  topic_arn                 = module.service_targets.topic_arn
+  stream_name               = module.service_targets.stream_name
+  bucket_name               = module.service_targets.bucket_name
   cors_allowed_origin       = var.cors_allowed_origin
   vpc_link                  = local.vpc_link
   enable_logging            = var.enable_logging
@@ -95,11 +104,30 @@ module "http_api" {
   invoke_role_arn           = module.integration_role.role_arn
   cognito_issuer            = module.cognito.issuer
   cognito_client_id         = module.cognito.client_id
+  queue_url                 = module.service_targets.queue_url
+  event_bus_name            = module.service_targets.event_bus_name
+  state_machine_arn         = module.service_targets.state_machine_arn
+  stream_name               = module.service_targets.stream_name
+  empty_queue_url           = module.service_targets.empty_queue_url
+  appconfig_application     = module.service_targets.appconfig_application
+  appconfig_environment     = module.service_targets.appconfig_environment
+  appconfig_configuration   = module.service_targets.appconfig_configuration
   cors_allowed_origin       = var.cors_allowed_origin
   enable_logging            = var.enable_logging
   log_retention_days        = var.log_retention_days
   throttle_rate_limit       = var.throttle_rate_limit
   throttle_burst_limit      = var.throttle_burst_limit
+}
+
+module "custom_domain" {
+  source = "../../modules/custom-domain"
+  count  = var.custom_domain_zone == null ? 0 : 1
+
+  name_prefix = var.name_prefix
+  zone_name   = var.custom_domain_zone
+  rest_api_id = module.rest_api.api_id
+  http_api_id = module.http_api.api_id
+  stage_name  = var.stage_name
 }
 
 # What apigw may do to mirror the reference REST API, whatever it runs on.
@@ -112,6 +140,7 @@ module "gateway_policy" {
   stage_name           = var.stage_name
   lambda_function_arns = local.lambda_function_arns
   assumable_role_arns  = [module.integration_role.role_arn]
+  log_group_arns       = module.rest_api.log_group_arns
 }
 
 # A public-subnet VPC for the ECS gateway, unless subnets are passed in.
@@ -153,6 +182,7 @@ module "gateway_policy_http" {
   stage_name           = var.stage_name
   lambda_function_arns = local.lambda_function_arns
   assumable_role_arns  = [module.integration_role.role_arn]
+  log_group_arns       = module.http_api.log_group_arns
 }
 
 # apigw as a Lambda function behind a function URL, mirroring the same API.

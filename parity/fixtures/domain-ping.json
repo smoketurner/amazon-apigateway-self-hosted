@@ -1,0 +1,13 @@
+{
+  "name": "domain-ping",
+  "source": "recorded",
+  "api": "domain",
+  "response": {
+    "status": 200,
+    "headers": {
+      "apigw-requestid": "[masked]",
+      "date": "[masked]"
+    },
+    "body": "Healthy Connection"
+  }
+}

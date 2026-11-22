@@ -5,7 +5,8 @@
 use std::collections::BTreeMap;
 
 use apigw_vtl::{
-    InputParams, Limits, Map, RenderError, Renderer, Template, TemplateInput, Value as VtlValue,
+    InputParams, Limits, Map, NullReferences, RenderError, Renderer, Template, TemplateInput,
+    Value as VtlValue,
 };
 
 use crate::integration::StageVariables;
@@ -160,6 +161,9 @@ pub(crate) fn render(
         .with_context(context.clone())
         .with_stage_variables(stage_variables_map(&ctx.stage_variables))
         .with_limits(Limits::default())
+        // API Gateway renders a null reference as nothing, where Velocity prints it as written
+        // (parity/fixtures/rest-vtl-macro-scope.json).
+        .with_null_references(NullReferences::Empty)
         .render(template)?;
     Ok(Rendered { output, context })
 }

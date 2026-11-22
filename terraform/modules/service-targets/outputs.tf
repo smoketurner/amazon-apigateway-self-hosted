@@ -42,3 +42,58 @@ output "event_log_group" {
   description = "Log group that captures events sent to the bus."
   value       = aws_cloudwatch_log_group.events_catch_all.name
 }
+
+output "topic_arn" {
+  description = "ARN of the SNS target topic."
+  value       = aws_sns_topic.target.arn
+}
+
+output "stream_name" {
+  description = "Name of the Kinesis target stream."
+  value       = aws_kinesis_stream.target.name
+}
+
+output "stream_arn" {
+  description = "ARN of the Kinesis target stream."
+  value       = aws_kinesis_stream.target.arn
+}
+
+output "bucket_name" {
+  description = "Name of the S3 target bucket."
+  value       = aws_s3_bucket.target.bucket
+}
+
+output "bucket_arn" {
+  description = "ARN of the S3 target bucket."
+  value       = aws_s3_bucket.target.arn
+}
+
+output "empty_queue_url" {
+  description = "URL of the SQS queue nothing sends to."
+  value       = aws_sqs_queue.empty.url
+}
+
+output "empty_queue_arn" {
+  description = "ARN of the SQS queue nothing sends to."
+  value       = aws_sqs_queue.empty.arn
+}
+
+output "appconfig_application" {
+  description = "Name of the AppConfig application."
+  value       = aws_appconfig_application.target.name
+}
+
+output "appconfig_environment" {
+  description = "Name of the AppConfig environment the configuration is deployed to."
+  value       = aws_appconfig_environment.target.name
+}
+
+output "appconfig_configuration" {
+  description = "Name of the AppConfig configuration profile."
+  value       = aws_appconfig_configuration_profile.target.name
+}
+
+output "appconfig_application_arn" {
+  description = "ARN of the AppConfig application."
+  value       = aws_appconfig_application.target.arn
+}

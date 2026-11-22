@@ -295,13 +295,28 @@ impl GatewayError {
             (Self::IntegrationUnreachable, ApiKind::Rest) => {
                 Failure::new(ResponseType::IntegrationFailure)
             }
+            // Measured: a REST API names its 504 `InternalServerErrorException`,
+            // and an HTTP API answers a timeout with a 503.
             (Self::IntegrationTimeout, ApiKind::Rest) => {
                 Failure::new(ResponseType::IntegrationTimeout)
+                    .with_error_type("InternalServerErrorException")
             }
             (Self::IntegrationTimeout, ApiKind::Http) => {
-                Failure::new(ResponseType::IntegrationTimeout).with_message("Service Unavailable")
+                Failure::new(ResponseType::IntegrationTimeout)
+                    .with_status(StatusCode::SERVICE_UNAVAILABLE)
+                    .with_message("Service Unavailable")
             }
-            (Self::ApiConfiguration, _) => Failure::new(ResponseType::ApiConfigurationError),
+            // Measured against a deployed REST API: a 500 named
+            // `InternalServerErrorException`, not `ApiConfigurationException`.
+            (Self::ApiConfiguration, ApiKind::Rest) => {
+                Failure::new(ResponseType::ApiConfigurationError)
+                    .with_error_type("InternalServerErrorException")
+            }
+            // Measured against a deployed HTTP API, worded like its other 500s.
+            (Self::ApiConfiguration, ApiKind::Http) => {
+                Failure::new(ResponseType::ApiConfigurationError)
+                    .with_message("Internal Server Error")
+            }
             (Self::UnprocessablePayload, _) => Failure::new(ResponseType::Default4xx)
                 .with_message("Could not process payload")
                 .while_executing(),

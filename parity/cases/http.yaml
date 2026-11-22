@@ -110,7 +110,7 @@ cases:
     compare:
       headers: [content-type]
 
-  # Parameter mapping (overwrite/append/remove) is not applied yet
+  # Parameter mapping: path overwrite, appended and overwritten query and header values
   - name: http-parameter-mapping
     api: http
     path: /mapped/42
@@ -171,3 +171,115 @@ cases:
       body: ignore
       echo: {fields: [path, query]}
 
+
+  # CORS, from the API's configuration (https://example.com is the allowed origin)
+  - name: http-cors-preflight
+    api: http
+    method: OPTIONS
+    path: /lambda-v2/x
+    headers:
+      Origin: https://example.com
+      Access-Control-Request-Method: POST
+      Access-Control-Request-Headers: content-type
+    compare:
+      headers: [access-control-allow-origin, access-control-allow-methods, access-control-allow-headers, access-control-max-age, access-control-expose-headers, access-control-allow-credentials, vary, content-type]
+      body: ignore
+
+  - name: http-cors-preflight-disallowed-origin
+    api: http
+    method: OPTIONS
+    path: /lambda-v2/x
+    headers:
+      Origin: https://not-allowed.example
+      Access-Control-Request-Method: POST
+    compare:
+      headers: [access-control-allow-origin, access-control-allow-methods, access-control-allow-headers, access-control-max-age, vary, content-type]
+      body: ignore
+
+  - name: http-cors-preflight-disallowed-method
+    api: http
+    method: OPTIONS
+    path: /lambda-v2/x
+    headers:
+      Origin: https://example.com
+      Access-Control-Request-Method: DELETE
+    compare:
+      headers: [access-control-allow-origin, access-control-allow-methods, access-control-allow-headers, access-control-max-age, vary, content-type]
+      body: ignore
+
+  - name: http-cors-allowed-origin
+    api: http
+    path: /lambda-v2/x
+    headers: {Origin: https://example.com}
+    compare:
+      headers: [access-control-allow-origin, access-control-expose-headers, access-control-allow-credentials, vary]
+      body: ignore
+
+  - name: http-cors-disallowed-origin
+    api: http
+    path: /lambda-v2/x
+    headers: {Origin: https://not-allowed.example}
+    compare:
+      headers: [access-control-allow-origin, access-control-expose-headers, access-control-allow-credentials, vary]
+      body: ignore
+
+  - name: http-http-proxy-unresolvable-host
+    api: http
+    path: /broken/unresolvable
+    compare:
+      headers: [content-type]
+
+  # Whether request parameter mapping reaches a Lambda proxy event
+  - name: http-lambda-v2-request-mapping
+    api: http
+    path: /lambda-mapped/42
+    query: {q: "1"}
+    headers: {x-remove-me: gone}
+    compare:
+      body: json
+
+
+  # Repeated request headers: each value is sent as its own header line
+  - name: http-lambda-v2-repeated-headers
+    api: http
+    path: /lambda-v2/x
+    headers: {X-Multi: [a, b], Cookie: [a=1, b=2]}
+    compare:
+      body: json
+
+  - name: http-lambda-v1-repeated-headers
+    api: http
+    path: /lambda-v1/x
+    headers: {X-Multi: [a, b], Cookie: [a=1, b=2]}
+    compare:
+      body: json
+
+  - name: http-http-proxy-repeated-headers
+    api: http
+    path: /http-proxy/x
+    headers: {X-Multi: [a, b]}
+    compare:
+      body: ignore
+      echo: {headers: [x-multi]}
+
+  # Default 5xx answers: an authorizer that raises, and integrations that time out
+  - name: http-lambda-authorizer-error
+    api: http
+    path: /authz/lambda-simple
+    headers: {x-auth: error}
+    compare:
+      headers: [content-type]
+
+  - name: http-http-proxy-timeout
+    api: http
+    path: /timeout
+    query: {echo_sleep_ms: "1000"}
+    compare:
+      headers: [content-type]
+
+  - name: http-lambda-timeout
+    api: http
+    path: /lambda-timeout
+    query: {echo_sleep_ms: "1000"}
+    compare:
+      headers: [content-type]

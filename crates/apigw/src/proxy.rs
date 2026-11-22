@@ -13,7 +13,7 @@ use crate::integration::{HttpProxy, ParamSource, PrivateRouting};
 use crate::integration_tls::TlsClientError;
 use crate::mapped::{BackendReply, BackendRequest, RequestOverrides};
 use crate::model::{ApiKind, Protection, RoutePath};
-use crate::pipeline::RequestContext;
+use crate::pipeline::{EndpointExchange, RequestContext};
 use crate::route::Route;
 
 /// Why no backend URL could be made for a request.
@@ -127,6 +127,15 @@ impl HttpProxy {
         {
             headers.insert(header::CONTENT_TYPE, content_type);
         }
+        // Unless mapped, the backend is asked for the integration request's content
+        // type, else JSON (measured against a deployed REST API).
+        if !headers.contains_key(header::ACCEPT) {
+            let accept = headers
+                .get(header::CONTENT_TYPE)
+                .cloned()
+                .unwrap_or(HeaderValue::from_static("application/json"));
+            headers.insert(header::ACCEPT, accept);
+        }
         self.add_gateway_headers(&mut headers, ctx);
         let outgoing = Outgoing {
             headers,
@@ -145,6 +154,9 @@ impl HttpProxy {
         if body.len() > MAX_BODY_BYTES {
             tracing::warn!(route = %route.key, bytes = body.len(), "integration response is too large");
             return Err(GatewayError::IntegrationFailure);
+        }
+        if let Some(ref mut exchange) = ctx.integration.exchange {
+            exchange.response_body = Some(body.clone());
         }
         Ok(BackendReply::new(status, headers, body))
     }
@@ -197,6 +209,12 @@ impl HttpProxy {
         }
         ctx.integration.transfer_mode = Some(self.transfer);
         let (client, url) = self.client_for(client, route, url, &mut headers).await?;
+        if ctx.capture_exchange {
+            let exchange = ctx.integration.exchange.get_or_insert_default();
+            exchange.uri = Some(url.to_string());
+            exchange.request_headers = EndpointExchange::header_list(&headers);
+            exchange.request_body = Some(body.clone());
+        }
         let started = Instant::now();
         let result = client
             .request(method, url)
@@ -211,6 +229,11 @@ impl HttpProxy {
                 tracing::warn!(route = %route.key, "integration timed out");
                 return Err(GatewayError::IntegrationTimeout);
             }
+            Err(err) if is_dns_failure(&err) => {
+                // Deployed REST and HTTP APIs answer this as an API configuration error.
+                tracing::warn!(route = %route.key, err = %err, "integration host could not be resolved");
+                return Err(GatewayError::ApiConfiguration);
+            }
             Err(err) => {
                 tracing::warn!(route = %route.key, err = %err, "integration request failed");
                 return Err(GatewayError::IntegrationUnreachable);
@@ -218,6 +241,9 @@ impl HttpProxy {
         };
         let headers_after = u64::try_from(started.elapsed().as_millis()).ok();
         ctx.integration.status = Some(upstream.status().as_u16());
+        if let Some(ref mut exchange) = ctx.integration.exchange {
+            exchange.response_headers = EndpointExchange::header_list(upstream.headers());
+        }
         ctx.integration.time_to_all_headers_ms = headers_after;
         tracing::debug!(
             route = %route.key,
@@ -234,7 +260,9 @@ impl HttpProxy {
         if let Some(PrivateRouting::HostHeader(ref host)) = self.private {
             headers.insert(header::HOST, host.clone());
         }
-        if let Some(trace) = ctx.trace
+        if let Some(ref span) = ctx.otel_integration {
+            span.inject(headers);
+        } else if let Some(trace) = ctx.trace
             && let Ok(value) = HeaderValue::try_from(trace.traceparent())
         {
             headers.insert(HeaderName::from_static("traceparent"), value);
@@ -274,7 +302,7 @@ impl HttpProxy {
             }
             Err(err @ TlsClientError::Resolve { .. }) => {
                 tracing::warn!(route = %route.key, %err, "integration host could not be resolved");
-                Err(GatewayError::IntegrationUnreachable)
+                Err(GatewayError::ApiConfiguration)
             }
             Err(err) => {
                 tracing::error!(route = %route.key, %err, "invalid integration tlsConfig");
@@ -621,6 +649,19 @@ impl UrlEncoder<'_> {
     }
 }
 
+/// Whether the integration host's name did not resolve. hyper-util reports it as a
+/// connect error whose message is `dns error`; the type itself is private.
+fn is_dns_failure(err: &reqwest::Error) -> bool {
+    let mut source = std::error::Error::source(err);
+    while let Some(cause) = source {
+        if cause.to_string() == "dns error" {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
+}
+
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests assert on known-good fixtures")]
 #[expect(clippy::indexing_slicing, reason = "tests index known JSON fields")]
@@ -832,6 +873,18 @@ mod tests {
         );
         let source = ParamSource::Header("x-from-client".to_owned());
         assert_eq!(source.resolve(&ctx).as_deref(), Some("café"));
+    }
+
+    /// Measured against a deployed REST API: a repeated header maps its last value.
+    #[test]
+    fn a_mapped_repeated_header_gives_its_last_value() {
+        let mut ctx = incoming(&[], None);
+        ctx.headers
+            .append("x-from-client", HeaderValue::from_static("abc"));
+        ctx.headers
+            .append("x-from-client", HeaderValue::from_static("def"));
+        let source = ParamSource::Header("x-from-client".to_owned());
+        assert_eq!(source.resolve(&ctx).as_deref(), Some("def"));
     }
 
     #[test]
@@ -1441,6 +1494,15 @@ mod tests {
         let error = send(proxy("http://up/{missing}"), "/x", incoming(&[], None))
             .await
             .unwrap_err();
+        assert_eq!(error, GatewayError::ApiConfiguration);
+        // A host that does not resolve is a configuration error.
+        let error = send(
+            proxy("http://apigw-test.invalid/"),
+            "/x",
+            incoming(&[], None),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(error, GatewayError::ApiConfiguration);
     }
 

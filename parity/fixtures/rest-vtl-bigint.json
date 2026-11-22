@@ -1,0 +1,16 @@
+{
+  "name": "rest-vtl-bigint",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-requestid": "[masked]",
+      "x-amzn-trace-id": "[masked]"
+    },
+    "body": "922337203685477580885070591730234615847396907784232501249 greater"
+  }
+}

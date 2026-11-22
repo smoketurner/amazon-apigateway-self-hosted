@@ -13,6 +13,9 @@ locals {
   # Safe to publish; the secret is added separately for the APIs.
   public_stage_variables = {
     echo_host = module.lambda_backends.echo_host
+    # API Gateway refuses a reserved domain in a literal integration URI at import,
+    # but resolves a stage variable only per request.
+    unresolvable_host = "apigw-parity.invalid"
   }
 
   stage_variables = merge(local.public_stage_variables, {
@@ -33,15 +36,27 @@ locals {
 
   # One apigw process mirrors one API, so the HTTP API gets a second container
   # in the ECS gateway's task rather than a service of its own.
-  ecs_gateway_additional_apis = var.enable_ecs_gateway_http ? {
-    http = {
-      kind                = "http"
-      id                  = module.http_api.api_id
-      api_port            = 8444
-      admin_port          = 9444
-      gateway_policy_json = module.gateway_policy_http[0].json
-    }
-  } : {}
+  ecs_gateway_additional_apis = merge(
+    var.enable_ecs_gateway_http ? {
+      http = {
+        kind                = "http"
+        id                  = module.http_api.api_id
+        api_port            = 8444
+        admin_port          = 9444
+        gateway_policy_json = module.gateway_policy_http[0].json
+      }
+    } : {},
+    # Both reference APIs through the custom domains, for comparing them with API Gateway.
+    var.enable_ecs_gateway_http && var.custom_domain_zone != null ? {
+      domain = {
+        kind                = "domain"
+        id                  = join(",", [module.custom_domain[0].api_domain, module.custom_domain[0].mtls_domain])
+        api_port            = 8445
+        admin_port          = 9445
+        gateway_policy_json = data.aws_iam_policy_document.gateway_domain[0].json
+      }
+    } : {},
+  )
 
   # Only the role outputs, not the whole modules: each gateway's definition
   # depends on the REST API, which depends on the integration role.

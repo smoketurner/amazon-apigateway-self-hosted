@@ -1,0 +1,14 @@
+{
+  "name": "http-lambda-authorizer-error",
+  "source": "recorded",
+  "api": "http",
+  "response": {
+    "status": 500,
+    "headers": {
+      "apigw-requestid": "[masked]",
+      "content-type": "application/json",
+      "date": "[masked]"
+    },
+    "body": "{\"message\":\"Internal Server Error\"}"
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "name": "rest-http-proxy-repeated-headers",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-remapped-connection": "[masked]",
+      "x-amzn-remapped-content-length": "[masked]",
+      "x-amzn-remapped-date": "[masked]",
+      "x-amzn-remapped-x-amzn-requestid": "[masked]",
+      "x-amzn-requestid": "[masked]",
+      "x-amzn-trace-id": "[masked]"
+    }
+  },
+  "echo": {
+    "method": "GET",
+    "path": "/http-proxy/x",
+    "query": "",
+    "headers": {
+      "accept": "*/*",
+      "user-agent": "apigw-parity",
+      "x-echo-secret": "[redacted]",
+      "x-multi": "a,b"
+    },
+    "resource": "$default"
+  }
+}

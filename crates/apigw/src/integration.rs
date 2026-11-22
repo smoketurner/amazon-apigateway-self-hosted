@@ -126,6 +126,17 @@ impl Integration {
         }
     }
 
+    /// The backend: a URI, Lambda function, or AWS service.
+    pub(crate) fn target(&self) -> Option<String> {
+        match self {
+            Self::HttpProxy(proxy) => Some(proxy.uri.clone()),
+            Self::Lambda(lambda) => Some(lambda.function.to_string()),
+            Self::Mapped(mapped) => mapped.target(),
+            Self::AwsSubtype(subtype) => Some(subtype.subtype.name().to_owned()),
+            Self::Unsupported { .. } => None,
+        }
+    }
+
     /// Compiles an operation's integration. Anything that can't be served
     /// becomes [`Integration::Unsupported`] with the reason.
     pub(crate) fn compile(
@@ -229,6 +240,11 @@ impl Integration {
                     payload,
                     timeout,
                     transfer,
+                    request_mapping: match kind {
+                        ApiKind::Http => RequestMapping::compile(&spec.request_parameters),
+                        ApiKind::Rest => RequestMapping::default(),
+                    },
+                    response_mapping: ResponseMapping::compile(&spec.response_parameters),
                 }))
             }
             IntegrationType::Aws => Self::compile_aws(spec, uri, timeout),
@@ -248,6 +264,7 @@ impl Integration {
         Ok(Self::AwsSubtype(Box::new(SubtypeIntegration::new(
             subtype,
             ServiceParameters::compile(&spec.request_parameters),
+            ResponseMapping::compile(&spec.response_parameters),
             integration_role(spec)?,
             timeout,
         ))))
@@ -461,6 +478,10 @@ pub(crate) struct LambdaProxy {
     pub(crate) timeout: Duration,
     /// `Stream` invokes with `InvokeWithResponseStream` and streams the output.
     pub(crate) transfer: ResponseTransferMode,
+    /// HTTP API `requestParameters`, applied to the event's headers and query.
+    pub(crate) request_mapping: RequestMapping,
+    /// HTTP API `responseParameters`, by the function's response status code.
+    pub(crate) response_mapping: ResponseMapping,
 }
 
 /// A Lambda integration URI split into the function and how it is invoked.

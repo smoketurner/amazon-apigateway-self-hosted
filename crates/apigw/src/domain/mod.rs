@@ -144,6 +144,10 @@ pub(crate) struct Routed {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ApiMappings(Vec<ApiMapping>);
 
+/// Marks a request that reached its API through a custom domain.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ViaCustomDomain;
+
 impl ApiMappings {
     pub(crate) fn new(mut mappings: Vec<ApiMapping>) -> Self {
         mappings.sort_by(|a, b| {

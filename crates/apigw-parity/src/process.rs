@@ -101,7 +101,10 @@ impl ApigwProcess {
         command
             .arg("--openapi-file")
             .arg(scratch.join("export.json"))
-            .args(["--api-type", api.api_type()])
+            .args([
+                "--api-type",
+                api.api_type().ok_or(ParityError::NotReplayable(api))?,
+            ])
             .args(["--stage", &export.stage])
             .arg("--base-path")
             .arg(format!("/{}", export.stage))

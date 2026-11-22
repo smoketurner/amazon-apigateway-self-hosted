@@ -10,9 +10,9 @@
 //!
 //! Patterns that Java rejects fail with [`RegexError::Syntax`]. Patterns Java accepts but that
 //! cannot be translated faithfully fail with [`RegexError::Unsupported`] so that callers can
-//! report them when the API definition is loaded instead of matching differently at run time.
-//! Evaluation is bounded by a configurable backtrack limit and reports
-//! [`RegexError::BacktrackLimitExceeded`].
+//! report them when the API definition is loaded instead of matching differently at run time;
+//! the only such construct is `\N{name}`. Evaluation is bounded by a configurable backtrack
+//! limit and reports [`RegexError::BacktrackLimitExceeded`], never a silent "no match".
 //!
 //! # Differences from Java
 //!
@@ -21,19 +21,25 @@
 //!
 //! - Strings are UTF-8, so Java's behavior of splitting a surrogate pair when it steps over an
 //!   empty match (`"😀".split("")` yields lone surrogates) cannot be reproduced; matching
-//!   advances by whole characters.
-//! - When a quantified group can match the empty string (`(a*)*`), Java records the final empty
-//!   iteration as the group's capture; the engine keeps the last non-empty one.
-//! - `\b` and `\B` use ASCII word characters. Java also treats a combining mark that follows a
-//!   letter as a word character.
-//! - With `(?iu)`, case folding is Unicode simple case folding. Java compares through
-//!   `toUpperCase` and `toLowerCase`, which also equates dotted and dotless `i` with `i` and `I`.
-//! - Unicode property and script tables follow the Rust engine's Unicode version, which can be
-//!   newer than the JDK's.
-//! - A back reference under `(?i)` is rejected as [`Unsupported::CaseInsensitiveBackReference`],
-//!   along with the other [`Unsupported`] constructs.
-//! - Assertions such as `$`, multiline `^`, and `\b` are translated to look-around, so patterns
-//!   using them run on the backtracking engine and count against the backtrack limit.
+//!   advances by whole characters. A lone surrogate in a pattern never matches, as in Java for
+//!   any input without lone surrogates.
+//! - A case-insensitive back reference compares by Unicode simple case folding over the same
+//!   number of UTF-8 bytes (the engine's back reference). Java compares character by character
+//!   through `toUpperCase` and `toLowerCase`, and folds only ASCII letters without `(?u)`. So
+//!   `(?i)(é)\1` matches `éÉ` here but not in Java, and `(?iu)(.)\1` matches `k` followed by
+//!   the Kelvin sign (U+212A), `sſ`, `ßẞ`, `iı`, and `iİ` in Java but not here.
+//! - Java bounds a look-behind as if `\X` had no width, so a look-behind around `\X` never
+//!   matches in Java; here it matches the cluster.
+//! - `\b{g}` follows Java's algorithm: a boundary is any position at or after the end of the
+//!   first cluster that starts where the previous match ended. Java reads that position from
+//!   matcher state that its own look-ahead and repetition nodes also overwrite, which the
+//!   translation does not reproduce.
+//! - Unicode properties, scripts, case mappings, and grapheme cluster types follow the Unicode
+//!   version of the Rust standard library and the engine, which can be newer than the JDK's.
+//!   Block and script names, and block ranges, are Java's own (`src/tables.rs`).
+//! - Assertions such as `$`, multiline `^`, and `\b` are translated to look-around, and loops
+//!   whose body can match the empty string run on the backtracking engine, so those patterns
+//!   count against the backtrack limit.
 //!
 //! # Examples
 //!
@@ -50,12 +56,14 @@
 //! ```
 
 mod ast;
+mod case;
 mod classes;
 mod emit;
 mod error;
 mod parser;
 mod regex;
 mod replacement;
+mod tables;
 
 pub use error::{RegexError, ReplacementError, Unsupported};
 pub use regex::{

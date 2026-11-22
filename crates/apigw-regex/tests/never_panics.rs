@@ -71,6 +71,14 @@ const PATTERN_FRAGMENTS: &[&str] = &[
     "\\Z",
     "\\G",
     "\\X",
+    "\\b{g}",
+    "\\p{javaLowerCase}",
+    "\\p{InGreek}",
+    "\\p{IsLatin}",
+    "(?iu)",
+    "\\ud83d",
+    "\\x{DE00}",
+    "\\N{",
     "#",
     " ",
     "\n",
@@ -80,7 +88,24 @@ const PATTERN_FRAGMENTS: &[&str] = &[
 ];
 
 const INPUT_FRAGMENTS: &[&str] = &[
-    "a", "b", "1", "é", "😀", "\n", "\r", "\r\n", " ", "_", "-", "\u{2028}",
+    "a",
+    "b",
+    "1",
+    "é",
+    "😀",
+    "\n",
+    "\r",
+    "\r\n",
+    " ",
+    "_",
+    "-",
+    "\u{2028}",
+    "\u{301}",
+    "\u{200D}",
+    "\u{1F1FA}",
+    "\u{130}",
+    "\u{212A}",
+    "\u{1100}",
 ];
 
 fn from_fragments(fragments: &'static [&'static str], max: usize) -> impl Strategy<Value = String> {
@@ -123,12 +148,27 @@ fn long_inputs_do_not_overflow_a_worker_stack() {
     std::thread::Builder::new()
         .stack_size(WORKER_STACK)
         .spawn(|| {
-            let input = "x".repeat(200_000);
-            for pattern in [
-                "(?s).*", "x*", r"\w+", "(?:x)*", r"(x)\1*", "[^,]*,?", "(?m)^x*$",
-            ] {
-                let regex = JavaRegex::new(pattern).expect("pattern compiles");
-                exercise(&regex, &input, "$0");
+            for input in ["x".repeat(200_000), "e\u{301}".repeat(50_000)] {
+                for pattern in [
+                    "(?s).*",
+                    "x*",
+                    r"\w+",
+                    "(?:x)*",
+                    r"(x)\1*",
+                    "[^,]*,?",
+                    "(?m)^x*$",
+                    r"\X+",
+                    r"\b{g}",
+                    r"\b\w+\b",
+                    "(?iu)[a-z]+",
+                    "(x*)*",
+                    r"(?<=\G..)",
+                    r"\Gx",
+                    r"(?i)(x)\1*",
+                ] {
+                    let regex = JavaRegex::new(pattern).expect("pattern compiles");
+                    exercise(&regex, &input, "$0");
+                }
             }
         })
         .expect("thread spawns")

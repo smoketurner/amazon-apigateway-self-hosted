@@ -18,7 +18,7 @@ use serde_json::{Map, Value};
 use crate::aws::RoleArn;
 use crate::aws_service::{Protocol, Service, ServiceCall};
 use crate::gateway::{ApiContext, GatewayError};
-use crate::mapping::ServiceParameters;
+use crate::mapping::{ResponseMapping, ServiceParameters};
 use crate::pipeline::RequestContext;
 use crate::proxy::UrlEncoder;
 
@@ -176,12 +176,12 @@ impl Subtype {
                     &["StateMachineArn"],
                     &["Input", "Name", "TraceHeader"],
                 )?;
-                Ok(Self::json(&body))
+                Ok(Self::json(&Self::camel_case(body)))
             }
             Self::StepFunctionsStopExecution => {
                 let mut body = Map::new();
                 Self::copy(params, &mut body, &["ExecutionArn"], &["Cause", "Error"])?;
-                Ok(Self::json(&body))
+                Ok(Self::json(&Self::camel_case(body)))
             }
             Self::KinesisPutRecord => Self::put_record(params),
             Self::AppConfigGetConfiguration => Self::get_configuration(params),
@@ -209,6 +209,18 @@ impl Subtype {
             body: Bytes::from(Value::Object(body.clone()).to_string()),
             content_type: None,
         }
+    }
+
+    /// The Step Functions API names its members in camel case (`stateMachineArn`),
+    /// while the subtype's parameters are capitalized (`StateMachineArn`).
+    fn camel_case(body: Map<String, Value>) -> Map<String, Value> {
+        let mut renamed = Map::new();
+        for (name, value) in body {
+            let mut chars = name.chars();
+            let first = chars.next().map(|c| c.to_ascii_lowercase());
+            renamed.insert(first.into_iter().chain(chars).collect(), value);
+        }
+        renamed
     }
 
     /// Copies `required` (an error when absent) and `optional` parameters into
@@ -379,6 +391,8 @@ impl Form {
 pub(crate) struct SubtypeIntegration {
     pub(crate) subtype: Subtype,
     parameters: ServiceParameters,
+    /// `responseParameters`, by the service's response status code.
+    pub(crate) response_mapping: ResponseMapping,
     pub(crate) role: Option<RoleArn>,
     timeout: Duration,
 }
@@ -387,12 +401,14 @@ impl SubtypeIntegration {
     pub(crate) fn new(
         subtype: Subtype,
         parameters: ServiceParameters,
+        response_mapping: ResponseMapping,
         role: Option<RoleArn>,
         timeout: Duration,
     ) -> Self {
         Self {
             subtype,
             parameters,
+            response_mapping,
             role,
             timeout,
         }
@@ -654,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn step_functions_pass_their_fields_through() {
+    fn step_functions_name_their_fields_in_camel_case() {
         let start = shape(
             Subtype::StepFunctionsStartExecution,
             &[
@@ -666,7 +682,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             serde_json::from_slice::<Value>(&start.body).unwrap(),
-            serde_json::json!({"StateMachineArn": "arn:aws:states:::sm", "Input": "{}", "Name": "run-1"})
+            serde_json::json!({"stateMachineArn": "arn:aws:states:::sm", "input": "{}", "name": "run-1"})
         );
         let stop = shape(
             Subtype::StepFunctionsStopExecution,
@@ -675,7 +691,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             serde_json::from_slice::<Value>(&stop.body).unwrap(),
-            serde_json::json!({"ExecutionArn": "arn:aws:states:::exec", "Cause": "why"})
+            serde_json::json!({"executionArn": "arn:aws:states:::exec", "cause": "why"})
         );
         assert!(shape(Subtype::StepFunctionsStartSyncExecution, &[]).is_err());
     }

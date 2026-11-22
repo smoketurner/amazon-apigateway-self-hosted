@@ -118,6 +118,46 @@
     },
     "adminPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
     "containerPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scrapeAnnotations": { "type": "boolean" },
+        "tlsConfig": { "type": "object" },
+        "podMonitor": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "interval": { "type": "string", "pattern": "^[0-9]+(ms|s|m|h)$" },
+            "labels": { "type": "object", "additionalProperties": { "type": "string" } }
+          }
+        },
+        "serviceMonitor": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "interval": { "type": "string", "pattern": "^[0-9]+(ms|s|m|h)$" },
+            "labels": { "type": "object", "additionalProperties": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "otel": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "endpoint": { "type": "string" },
+        "protocol": { "enum": ["http/protobuf", "grpc"] },
+        "serviceName": { "type": "string" },
+        "resourceAttributes": {
+          "type": "object",
+          "additionalProperties": { "type": ["string", "number", "boolean"] }
+        }
+      }
+    },
     "podDisruptionBudget": {
       "type": "object",
       "additionalProperties": false,

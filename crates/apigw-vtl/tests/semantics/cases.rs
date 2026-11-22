@@ -1495,7 +1495,7 @@ pub(super) const CASES: &[Case] = &[
         name: "input-json",
         template: "$input.json('$.items[0]') $input.json('$.total') $input.json('$.nothing') $input.json('$.items[*].id') $input.json('$.name')",
         request: None,
-        outcome: Output("{\"id\":1,\"name\":\"a\"} 2 null [1,2] \"n\""),
+        outcome: Output("{\"id\":1,\"name\":\"a\"} 2 \"\" [1,2] \"n\""),
     },
     Case {
         name: "input-body",
@@ -3033,7 +3033,7 @@ pub(super) const CASES: &[Case] = &[
         request: Some(
             "{\"bodyJson\":{\"a\":1,\"b\":2.5,\"c\":\"text\",\"d\":true,\"e\":null,\"f\":[],\"g\":{},\"h\":[1,2,3,4,5],\"i\":[[1,2],[3,4],[5]],\"j\":{\"k\":{\"l\":{\"m\":\"deep\"}}},\"n\":[\"x\",\"y\",\"z\"],\"o\":[{\"p\":1},{\"p\":2,\"q\":\"two\"},{\"r\":3}],\"s p\":\"space\",\"dot.key\":\"dotted\",\"$\":\"dollar\",\"u\":\"unicode \u{e9}\u{4e2d}\",\"num\":[10,20.5,30,-5],\"nulls\":[null,1,null],\"big\":3000000000}}",
         ),
-        outcome: Output("[null][$input.path('$.c[0]')]"),
+        outcome: Output("[\"\"][]"),
     },
     Case {
         name: "jp.mixed.137",
@@ -3049,7 +3049,7 @@ pub(super) const CASES: &[Case] = &[
         request: Some(
             "{\"bodyJson\":{\"a\":1,\"b\":2.5,\"c\":\"text\",\"d\":true,\"e\":null,\"f\":[],\"g\":{},\"h\":[1,2,3,4,5],\"i\":[[1,2],[3,4],[5]],\"j\":{\"k\":{\"l\":{\"m\":\"deep\"}}},\"n\":[\"x\",\"y\",\"z\"],\"o\":[{\"p\":1},{\"p\":2,\"q\":\"two\"},{\"r\":3}],\"s p\":\"space\",\"dot.key\":\"dotted\",\"$\":\"dollar\",\"u\":\"unicode \u{e9}\u{4e2d}\",\"num\":[10,20.5,30,-5],\"nulls\":[null,1,null],\"big\":3000000000}}",
         ),
-        outcome: Output("[null][$input.path('$.f[0]')]"),
+        outcome: Output("[\"\"][]"),
     },
     Case {
         name: "jp.mixed.144",
@@ -3089,7 +3089,7 @@ pub(super) const CASES: &[Case] = &[
         request: Some(
             "{\"bodyJson\":{\"a\":1,\"b\":2.5,\"c\":\"text\",\"d\":true,\"e\":null,\"f\":[],\"g\":{},\"h\":[1,2,3,4,5],\"i\":[[1,2],[3,4],[5]],\"j\":{\"k\":{\"l\":{\"m\":\"deep\"}}},\"n\":[\"x\",\"y\",\"z\"],\"o\":[{\"p\":1},{\"p\":2,\"q\":\"two\"},{\"r\":3}],\"s p\":\"space\",\"dot.key\":\"dotted\",\"$\":\"dollar\",\"u\":\"unicode \u{e9}\u{4e2d}\",\"num\":[10,20.5,30,-5],\"nulls\":[null,1,null],\"big\":3000000000}}",
         ),
-        outcome: Output("[null][$input.path('$.store')]"),
+        outcome: Output("[\"\"][]"),
     },
     Case {
         name: "jp.store.1",
@@ -3369,7 +3369,7 @@ pub(super) const CASES: &[Case] = &[
         request: Some(
             "{\"bodyJson\":{\"a\":1,\"b\":2.5,\"c\":\"text\",\"d\":true,\"e\":null,\"f\":[],\"g\":{},\"h\":[1,2,3,4,5],\"i\":[[1,2],[3,4],[5]],\"j\":{\"k\":{\"l\":{\"m\":\"deep\"}}},\"n\":[\"x\",\"y\",\"z\"],\"o\":[{\"p\":1},{\"p\":2,\"q\":\"two\"},{\"r\":3}],\"s p\":\"space\",\"dot.key\":\"dotted\",\"$\":\"dollar\",\"u\":\"unicode \u{e9}\u{4e2d}\",\"num\":[10,20.5,30,-5],\"nulls\":[null,1,null],\"big\":3000000000}}",
         ),
-        outcome: Output("[null][$input.path('$.nothing.append(1)')]"),
+        outcome: Output("[\"\"][]"),
     },
     Case {
         name: "jp2.44",
@@ -3645,7 +3645,7 @@ pub(super) const CASES: &[Case] = &[
         request: Some(
             "{\"bodyJson\":{\"s\":\"str\",\"n\":7,\"d\":0.5,\"b\":false,\"z\":null,\"l\":[1,\"a\"],\"o\":{\"k\":[true]}}}",
         ),
-        outcome: Output("[\"str\"][7][0.5][false][null][[1,\"a\"]][{\"k\":[true]}][null]"),
+        outcome: Output("[\"str\"][7][0.5][false][null][[1,\"a\"]][{\"k\":[true]}][\"\"]"),
     },
     Case {
         name: "input-params-all",

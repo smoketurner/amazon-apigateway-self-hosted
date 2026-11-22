@@ -225,6 +225,433 @@ paths:
             statusCode: "400"
             responseTemplates:
               application/json: '{"upstreamStatus":"client-error"}'
+  # Non-proxy HTTP with no Content-Type mapping and no request template: the
+  # response reports which headers and body reached the backend.
+  /http-nonproxy-headers/{id}:
+    get:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: x-from-client
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "what the backend received"
+      x-amazon-apigateway-integration:
+        type: http
+        httpMethod: POST
+        uri: "https://$${stageVariables.echo_host}/http-nonproxy-headers/{backendId}"
+        passthroughBehavior: when_no_match
+        timeoutInMillis: 5000
+        requestParameters:
+          integration.request.path.backendId: "method.request.path.id"
+          integration.request.header.x-echo-secret: "stageVariables.echo_secret"
+          integration.request.header.x-mapped-header: "method.request.header.x-from-client"
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                {"contentType":$input.json("$.headers['content-type']"),"accept":$input.json('$.headers.accept'),"fromClient":$input.json("$.headers['x-from-client']"),"mapped":$input.json("$.headers['x-mapped-header']"),"body":$input.json('$.body')}
+    post:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: x-from-client
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "what the backend received"
+      x-amazon-apigateway-integration:
+        type: http
+        httpMethod: POST
+        uri: "https://$${stageVariables.echo_host}/http-nonproxy-headers/{backendId}"
+        passthroughBehavior: when_no_match
+        timeoutInMillis: 5000
+        requestParameters:
+          integration.request.path.backendId: "method.request.path.id"
+          integration.request.header.x-echo-secret: "stageVariables.echo_secret"
+          integration.request.header.x-mapped-header: "method.request.header.x-from-client"
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                {"contentType":$input.json("$.headers['content-type']"),"accept":$input.json('$.headers.accept'),"fromClient":$input.json("$.headers['x-from-client']"),"mapped":$input.json("$.headers['x-mapped-header']"),"body":$input.json('$.body')}
+  # Integrations that cannot be reached, for API Gateway's default 5xx answers
+  /broken/unresolvable:
+    get:
+      responses: {}
+      x-amazon-apigateway-integration:
+        type: http_proxy
+        httpMethod: GET
+        uri: "https://$${stageVariables.unresolvable_host}/unresolvable"
+        passthroughBehavior: when_no_match
+        timeoutInMillis: 5000
+  /broken/unset-host:
+    get:
+      responses: {}
+      x-amazon-apigateway-integration:
+        type: http_proxy
+        httpMethod: GET
+        uri: "https://$${stageVariables.unset_host}/unset-host"
+        passthroughBehavior: when_no_match
+        timeoutInMillis: 5000
+  # Integrations that answer after their timeout, for API Gateway's 504
+  /timeout:
+    get:
+      responses: {}
+      x-amazon-apigateway-integration:
+        type: http_proxy
+        httpMethod: GET
+        uri: "https://$${stageVariables.echo_host}/timeout"
+        passthroughBehavior: when_no_match
+        timeoutInMillis: 50
+        requestParameters:
+          integration.request.header.x-echo-secret: "stageVariables.echo_secret"
+  /lambda-timeout:
+    get:
+      responses: {}
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_match
+        timeoutInMillis: 50
+  # Template features whose behavior on API Gateway is recorded, not assumed
+  /vtl/macro:
+    post:
+      responses:
+        "200":
+          description: "the rendered template"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_templates
+        requestTemplates:
+          application/json: |-
+            {"body":$input.json('$')}
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                #macro(greet $who)hello $who#end#greet('a') #greet($input.path('$.body.name'))
+  /vtl/macro-scope:
+    post:
+      responses:
+        "200":
+          description: "the rendered template"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_templates
+        requestTemplates:
+          application/json: |-
+            {"body":$input.json('$')}
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                #set($x = 'outer')#macro(m $x)in=$x #set($y = 'set-in-macro')#end#m('arg')x=$x y=$y
+  /vtl/define:
+    post:
+      responses:
+        "200":
+          description: "the rendered template"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_templates
+        requestTemplates:
+          application/json: |-
+            {"body":$input.json('$')}
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                #define($block)x=$x#end#set($x = 1)$block #set($x = 2)$block
+  /vtl/evaluate:
+    post:
+      responses:
+        "200":
+          description: "the rendered template"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_templates
+        requestTemplates:
+          application/json: |-
+            {"body":$input.json('$')}
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                #set($t = '#set($y = 3)$y')#evaluate($t) #evaluate('$input.path("$.body.name")')
+  /vtl/parse:
+    post:
+      responses:
+        "200":
+          description: "the rendered template"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_templates
+        requestTemplates:
+          application/json: |-
+            {"body":$input.json('$')}
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                before #parse('other.vm') after
+  /vtl/include:
+    post:
+      responses:
+        "200":
+          description: "the rendered template"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_templates
+        requestTemplates:
+          application/json: |-
+            {"body":$input.json('$')}
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                before #include('other.vm') after
+  /vtl/bigint:
+    post:
+      responses:
+        "200":
+          description: "the rendered template"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_templates
+        requestTemplates:
+          application/json: |-
+            {"body":$input.json('$')}
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                #set($a = 9223372036854775807)#set($b = $a + 1)$b #set($c = $a * $a)$c #if($b > $a)greater#end
+  /vtl/int-overflow:
+    post:
+      responses:
+        "200":
+          description: "the rendered template"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_templates
+        requestTemplates:
+          application/json: |-
+            {"body":$input.json('$')}
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                #set($i = 2147483647)#set($j = $i + 1)$j #set($k = $i * 2)$k
+  /vtl/map-keys:
+    post:
+      responses:
+        "200":
+          description: "the rendered template"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_templates
+        requestTemplates:
+          application/json: |-
+            {"body":$input.json('$')}
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                #set($m = {1: 'int', '1': 'string', true: 'bool'})$m $m.get(1) $m.get('1') $m.size()
+  /vtl/deep-scan-functions:
+    post:
+      responses:
+        "200":
+          description: "the rendered template"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_templates
+        requestTemplates:
+          application/json: |-
+            {"body":$input.json('$')}
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                $input.json('$.body..price.length()') $input.json('$.body..price.sum()') $input.json('$.body..price.max()')
+  /vtl/util-escape:
+    post:
+      responses:
+        "200":
+          description: "the rendered template"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_templates
+        requestTemplates:
+          application/json: |-
+            {"body":$input.json('$')}
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                $util.escapeJavaScript('a"b') $util.escapeJavaScript("it's") $util.escapeJavaScript($input.json('$.body'))
+  /vtl/util-url:
+    post:
+      responses:
+        "200":
+          description: "the rendered template"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_templates
+        requestTemplates:
+          application/json: |-
+            {"body":$input.json('$')}
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                $util.urlEncode('a b&c=d/é') $util.urlDecode('a%20b%2Fc+d')
+  /vtl/util-base64:
+    post:
+      responses:
+        "200":
+          description: "the rendered template"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_templates
+        requestTemplates:
+          application/json: |-
+            {"body":$input.json('$')}
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                $util.base64Encode('hi there') $util.base64Decode('aGkgdGhlcmU=')
+  /vtl/util-parse-json:
+    post:
+      responses:
+        "200":
+          description: "the rendered template"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_templates
+        requestTemplates:
+          application/json: |-
+            {"body":$input.json('$')}
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                #set($o = $util.parseJson('{"a":[1,2],"b":{"c":true}}'))$o.a.size() $o.b.c $o.a.get(0)
+  /vtl/input:
+    post:
+      responses:
+        "200":
+          description: "the rendered template"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_templates
+        requestTemplates:
+          application/json: |-
+            {"body":$input.json('$')}
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                $input.json('$.body') $input.path('$.body.name') $input.json('$.body.absent') [$input.path('$.body.absent')] $input.params('missing')
+  /vtl/undefined:
+    post:
+      responses:
+        "200":
+          description: "the rendered template"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_templates
+        requestTemplates:
+          application/json: |-
+            {"body":$input.json('$')}
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                #set($m = {'a': 1})#set($n = $input.path('$.body.absent'))[$undefined] [$undefined.prop] [$undefined.size()] [$!undefined] [$m.missing] [$m.get('missing')] [$n] [$n.length()]
   /lambda-nonproxy:
     post:
       responses:
@@ -350,6 +777,89 @@ paths:
         responses:
           default:
             statusCode: "200"
+  # SNS, Kinesis, and S3, answering with the service's own response
+  /aws/sns:
+    post:
+      responses:
+        "200":
+          description: "Publish result"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "arn:${partition}:apigateway:${region}:sns:action/Publish"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: never
+        requestParameters:
+          integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
+        requestTemplates:
+          application/json: "TopicArn=$util.urlEncode('${topic_arn}')&Message=$util.urlEncode($input.body)"
+        responses:
+          default:
+            statusCode: "200"
+  /aws/kinesis:
+    post:
+      responses:
+        "200":
+          description: "PutRecord result"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "arn:${partition}:apigateway:${region}:kinesis:action/PutRecord"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: never
+        requestTemplates:
+          application/json: |-
+            {"StreamName":"${stream_name}","Data":"$util.base64Encode($input.body)","PartitionKey":"parity"}
+        responses:
+          default:
+            statusCode: "200"
+  /aws/s3/{key}:
+    put:
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "PutObject result"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: PUT
+        uri: "arn:${partition}:apigateway:${region}:s3:path/${bucket_name}/{object}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_match
+        requestParameters:
+          integration.request.path.object: "method.request.path.key"
+        responses:
+          default:
+            statusCode: "200"
+    get:
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "the object"
+        "404":
+          description: "no such object"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: GET
+        uri: "arn:${partition}:apigateway:${region}:s3:path/${bucket_name}/{object}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_match
+        requestParameters:
+          integration.request.path.object: "method.request.path.key"
+        responses:
+          default:
+            statusCode: "200"
+          "404":
+            statusCode: "404"
   /validated/{id}:
     post:
       x-amazon-apigateway-request-validator: all

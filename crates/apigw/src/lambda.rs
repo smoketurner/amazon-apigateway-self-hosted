@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, header};
 use axum::response::Response;
 use base64::Engine as _;
@@ -16,13 +16,14 @@ use tokio::time::Instant as TokioInstant;
 
 use crate::authz::MethodArn;
 use crate::aws::AwsClients;
-use crate::gateway::GatewayError;
+use crate::gateway::{GatewayError, HeaderNameExt as _};
 use crate::header_case::HeaderCase;
 use crate::header_policy::{Flavor, IamAuthorization};
 use crate::integration::{LambdaProxy, StageVariables};
 use crate::lambda_response::{PreludeError, ProxyResponse, StreamBody, StreamPrelude};
 use crate::model::{ApiKind, PayloadVersion, Protection, ResponseTransferMode};
 use crate::pipeline::RequestContext;
+use crate::pipeline::context::QueryString;
 use crate::route::Route;
 
 /// Lambda's payload limit for synchronous invocations, which applies to the
@@ -42,8 +43,10 @@ impl LambdaProxy {
         } else {
             IamAuthorization::NotUsed
         };
+        let mapped = self.request_mapping.event_request(ctx);
         let event = ProxyEvent::new(ctx, stage_variables)
             .with_account(self.function.account().unwrap_or_default())
+            .with_mapped_request(mapped.as_ref())
             .with_header_table(iam)
             .render(self.payload)
             .to_string()
@@ -53,6 +56,15 @@ impl LambdaProxy {
             return Err(GatewayError::IntegrationFailure);
         }
         ctx.integration.transfer_mode = Some(self.transfer);
+        if ctx.capture_exchange {
+            let exchange = ctx.integration.exchange.get_or_insert_default();
+            exchange.uri = Some(format!(
+                "https://lambda.{}.amazonaws.com/2015-03-31/functions/{}/invocations",
+                self.function.region().unwrap_or_default(),
+                self.function.as_str()
+            ));
+            exchange.request_body = Some(Bytes::from(event.clone()));
+        }
         let started = Instant::now();
         let result = match self.transfer {
             ResponseTransferMode::Buffered => self.invoke_buffered(aws, route, ctx, event).await,
@@ -71,7 +83,7 @@ impl LambdaProxy {
         &self,
         aws: &AwsClients,
         route: &Route,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
         event: Vec<u8>,
     ) -> Result<Response, GatewayError> {
         let call = aws.invoke_lambda(
@@ -98,6 +110,9 @@ impl LambdaProxy {
         if invocation.payload.len() > LAMBDA_PAYLOAD_LIMIT {
             tracing::error!(route = %route.key, function = %self.function, bytes = invocation.payload.len(), "Lambda response is larger than the invocation payload limit");
             return Err(GatewayError::IntegrationFailure);
+        }
+        if let Some(ref mut exchange) = ctx.integration.exchange {
+            exchange.response_body = Some(Bytes::copy_from_slice(&invocation.payload));
         }
         let negotiation =
             (ctx.api.kind == ApiKind::Rest).then(|| ctx.payload.negotiate(&ctx.headers));
@@ -428,6 +443,16 @@ impl MultiValues {
         self.0.entry(key).or_default().push(value);
     }
 
+    /// Repeated `Cookie` headers as one value, as a deployed HTTP API's payload
+    /// 1.0 event carries them (`a=1; b=2`).
+    fn join_cookies(&mut self) {
+        if let Some(cookies) = self.0.get_mut("Cookie")
+            && cookies.len() > 1
+        {
+            *cookies = vec![cookies.join("; ")];
+        }
+    }
+
     /// Payload format 1.0: the last value per key, and every value per key.
     fn single_and_multi(&self) -> (Value, Value) {
         if self.0.is_empty() {
@@ -463,6 +488,9 @@ pub(crate) struct ProxyEvent<'a> {
     /// REST proxy events carry the client's headers as API Gateway's header
     /// table lets them through; `None` sends them all, as authorizer events do.
     header_table: Option<IamAuthorization>,
+    /// Headers and query string after HTTP API request parameter mapping, in
+    /// place of the request's own.
+    mapped: Option<&'a (HeaderMap, QueryString)>,
 }
 
 impl<'a> ProxyEvent<'a> {
@@ -472,7 +500,26 @@ impl<'a> ProxyEvent<'a> {
             stage_variables,
             account_id: "",
             header_table: None,
+            mapped: None,
         }
+    }
+
+    /// Uses the headers and query string that request parameter mapping produced.
+    pub(crate) fn with_mapped_request(
+        mut self,
+        mapped: Option<&'a (HeaderMap, QueryString)>,
+    ) -> Self {
+        self.mapped = mapped;
+        self
+    }
+
+    fn request_headers(&self) -> &HeaderMap {
+        self.mapped
+            .map_or(&self.ctx.headers, |(headers, _)| headers)
+    }
+
+    fn request_query(&self) -> &QueryString {
+        self.mapped.map_or(&self.ctx.query, |(_, query)| query)
     }
 
     /// Applies API Gateway's REST header table to the event's headers.
@@ -539,13 +586,14 @@ impl<'a> ProxyEvent<'a> {
         let spelling = EventSpelling::of(self.ctx.api.kind, version);
         let allowed = match self.header_table {
             Some(iam) if spelling == EventSpelling::Rest => {
-                Cow::Owned(Flavor::Lambda.request_headers(&self.ctx.headers, iam))
+                Cow::Owned(Flavor::Lambda.request_headers(self.request_headers(), iam))
             }
-            Some(_) | None => Cow::Borrowed(&self.ctx.headers),
+            Some(_) | None => Cow::Borrowed(self.request_headers()),
         };
         let mut headers = MultiValues::default();
         for (name, value) in allowed.iter() {
-            if GATEWAY_EVENT_HEADERS.contains(&name.as_str()) {
+            // Measured: no event carries a hop-by-hop header the client sent.
+            if GATEWAY_EVENT_HEADERS.contains(&name.as_str()) || name.is_hop_by_hop() {
                 continue;
             }
             // An HTTP API reports the length it read, not what the client claimed.
@@ -556,6 +604,9 @@ impl<'a> ProxyEvent<'a> {
             headers.push(name.into_owned(), spelling.value(value.as_bytes()));
         }
         self.push_gateway_headers(&mut headers, spelling);
+        if spelling == EventSpelling::HttpV1 {
+            headers.join_cookies();
+        }
         headers
     }
 
@@ -584,8 +635,12 @@ impl<'a> ProxyEvent<'a> {
         if let Some(forwarded_for) = forwarded_for {
             push("x-forwarded-for", forwarded_for);
         }
-        push("x-forwarded-port", ctx.port().to_string());
-        push("x-forwarded-proto", "https".to_owned());
+        // Measured: a REST API's event for a mutual TLS request carries neither.
+        let mutual_tls = spelling == EventSpelling::Rest && ctx.identity.has_verified_certificate();
+        if !mutual_tls {
+            push("x-forwarded-port", ctx.port().to_string());
+            push("x-forwarded-proto", "https".to_owned());
+        }
         if let Some(trace) = ctx.started_trace_header() {
             push("x-amzn-trace-id", trace);
         }
@@ -596,7 +651,7 @@ impl<'a> ProxyEvent<'a> {
 
     fn query(&self) -> MultiValues {
         let mut query = MultiValues::default();
-        for (key, value) in self.ctx.query.pairs() {
+        for (key, value) in self.request_query().pairs() {
             query.push(key, value);
         }
         query
@@ -630,7 +685,7 @@ impl<'a> ProxyEvent<'a> {
         if let (Value::Object(fields), Some(cert)) =
             (&mut identity, self.ctx.identity.client_cert())
         {
-            fields.insert("clientCert".to_owned(), cert.to_json());
+            fields.insert("clientCert".to_owned(), cert.to_json(self.ctx.api.kind));
         }
         identity
     }
@@ -643,8 +698,10 @@ impl<'a> ProxyEvent<'a> {
         let http_api = ctx.api.kind == ApiKind::Http;
         let mut event = json!({
             "resource": ctx.resource_path,
-            // An HTTP API reports the path as sent, stage and escapes included.
-            "path": if http_api { &ctx.sent_path } else { &ctx.path },
+            // An HTTP API reports the path as sent, stage and escapes included,
+            // and so does a REST API reached through a custom domain, mapping
+            // key included (measured).
+            "path": if http_api || ctx.via_custom_domain { &ctx.sent_path } else { &ctx.path },
             "httpMethod": ctx.method.as_str(),
             "headers": headers,
             "multiValueHeaders": multi_headers,
@@ -713,7 +770,7 @@ impl<'a> ProxyEvent<'a> {
             "version": "2.0",
             "routeKey": ctx.route_key.as_str(),
             "rawPath": ctx.full_path,
-            "rawQueryString": ctx.query.raw().unwrap_or_default(),
+            "rawQueryString": self.request_query().raw().unwrap_or_default(),
             "headers": headers.joined(),
             "requestContext": {
                 "accountId": self.account_id,
@@ -761,7 +818,7 @@ impl<'a> ProxyEvent<'a> {
                 if let Some(cert) = ctx.identity.client_cert() {
                     request_context.insert(
                         "authentication".to_owned(),
-                        json!({"clientCert": cert.to_json()}),
+                        json!({"clientCert": cert.to_json(ctx.api.kind)}),
                     );
                 }
             }
@@ -791,6 +848,7 @@ mod tests {
     use crate::client_cert::tests::certificate;
     use crate::header_case::HeaderCase;
     use crate::integration::Integration;
+    use crate::mapping::{RequestMapping, ResponseMapping};
     use crate::model::{MethodMatch, Protections, RouteKey, RoutePath};
     use crate::payload::PayloadSettings;
     use crate::pipeline::context::tests::request;
@@ -816,6 +874,67 @@ mod tests {
         ProxyEvent::new(ctx, &variables())
             .with_account("123456789012")
             .render(version)
+    }
+
+    /// Measured against deployed REST and HTTP APIs: Lambda events leave out the
+    /// hop-by-hop headers a client sends.
+    #[test]
+    fn events_leave_out_hop_by_hop_headers() {
+        let mut ctx = incoming(b"");
+        for name in [
+            "connection",
+            "keep-alive",
+            "te",
+            "upgrade",
+            "proxy-connection",
+        ] {
+            ctx.headers.insert(name, HeaderValue::from_static("x"));
+        }
+        for kind in [ApiKind::Rest, ApiKind::Http] {
+            ctx.api.kind = kind;
+            for version in [PayloadVersion::V1, PayloadVersion::V2] {
+                let event = event(&ctx, version);
+                let headers = event["headers"].as_object().unwrap();
+                for name in headers.keys() {
+                    let lower = name.to_ascii_lowercase();
+                    assert!(
+                        ![
+                            "connection",
+                            "keep-alive",
+                            "te",
+                            "upgrade",
+                            "proxy-connection"
+                        ]
+                        .contains(&lower.as_str()),
+                        "{kind:?} {version:?} kept {name}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Measured against a deployed HTTP API: payload 1.0 carries repeated
+    /// `Cookie` headers as one value, other repeated headers as their last value
+    /// and the list; REST payload 1.0 keeps cookies apart like any header.
+    #[test]
+    fn repeated_cookies_are_one_value_in_http_api_payload_1() {
+        let mut ctx = incoming(b"");
+        ctx.headers
+            .append("cookie", HeaderValue::from_static("u=3"));
+        let rest = event(&ctx, PayloadVersion::V1);
+        assert_eq!(
+            rest["multiValueHeaders"]["cookie"],
+            json!(["s=1; t=2", "u=3"])
+        );
+        assert_eq!(rest["headers"]["x-multi"], "b");
+        ctx.api.kind = ApiKind::Http;
+        let http = event(&ctx, PayloadVersion::V1);
+        assert_eq!(http["headers"]["Cookie"], "s=1; t=2; u=3");
+        assert_eq!(
+            http["multiValueHeaders"]["Cookie"],
+            json!(["s=1; t=2; u=3"])
+        );
+        assert_eq!(http["multiValueHeaders"]["x-multi"], json!(["a", "b"]));
     }
 
     #[test]
@@ -1182,6 +1301,8 @@ mod tests {
             payload: PayloadVersion::V1,
             timeout: Duration::from_secs(5),
             transfer,
+            request_mapping: RequestMapping::default(),
+            response_mapping: ResponseMapping::default(),
         }
     }
 

@@ -17,6 +17,7 @@ use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use crate::canary::Release;
+use crate::domain::ViaCustomDomain;
 use crate::gateway::{ApiContext, RequestId};
 use crate::header_case::HeaderCase;
 use crate::http_routes::decoded_path;
@@ -27,6 +28,7 @@ use crate::observability::{Trace, TraceId};
 use crate::payload::PayloadSettings;
 use crate::rest_path::ReportedPath;
 use crate::route::Route;
+use crate::telemetry::{ChildSpan, RequestSpan};
 
 /// The API and stage a request was received on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,6 +238,34 @@ impl fmt::Debug for ApiKeyIdentity {
     }
 }
 
+/// What the gateway sent to the integration endpoint and what came back,
+/// recorded for execution logs with `dataTraceEnabled`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct EndpointExchange {
+    /// The method request body, which integrations may take from the context.
+    pub(crate) method_request_body: Option<Bytes>,
+    pub(crate) uri: Option<String>,
+    pub(crate) request_headers: Vec<(String, String)>,
+    pub(crate) request_body: Option<Bytes>,
+    pub(crate) response_headers: Vec<(String, String)>,
+    /// Absent for responses streamed to the client.
+    pub(crate) response_body: Option<Bytes>,
+}
+
+impl EndpointExchange {
+    pub(crate) fn header_list(headers: &HeaderMap) -> Vec<(String, String)> {
+        headers
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_owned(),
+                    String::from_utf8_lossy(value.as_bytes()).into_owned(),
+                )
+            })
+            .collect()
+    }
+}
+
 /// Outcome of the integration call, for `$context.integration.*`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct IntegrationOutcome {
@@ -246,6 +276,8 @@ pub(crate) struct IntegrationOutcome {
     /// Streaming integrations: time from connecting to having every response
     /// header (`$context.integration.timeToAllHeaders`).
     pub(crate) time_to_all_headers_ms: Option<u64>,
+    /// The exchange with the endpoint, when execution logs trace data.
+    pub(crate) exchange: Option<EndpointExchange>,
 }
 
 impl ResponseTransferMode {
@@ -281,6 +313,8 @@ pub(crate) struct RequestContext {
     pub(crate) full_path: String,
     /// The path exactly as the client sent it, stage prefix and escapes included.
     pub(crate) sent_path: String,
+    /// Whether the request reached the API through a custom domain.
+    pub(crate) via_custom_domain: bool,
     pub(crate) query: QueryString,
     pub(crate) headers: HeaderMap,
     /// The client's spelling of header names, known for HTTP/1 requests.
@@ -296,6 +330,14 @@ pub(crate) struct RequestContext {
     pub(crate) payload: Arc<PayloadSettings>,
     /// This request's place in an X-Ray trace, when the stage traces.
     pub(crate) trace: Option<Trace>,
+    /// The request's OpenTelemetry server span, when spans are exported.
+    pub(crate) otel: Option<RequestSpan>,
+    /// The span of the integration call in progress, whose context HTTP
+    /// integrations propagate.
+    pub(crate) otel_integration: Option<ChildSpan>,
+    /// Integrations record what they exchange in `integration.exchange`, for
+    /// execution logs with `dataTraceEnabled`.
+    pub(crate) capture_exchange: bool,
     pub(crate) integration: IntegrationOutcome,
 }
 
@@ -397,6 +439,7 @@ impl RequestContext {
             .get::<RequestId>()
             .map_or_else(Uuid::now_v7, |id| id.0);
         let trace = extensions.get::<Trace>().copied();
+        let otel = extensions.get::<RequestSpan>().cloned();
         let identity = extensions.remove::<ClientIdentity>().unwrap_or_else(|| {
             tracing::warn!("request reached the pipeline without a client identity");
             ClientIdentity::unknown()
@@ -438,6 +481,7 @@ impl RequestContext {
             path,
             full_path,
             sent_path,
+            via_custom_domain: extensions.get::<ViaCustomDomain>().is_some(),
             query: QueryString::for_api(api.kind, uri.query()),
             headers,
             header_case,
@@ -450,6 +494,9 @@ impl RequestContext {
             stage_variables: Arc::clone(&api.stage_variables),
             payload: Arc::clone(&api.payload),
             trace,
+            otel,
+            otel_integration: None,
+            capture_exchange: false,
             integration: IntegrationOutcome::default(),
         }
     }
@@ -504,10 +551,13 @@ impl RequestContext {
 
     /// A header's value as text, for passing on: unlike [`Self::header_str`]
     /// it has a value for a header that is not ASCII, whose UTF-8 bytes reach
-    /// the backend as the client sent them.
+    /// the backend as the client sent them. A repeated header gives its last
+    /// value, as a deployed REST API's `method.request.header` does.
     pub(crate) fn header_text(&self, name: &str) -> Option<String> {
         self.headers
-            .get(name)
+            .get_all(name)
+            .iter()
+            .next_back()
             .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
     }
 
@@ -595,7 +645,7 @@ impl RequestContext {
         if let Some(cert) = self.identity.client_cert()
             && let Some(Value::Object(identity)) = context.get_mut("identity")
         {
-            identity.insert("clientCert".to_owned(), cert.to_json());
+            identity.insert("clientCert".to_owned(), cert.to_json(self.api.kind));
         }
         if let (Value::Object(fields), Some(release)) = (&mut context, self.api.release) {
             fields.insert("isCanaryRequest".to_owned(), json!(release.is_canary()));
@@ -661,6 +711,7 @@ pub(crate) mod tests {
             path: "/pets/7".to_owned(),
             full_path: "/prod/pets/7".to_owned(),
             sent_path: "/prod/pets/7".to_owned(),
+            via_custom_domain: false,
             query: QueryString::new(Some("q=1&q=2")),
             headers,
             header_case: HeaderCase::default(),
@@ -671,6 +722,9 @@ pub(crate) mod tests {
             authorizer: AuthorizerContext::default(),
             api_key: None,
             trace: None,
+            otel: None,
+            otel_integration: None,
+            capture_exchange: false,
             stage_variables: Arc::default(),
             payload: Arc::default(),
             integration: IntegrationOutcome::default(),
@@ -729,6 +783,7 @@ pub(crate) mod tests {
             error: None,
             transfer_mode: Some(ResponseTransferMode::Stream),
             time_to_all_headers_ms: Some(5),
+            exchange: None,
         };
         request.authorizer = AuthorizerContext::lambda(Map::from_iter([
             ("principalId".to_owned(), json!("user-1")),

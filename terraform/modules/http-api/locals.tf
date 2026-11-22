@@ -6,9 +6,17 @@ locals {
     echo_invocation_uri       = var.echo_invocation_uri
     authorizer_invocation_uri = var.authorizer_invocation_uri
     invoke_role_arn           = var.invoke_role_arn
-    cors_origin               = var.cors_allowed_origin
     cognito_issuer            = var.cognito_issuer
     cognito_client_id         = var.cognito_client_id
+    queue_url                 = var.queue_url
+    event_bus_name            = var.event_bus_name
+    state_machine_arn         = var.state_machine_arn
+    execution_prefix          = replace(var.state_machine_arn, ":stateMachine:", ":execution:")
+    stream_name               = var.stream_name
+    empty_queue_url           = var.empty_queue_url
+    appconfig_application     = var.appconfig_application
+    appconfig_environment     = var.appconfig_environment
+    appconfig_configuration   = var.appconfig_configuration
   }))
 
   access_log_format = jsonencode({

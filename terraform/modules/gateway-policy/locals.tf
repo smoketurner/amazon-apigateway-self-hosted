@@ -4,6 +4,10 @@ locals {
 
   apigateway_arn = "arn:${local.partition}:apigateway:${local.region}:"
 
+  # Statement IDs name the API kind, so the REST and HTTP policies can be merged
+  # into one document (the domain gateway's) without colliding.
+  sid_prefix = title(var.api_kind)
+
   # The resources apigw reads to load and refresh the API (README, "AWS permissions").
   api_resources = var.api_kind == "rest" ? [
     "${local.apigateway_arn}:/restapis/${var.api_id}/stages/${var.stage_name}",

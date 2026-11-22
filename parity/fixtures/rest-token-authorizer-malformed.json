@@ -1,0 +1,17 @@
+{
+  "name": "rest-token-authorizer-malformed",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 500,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-errortype": "AuthorizerConfigurationException",
+      "x-amzn-requestid": "[masked]",
+      "x-reference-gateway-response": "default-5xx"
+    },
+    "body": "{\"message\":null,\"type\":\"AUTHORIZER_CONFIGURATION_ERROR\"}"
+  }
+}

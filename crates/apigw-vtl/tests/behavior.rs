@@ -3,7 +3,8 @@
 #![expect(clippy::unwrap_used, reason = "test code")]
 
 use apigw_vtl::{
-    InputParams, Limits, Map, ParseError, RenderError, Renderer, SimpleInput, Template, Value,
+    InputParams, Limits, Map, NullReferences, ParseError, RenderError, Renderer, SimpleInput,
+    Template, Value,
 };
 
 fn map(json: &str) -> Map {
@@ -194,13 +195,7 @@ fn self_referencing_collections_do_not_overflow_the_stack() {
 
 #[test]
 fn unsupported_directives_are_typed_errors() {
-    for directive in [
-        "#macro(m)x#end",
-        "#parse('a')",
-        "#include('a')",
-        "#evaluate('a')",
-        "#define($b)x#end",
-    ] {
+    for directive in ["#parse('a')", "#include('a')"] {
         assert!(
             matches!(
                 Template::parse(directive),
@@ -226,7 +221,7 @@ fn syntax_errors_report_where_they_are() {
         "{error:?}"
     );
     assert!(matches!(
-        Template::parse("#set($a = 99999999999999999999)"),
+        Template::parse(&format!("#set($a = {})", "9".repeat(20_000))),
         Err(ParseError::IntegerLiteralTooLarge { .. })
     ));
 }
@@ -272,11 +267,28 @@ fn changing_a_list_while_iterating_it_is_an_error() {
 }
 
 #[test]
-fn integer_overflow_is_an_error_not_a_wrapped_value() {
+fn integer_overflow_promotes_to_big_integer() {
     assert_eq!(
-        render("#set($a = 9223372036854775807)#set($b = $a + 1)$b"),
-        Err(RenderError::IntegerOverflow)
+        render("#set($a = 9223372036854775807)#set($b = $a + 1)$b").unwrap(),
+        "9223372036854775808"
     );
+    assert_eq!(
+        render("#set($a = 99999999999999999999)#set($b = $a * $a * $a * $a)$b").unwrap(),
+        "99999999999999999996000000000000000000059999999999999999999600000000000000000001"
+    );
+}
+
+#[test]
+fn numbers_beyond_the_size_limit_are_errors() {
+    let template = format!(
+        "#set($a = 9{})#foreach($i in [1..12])#set($a = $a * $a)#end",
+        "9".repeat(30)
+    );
+    assert_eq!(render(&template), Err(RenderError::NumberTooLarge));
+    assert!(matches!(
+        render("#set($a = 99999999999999999999)#set($b = $a % -7)"),
+        Err(RenderError::Arithmetic { .. })
+    ));
 }
 
 #[test]
@@ -390,4 +402,183 @@ fn bodies_are_read_the_way_api_gateway_reads_them() {
             "{broken}"
         );
     }
+}
+
+fn render_nulls(template: &str, null_references: NullReferences) -> String {
+    let template = Template::parse(template).unwrap();
+    Renderer::new(&input(r#"{"a":1}"#))
+        .with_null_references(null_references)
+        .render(&template)
+        .unwrap()
+}
+
+/// Velocity prints a null reference as written; API Gateway prints nothing (the lead confirms
+/// each form against a deployed API in the `/vtl/undefined` recording).
+#[test]
+fn null_references_render_as_written_or_as_nothing() {
+    let forms = "[$undefined][$undefined.prop][$undefined.method()][$!undefined][${undefined}]\
+                 [$!{undefined}]#set($m = {})[$m.missing]#set($x = $undefined)[$x]\
+                 [$input.path('$.missing')][\\$undefined][\\\\$undefined]";
+    assert_eq!(
+        render_nulls(forms, NullReferences::Literal),
+        "[$undefined][$undefined.prop][$undefined.method()][][${undefined}][][$m.missing][$x]\
+         [][\\$undefined][\\\\$undefined]"
+    );
+    assert_eq!(
+        render_nulls(forms, NullReferences::Empty),
+        "[][][][][][][][][][\\$undefined][\\]"
+    );
+    assert_eq!(
+        render_nulls("#set($s = $undefined + 'x')$s", NullReferences::Empty),
+        "$undefinedx",
+        "concatenation appends a null reference as written in both modes"
+    );
+}
+
+#[test]
+fn macros_are_ignored_and_their_calls_render_as_written() {
+    assert_eq!(
+        render("#set($x = 'outer')#macro(m $x)in=$x #set($y = 'set')#end#m('arg')x=$x y=$!y")
+            .unwrap(),
+        "#m('arg')x=outer y="
+    );
+    assert_eq!(
+        render("#macro(m)x#end#m(foo bar) #m #@m(1)body $x#end").unwrap(),
+        "#m(foo bar) #m #@m(1)body $x#end"
+    );
+    for broken in [
+        "#macro()#end",
+        "#macro('m')#end",
+        "#macro(m)x",
+        "#macro(m foo)#end",
+    ] {
+        assert!(Template::parse(broken).is_err(), "{broken}");
+    }
+}
+
+#[test]
+fn evaluate_renders_as_written() {
+    assert_eq!(
+        render("#set($t = '#set($y = 3)$y')#evaluate($t) #evaluate('a' 'b') #evaluate x").unwrap(),
+        "#evaluate($t) #evaluate('a' 'b') #evaluate x"
+    );
+}
+
+#[test]
+fn define_renders_its_block_each_time_it_is_used() {
+    assert_eq!(
+        render("#define($block)x=$x#end#set($x = 1)$block #set($x = 2)$block").unwrap(),
+        "x=1x=2"
+    );
+    assert_eq!(render("#define($d)x$d#end$d").unwrap(), "xx$d");
+    assert_eq!(
+        render("#define($d)a#break b#end#foreach($i in [1,2])$d#end").unwrap(),
+        "aa"
+    );
+    assert_eq!(render("#define($d)a#stop b#end$d after").unwrap(), "a");
+}
+
+#[test]
+fn define_blocks_in_context_are_read_back_as_text() {
+    let context = Map::new();
+    let template: Template = "#define($d)v=$v#end#set($v = 1)#set($context.blk = $d)#set($v = 2)"
+        .parse()
+        .unwrap();
+    Renderer::new(&input("{}"))
+        .with_context(context.clone())
+        .render(&template)
+        .unwrap();
+    assert_eq!(context.get("blk").unwrap().to_string(), "v=2");
+}
+
+#[test]
+#[expect(clippy::format_collect, reason = "builds a test template")]
+fn recursive_defines_stop_at_the_depth_limit() {
+    let mut template: String = (0..200)
+        .map(|i| format!("#define($d{i})<$d{}>#end", i + 1))
+        .collect();
+    template.push_str("$d0");
+    assert!(matches!(
+        render(&template),
+        Err(RenderError::DepthLimit { .. })
+    ));
+}
+
+#[test]
+fn integers_widen_like_java() {
+    assert_eq!(
+        render("#set($i = 2147483647)#set($j = $i + 1)$j #set($k = $i * 2)$k").unwrap(),
+        "21474836484294967294"
+    );
+    assert_eq!(
+        render("#set($a = -9223372036854775808)#set($b = $a / -1)$b #set($c = $a * -1)$c").unwrap(),
+        "-9223372036854775808-9223372036854775808"
+    );
+    assert_eq!(
+        render("#set($a = 99999999999999999999)#set($b = $a + 0.5)$b #set($c = $b / 4)$c").unwrap(),
+        "99999999999999999999.524999999999999999999.9"
+    );
+    assert!(matches!(
+        render("#set($a = 99999999999999999999)#set($b = $a + 0.5)#set($c = $b % 2)"),
+        Err(RenderError::Arithmetic { .. })
+    ));
+}
+
+#[test]
+fn map_keys_keep_their_java_types() {
+    assert_eq!(
+        render(
+            "#set($m = {1: 'int', '1': 'string', true: 'bool'})$m $m.get(1) $m.get('1') $m.size()"
+        )
+        .unwrap(),
+        "{1=int, 1=string, true=bool} int string 3"
+    );
+    assert_eq!(
+        render(
+            "#set($k = 3000000000 - 2999999999)#set($m = {1: 'i'})[$!m.get($k)] $m.containsKey($k)"
+        )
+        .unwrap(),
+        "[] false"
+    );
+}
+
+#[test]
+fn json_numbers_keep_their_digits() {
+    assert_eq!(
+        render_with(
+            "$input.path('$.n') $input.path('$.d') $input.json('$')",
+            r#"{"n":123456789012345678901234567890,"d":1.23456789012345678901}"#,
+            Limits::default()
+        )
+        .unwrap(),
+        r#"123456789012345678901234567890 1.23456789012345678901 {"n":123456789012345678901234567890,"d":1.23456789012345678901}"#
+    );
+    let long_number = format!(r#"{{"n":{}}}"#, "9".repeat(5000));
+    assert!(matches!(
+        render_with("$input.path('$.n')", &long_number, Limits::default()),
+        Err(RenderError::InvalidBodyJson(_))
+    ));
+}
+
+#[test]
+fn functions_after_a_deep_scan_follow_jayway() {
+    let body = r#"{"store":{"books":[{"price":1},{"price":2.5}],"bike":{"price":3}}}"#;
+    let json = |path: &str| {
+        render_with(&format!("$input.json('{path}')"), body, Limits::default()).unwrap()
+    };
+    assert_eq!(json("$..price.max()"), "3.0");
+    assert_eq!(json("$..price.sum()"), "6.5");
+    assert_eq!(json("$.store..price.length()"), "[null,null,null]");
+    assert_eq!(json("$.store..price.sum()"), "\"\"");
+}
+
+#[test]
+fn a_paren_left_open_after_a_property_restricts_what_follows() {
+    assert_eq!(
+        render("#set($s = 'a')#if(true)$s.x(#end.y").unwrap(),
+        "$s.x(.y"
+    );
+    assert!(render("#set($s = 'a')#if(true)$s.x(#end y").is_err());
+    assert!(render("#set($m = {'b': 1})$m.b#set($v = 1)(x y").is_err());
+    assert_eq!(render("#set($m = {'b': 1})$m.b x(y z").unwrap(), "1 x(y z");
 }

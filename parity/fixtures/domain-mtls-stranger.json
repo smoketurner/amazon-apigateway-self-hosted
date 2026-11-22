@@ -1,0 +1,16 @@
+{
+  "name": "domain-mtls-stranger",
+  "source": "recorded",
+  "api": "domain_mtls",
+  "response": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-errortype": "ForbiddenException",
+      "x-amzn-requestid": "[masked]"
+    },
+    "body": "{\"message\":\"Forbidden\"}"
+  }
+}

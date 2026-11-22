@@ -17,12 +17,14 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 ARG SOURCE_DATE_EPOCH=0
+# Reported by the apigw_build_info metric.
+ARG APIGW_GIT_COMMIT=""
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --locked --package apigw --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 RUN touch -d "@${SOURCE_DATE_EPOCH}" crates/apigw/src/main.rs \
-    && cargo build --release --locked --package apigw \
+    && APIGW_GIT_COMMIT="${APIGW_GIT_COMMIT}" cargo build --release --locked --package apigw \
     && mkdir -p /var/cache/apigw
 
 # distroless/static ships the CA bundle that reqwest's platform verifier needs

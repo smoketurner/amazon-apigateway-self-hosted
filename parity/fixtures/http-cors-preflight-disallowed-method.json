@@ -1,0 +1,13 @@
+{
+  "name": "http-cors-preflight-disallowed-method",
+  "source": "recorded",
+  "api": "http",
+  "response": {
+    "status": 200,
+    "headers": {
+      "apigw-requestid": "[masked]",
+      "content-type": "application/json",
+      "date": "[masked]"
+    }
+  }
+}

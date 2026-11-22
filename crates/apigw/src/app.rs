@@ -32,11 +32,12 @@ use crate::integration::StageVariables;
 use crate::integration_tls;
 use crate::listener::{self, ConnLimits, Edge, Tls};
 use crate::model::{ApiModel, IntegrationOverrides, StageSettings};
-use crate::observability::{Observability, StageObserver};
+use crate::observability::{Instrumentation, Observability, StageObserver};
 use crate::payload::PayloadSettings;
 use crate::router::{self, AllowedHosts, BasePath, LoadSummary, Loaded, RouteSummary};
 use crate::source::{Fetch, Fetcher, Snapshot, Source, SourceError};
 use crate::state::{StateBackend, Valkey};
+use crate::telemetry::{ApiStage, GatewayMetrics, RefreshOutcome, Telemetry};
 use crate::usage::{AwsUsageSource, Pacing, UsageChecker, UsageReader, UsageStore};
 use crate::vpc_link::VpcLinks;
 
@@ -292,6 +293,14 @@ impl Builder {
         )))
     }
 
+    fn labels(snapshot: &Snapshot) -> ApiStage {
+        ApiStage::new(&snapshot.api_id, snapshot.stage.as_deref())
+    }
+
+    fn metrics(&self) -> &GatewayMetrics {
+        &self.observability.instrumentation().metrics
+    }
+
     fn build(&self, inputs: &Inputs) -> anyhow::Result<Loaded> {
         let snapshot = &inputs.snapshot;
         let release = snapshot
@@ -329,6 +338,15 @@ impl Builder {
             deployment = snapshot.stamp.deployment_id,
             routes = routes.len(),
             "API definition loaded"
+        );
+        self.observability.instrumentation().metrics.loaded(
+            &Self::labels(snapshot),
+            snapshot.stamp.deployment_id.as_deref(),
+            routes.len(),
+            routes
+                .iter()
+                .filter(|route| route.integration == "UNSUPPORTED")
+                .count(),
         );
         let (canary, canary_summary) = match canary {
             Some((release, summary)) => (Some(release), Some(summary)),
@@ -408,14 +426,20 @@ impl Refresher {
                 () = shutdown.cancelled() => return,
                 () = tokio::time::sleep(delay) => {}
             }
+            let labels = Builder::labels(&self.inputs.snapshot);
             match self.next_inputs().await {
                 Ok(next) => {
                     self.backoff.reset();
-                    if let Some(loaded) = self.consider(next) {
+                    let (outcome, loaded) = self.consider(next);
+                    self.builder.metrics().refresh(&labels, outcome);
+                    if let Some(loaded) = loaded {
                         current.send_replace(Arc::new(loaded));
                     }
                 }
                 Err(err) => {
+                    self.builder
+                        .metrics()
+                        .refresh(&labels, RefreshOutcome::FetchFailed);
                     self.backoff.record_failure();
                     tracing::warn!(
                         err = format!("{err:#}"),
@@ -440,15 +464,18 @@ impl Refresher {
 
     /// Builds `next` if it differs from what is loaded and from the last
     /// rejected input, so a broken definition is logged once, not every tick.
-    fn consider(&mut self, next: Inputs) -> Option<Loaded> {
-        if next == self.inputs || self.rejected.as_ref() == Some(&next) {
-            return None;
+    fn consider(&mut self, next: Inputs) -> (RefreshOutcome, Option<Loaded>) {
+        if next == self.inputs {
+            return (RefreshOutcome::Unchanged, None);
+        }
+        if self.rejected.as_ref() == Some(&next) {
+            return (RefreshOutcome::Rejected, None);
         }
         match self.builder.build(&next) {
             Ok(loaded) => {
                 self.inputs = next;
                 self.rejected = None;
-                Some(loaded)
+                (RefreshOutcome::Swapped, Some(loaded))
             }
             Err(err) => {
                 tracing::error!(
@@ -456,7 +483,7 @@ impl Refresher {
                     "new API definition rejected; keeping the current routes"
                 );
                 self.rejected = Some(next);
-                None
+                (RefreshOutcome::Rejected, None)
             }
         }
     }
@@ -497,6 +524,9 @@ pub(crate) struct ApiRuntime {
     task: Option<tokio::task::JoinHandle<()>>,
     /// Keeps the stage's API keys and usage plans fresh.
     usage_task: Option<tokio::task::JoinHandle<()>>,
+    /// The stage, as its metrics are labeled, and where they are recorded.
+    labels: ApiStage,
+    metrics: GatewayMetrics,
 }
 
 impl ApiRuntime {
@@ -528,6 +558,8 @@ impl ApiRuntime {
             overrides: builder.overrides().await?,
         };
         let loaded = builder.build(&inputs)?;
+        let labels = Builder::labels(&inputs.snapshot);
+        let metrics = builder.metrics().clone();
         let (current, loaded) = watch::channel(Arc::new(loaded));
         let task = interval.map(|interval| {
             let refresher = Refresher {
@@ -544,6 +576,8 @@ impl ApiRuntime {
             stop,
             task,
             usage_task,
+            labels,
+            metrics,
         })
     }
 
@@ -551,9 +585,17 @@ impl ApiRuntime {
         self.loaded.clone()
     }
 
+    /// Keeps refreshing until `shutdown` is cancelled, then waits for the
+    /// refresh tasks to end.
+    pub(crate) async fn run_until(self, shutdown: CancellationToken) {
+        shutdown.cancelled().await;
+        self.stop().await;
+    }
+
     /// Stops refreshing and waits for the refresh task to end.
     pub(crate) async fn stop(self) {
         self.stop.cancel();
+        self.metrics.unloaded(&self.labels);
         for task in [self.task, self.usage_task].into_iter().flatten() {
             if let Err(err) = task.await {
                 tracing::error!(%err, "an API refresh task failed");
@@ -585,7 +627,8 @@ async fn serve_apis(
         )
         .await?;
         let routes = runtime.loaded();
-        tasks.spawn(async move { runtime.stop().await });
+        // Stopping right away would end the refresh as soon as it started.
+        tasks.spawn(runtime.run_until(shutdown.clone()));
         return Ok((
             router::dispatcher(routes.clone(), AllowedHosts::only(&config.allowed_hosts)),
             router::admin(routes, Arc::clone(aws)),
@@ -642,7 +685,40 @@ async fn connect_state(config: &Config) -> anyhow::Result<Arc<StateBackend>> {
     Ok(Arc::new(StateBackend::Valkey(valkey)))
 }
 
+/// The OpenTelemetry pipelines, whose metrics become the process-wide ones.
+/// Started before anything records a metric (certificates do as they load).
+fn start_telemetry(config: &Config) -> anyhow::Result<Telemetry> {
+    let env = |name: &str| std::env::var(name).ok();
+    let telemetry = Telemetry::start(&config.otel(env)?, env)?;
+    telemetry.metrics().install();
+    Ok(telemetry)
+}
+
+/// Binds the admin listener; the returned future serves it until `shutdown`.
+async fn serve_admin(
+    addr: std::net::SocketAddr,
+    config: &Config,
+    tls: &Tls,
+    admin_app: Router,
+    shutdown: &CancellationToken,
+) -> anyhow::Result<impl Future<Output = ()> + use<>> {
+    let admin = TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("failed to bind admin listener {addr}"))?;
+    tracing::info!(%addr, "serving admin endpoints over TLS");
+    Ok(listener::serve(
+        admin,
+        tls.clone(),
+        admin_app,
+        ConnLimits::DEFAULT,
+        config.max_connections,
+        Edge::direct(),
+        shutdown.clone(),
+    ))
+}
+
 pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
+    let telemetry = start_telemetry(&config)?;
     let tls = Tls::with_domains(
         &config.tls_cert,
         &config.tls_key,
@@ -673,6 +749,10 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
     let observability = Observability::start(
         sdk_config.clone(),
         config.observability(std::env::var("HOSTNAME").ok().as_deref()),
+        Instrumentation {
+            metrics: telemetry.metrics(),
+            tracer: telemetry.tracer(),
+        },
     );
     let state = connect_state(&config).await?;
     let builder = Builder {
@@ -703,6 +783,8 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         &mut tasks,
     )
     .await?;
+    let app = router::count_in_flight(app, telemetry.metrics());
+    let admin_app = router::with_metrics(admin_app, telemetry.registry());
     let listener = TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("failed to bind {}", config.listen))?;
@@ -717,19 +799,7 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         shutdown.clone(),
     ));
     if let Some(addr) = config.admin_listen {
-        let admin = TcpListener::bind(addr)
-            .await
-            .with_context(|| format!("failed to bind admin listener {addr}"))?;
-        tracing::info!(%addr, "serving admin endpoints over TLS");
-        tasks.spawn(listener::serve(
-            admin,
-            tls.clone(),
-            admin_app,
-            ConnLimits::DEFAULT,
-            config.max_connections,
-            Edge::direct(),
-            shutdown.clone(),
-        ));
+        tasks.spawn(serve_admin(addr, &config, &tls, admin_app, &shutdown).await?);
     }
     tasks.spawn(tls.watch(CERT_POLL_INTERVAL, shutdown.clone()));
 
@@ -738,6 +808,7 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
     shutdown.cancel();
     while tasks.join_next().await.is_some() {}
     observability.close().await;
+    telemetry.shutdown();
     Ok(())
 }
 
@@ -756,6 +827,8 @@ mod tests {
     use crate::gateway::AuthorizationMode;
     use crate::model::{ApiKind, CanarySettings, DeploymentStamp, StageSettings};
     use crate::source::CanarySnapshot;
+    use crate::telemetry::PrometheusRegistry;
+    use opentelemetry::metrics::MeterProvider as _;
 
     fn sdk_config() -> aws_config::SdkConfig {
         aws_config::SdkConfig::builder()
@@ -903,6 +976,99 @@ mod tests {
         assert!(!known.is_same_deployment(&moved));
         let unknown = DeploymentStamp::default();
         assert!(!unknown.is_same_deployment(&unknown.clone()));
+    }
+
+    /// The runtime `serve_apis` starts keeps refreshing until shutdown; it once
+    /// stopped refreshing as soon as it started.
+    #[tokio::test]
+    async fn a_running_api_keeps_refreshing_until_shutdown() {
+        let doc = scratch("api.json");
+        let write = |status: u16| {
+            json!({"paths": {"/pets": {"get": {"x-amazon-apigateway-integration": {"type": "mock",
+                "requestTemplates": {"application/json": format!("{{\"statusCode\": {status}}}")},
+                "responses": {"default": {"statusCode": status.to_string()}}}}}}})
+            .to_string()
+        };
+        tokio::fs::write(&doc, write(200)).await.unwrap();
+        let shutdown = CancellationToken::new();
+        let runtime = ApiRuntime::start(
+            Source::File {
+                path: doc.clone(),
+                kind: ApiKind::Rest,
+                stage: None,
+            },
+            builder(None),
+            None,
+            Some(Duration::from_millis(50)),
+            &sdk_config(),
+            &shutdown,
+        )
+        .await
+        .unwrap();
+        let mut loaded = runtime.loaded();
+        let supervisor = tokio::spawn(runtime.run_until(shutdown.clone()));
+        tokio::fs::write(&doc, write(201)).await.unwrap();
+        let swapped = tokio::time::timeout(Duration::from_secs(5), loaded.changed()).await;
+        assert!(
+            matches!(swapped, Ok(Ok(()))),
+            "the running API did not pick up the new definition"
+        );
+        shutdown.cancel();
+        supervisor.await.unwrap();
+        tokio::fs::remove_file(&doc).await.unwrap();
+    }
+
+    #[test]
+    fn refresh_outcomes_and_the_loaded_definition_are_measured() {
+        let registry = PrometheusRegistry::new();
+        let provider = registry.meter_provider_builder().unwrap().build();
+        let mut builder = builder(None);
+        builder.observability = Observability::off_with(Instrumentation {
+            metrics: GatewayMetrics::new(&provider.meter("apigw")),
+            tracer: None,
+        });
+        let inputs = Inputs {
+            snapshot: snapshot(),
+            overrides: IntegrationOverrides::default(),
+        };
+        builder.build(&inputs).unwrap();
+        let mut refresher = Refresher {
+            loader: file_loader(scratch("unused.json"), None),
+            builder,
+            inputs: inputs.clone(),
+            rejected: None,
+            backoff: Backoff::default(),
+        };
+        let outcome = |refresher: &mut Refresher, next: &Inputs| refresher.consider(next.clone()).0;
+        assert_eq!(outcome(&mut refresher, &inputs), RefreshOutcome::Unchanged);
+        let mut broken = inputs.clone();
+        broken.snapshot.openapi = json!({"paths": []});
+        assert_eq!(outcome(&mut refresher, &broken), RefreshOutcome::Rejected);
+        assert_eq!(
+            outcome(&mut refresher, &broken),
+            RefreshOutcome::Rejected,
+            "a definition rejected before is still not served"
+        );
+        let mut next = inputs;
+        next.snapshot.stamp.deployment_id = Some("d2".to_owned());
+        next.snapshot.openapi = json!({"paths": {
+            "/pets": {"get": {"x-amazon-apigateway-integration": {"type": "mock"}}},
+            "/aws": {"get": {"x-amazon-apigateway-integration": {"type": "aws"}}}}});
+        assert_eq!(outcome(&mut refresher, &next), RefreshOutcome::Swapped);
+        let text = registry.render();
+        assert!(
+            text.contains(r#"apigw_api_info{api_id="abc",deployment_id="d2",stage="prod"} 1"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"apigw_routes{api_id="abc",stage="prod"} 2"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"apigw_routes_unservable{api_id="abc",stage="prod"} 1"#),
+            "{text}"
+        );
+        assert!(text.contains("apigw_config_last_success_timestamp_seconds{"));
     }
 
     #[tokio::test]
@@ -1097,8 +1263,8 @@ mod tests {
         use crate::model::{AccessLogSettings, MethodSettings, SettingsScope};
         use crate::observability::testing::MockAws;
         use crate::observability::{
-            Delivery, LogGroup, MetricsNamespace, MetricsSettings, Settings, StreamName,
-            TraceDelivery,
+            Delivery, LogGroup, MetricsDestination, MetricsNamespace, MetricsSettings, Settings,
+            StreamName, TraceDelivery,
         };
 
         const ACCESS_GROUP: &str = "/aws/apigw/access";
@@ -1131,11 +1297,13 @@ mod tests {
                     access_logs: Delivery::Aws,
                     execution_logs: Delivery::Off,
                     metrics: Some(MetricsSettings {
-                        group: LogGroup::new("metrics-group"),
+                        destination: MetricsDestination::LogGroup(LogGroup::new("metrics-group")),
                         namespace: MetricsNamespace::default(),
                     }),
                     tracing: TraceDelivery::Off,
                     sampling_percent: 0,
+                    sampling_rules: false,
+                    passive: false,
                     stream: StreamName::for_pod(
                         Some("pod"),
                         None,
@@ -1143,6 +1311,7 @@ mod tests {
                         uuid::Uuid::nil(),
                     ),
                 },
+                Instrumentation::metrics_only(),
             );
             let mut builder = builder(None);
             builder.observability = Arc::clone(&observability);

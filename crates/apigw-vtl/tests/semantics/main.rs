@@ -58,7 +58,7 @@ impl Request {
             (&fixture, parse(overrides.unwrap_or("{}")))
         {
             for (key, value) in changes.entries() {
-                base.insert(key, value);
+                base.insert_value(key, value);
             }
         }
         let body = match &fixture {

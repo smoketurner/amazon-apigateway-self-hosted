@@ -1,0 +1,22 @@
+api:
+  openapiFile: /etc/apigw/api/openapi.json
+tls:
+  existingSecret: apigw-tls
+metrics:
+  scrapeAnnotations: true
+  podMonitor:
+    enabled: true
+    labels:
+      release: prometheus
+  serviceMonitor:
+    enabled: true
+    interval: 15s
+otel:
+  enabled: true
+  endpoint: http://otel-collector.observability:4318
+  serviceName: edge-gateway
+  resourceAttributes:
+    deployment.environment.name: prod
+    team: edge
+podAnnotations:
+  example.com/owner: edge

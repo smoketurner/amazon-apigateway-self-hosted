@@ -34,9 +34,10 @@ use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
 use proxy_header::io::ProxiedStream;
 use proxy_header::{ParseConfig, Protocol};
+use rustls::client::danger::HandshakeSignatureValid;
 use rustls::pki_types::pem::PemObject as _;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::server::danger::ClientCertVerifier;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use tokio::net::{TcpListener, TcpStream};
@@ -45,11 +46,13 @@ use tokio::task::JoinSet;
 use tokio_rustls::{LazyConfigAcceptor, server};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
+use x509_parser::prelude::{FromDer as _, X509Certificate};
 
 use crate::client_cert::ClientCertDetails;
 use crate::domain::DomainName;
 use crate::header_case::{HeaderCaseQueue, HeaderCaseTap};
 use crate::identity::TrustedProxies;
+use crate::telemetry::{GatewayMetrics, Outcome};
 
 /// Time limits applied to every connection.
 #[derive(Clone, Copy, Debug)]
@@ -117,6 +120,9 @@ pub(crate) struct DomainTls {
     provider: Arc<rustls::crypto::CryptoProvider>,
     resolver: Arc<dyn ResolvesServerCert>,
     config: RwLock<Option<Arc<rustls::ServerConfig>>>,
+    /// The truststore's verifier, applied after the handshake to the
+    /// certificate the client presented.
+    trust: RwLock<Option<Arc<dyn ClientCertVerifier>>>,
 }
 
 impl DomainTls {
@@ -127,21 +133,47 @@ impl DomainTls {
     ///
     /// When rustls rejects the configuration; the previous one stays in place.
     pub(crate) fn set_client_auth(&self, auth: ClientAuth) -> Result<(), TlsError> {
-        let config = match auth {
-            ClientAuth::Unavailable => None,
-            ClientAuth::Open => Some(Arc::new(Tls::server_config(
-                &self.provider,
-                &self.resolver,
+        let (config, trust) = match auth {
+            ClientAuth::Unavailable => (None, None),
+            ClientAuth::Open => (
+                Some(Arc::new(Tls::server_config(
+                    &self.provider,
+                    &self.resolver,
+                    None,
+                )?)),
                 None,
-            )?)),
-            ClientAuth::Required(verifier) => Some(Arc::new(Tls::server_config(
-                &self.provider,
-                &self.resolver,
-                Some(verifier),
-            )?)),
+            ),
+            ClientAuth::Required(verifier) => {
+                let deferred: Arc<dyn ClientCertVerifier> =
+                    Arc::new(DeferredTrust(Arc::clone(&verifier)));
+                (
+                    Some(Arc::new(Tls::server_config(
+                        &self.provider,
+                        &self.resolver,
+                        Some(deferred),
+                    )?)),
+                    Some(verifier),
+                )
+            }
         };
         *self.config.write().unwrap_or_else(PoisonError::into_inner) = config;
+        *self.trust.write().unwrap_or_else(PoisonError::into_inner) = trust;
         Ok(())
+    }
+
+    /// Whether `chain` (end entity first) chains to the domain's truststore.
+    fn trusts(&self, chain: &[CertificateDer<'static>]) -> bool {
+        let trust = self
+            .trust
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let (Some(trust), Some((end_entity, intermediates))) = (trust, chain.split_first()) else {
+            return false;
+        };
+        trust
+            .verify_client_cert(end_entity, intermediates, UnixTime::now())
+            .is_ok()
     }
 
     fn config(&self) -> Option<Arc<rustls::ServerConfig>> {
@@ -149,6 +181,59 @@ impl DomainTls {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+}
+
+/// Requires a client certificate in the handshake and checks the client's
+/// signature with it, but leaves trust to the truststore check after the
+/// handshake. API Gateway closes the handshake of a client that presents no
+/// certificate and answers one whose certificate it does not trust with
+/// `403 Forbidden` (measured against a deployed mutual TLS domain).
+#[derive(Debug)]
+struct DeferredTrust(Arc<dyn ClientCertVerifier>);
+
+impl ClientCertVerifier for DeferredTrust {
+    fn offer_client_auth(&self) -> bool {
+        true
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        true
+    }
+
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        self.0.root_hint_subjects()
+    }
+
+    fn verify_client_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.0.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.0.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.supported_verify_schemes()
     }
 }
 
@@ -199,6 +284,8 @@ impl FileStamp {
 
 #[derive(Debug)]
 struct CertStore {
+    /// `default`, or the custom domain the certificate is served for.
+    name: String,
     cert_path: PathBuf,
     key_path: PathBuf,
     provider: Arc<rustls::crypto::CryptoProvider>,
@@ -228,18 +315,30 @@ fn load_certified_key(
 
 impl CertStore {
     fn open(
+        name: &str,
         cert_path: &Path,
         key_path: &Path,
         provider: &Arc<rustls::crypto::CryptoProvider>,
     ) -> Result<Self, TlsError> {
         let stamp = FileStamp::read(cert_path, key_path);
         let key = load_certified_key(cert_path, key_path, provider)?;
+        Self::report_expiry(name, &key);
         Ok(Self {
+            name: name.to_owned(),
             cert_path: cert_path.to_owned(),
             key_path: key_path.to_owned(),
             provider: Arc::clone(provider),
             current: RwLock::new((stamp, Arc::new(key))),
         })
+    }
+
+    /// Publishes when the leaf certificate of `key` expires.
+    fn report_expiry(name: &str, key: &CertifiedKey) {
+        let not_after = key.cert.first().and_then(|der| {
+            let (_, cert) = X509Certificate::from_der(der.as_ref()).ok()?;
+            jiff::Timestamp::from_second(cert.validity().not_after.timestamp()).ok()
+        });
+        GatewayMetrics::global().certificate(name, not_after);
     }
 
     fn load(&self) -> Result<CertifiedKey, TlsError> {
@@ -262,6 +361,7 @@ impl CertStore {
             return Ok(false);
         }
         let key = self.load()?;
+        Self::report_expiry(&self.name, &key);
         *self.current.write().unwrap_or_else(PoisonError::into_inner) = (stamp, Arc::new(key));
         Ok(true)
     }
@@ -327,11 +427,11 @@ impl Tls {
         for cert in certs {
             stores.push((
                 cert.name.clone(),
-                CertStore::open(&cert.cert, &cert.key, &provider)?,
+                CertStore::open(cert.name.as_str(), &cert.cert, &cert.key, &provider)?,
             ));
         }
         let certs = Arc::new(CertSet {
-            default: CertStore::open(cert_path, key_path, &provider)?,
+            default: CertStore::open("default", cert_path, key_path, &provider)?,
             domains: stores,
         });
         let resolver: Arc<dyn ResolvesServerCert> = Arc::<CertSet>::clone(&certs);
@@ -344,6 +444,7 @@ impl Tls {
                     provider: Arc::clone(&provider),
                     resolver: Arc::clone(&resolver),
                     config: RwLock::new(None),
+                    trust: RwLock::new(None),
                 })
             })
             .collect();
@@ -370,15 +471,22 @@ impl Tls {
         Ok(config)
     }
 
-    /// The certificate the client proved it holds in the handshake, when the
-    /// configuration asked for one. A certificate that rustls verified but this
-    /// gateway cannot describe is not reported, so a request that needs one is
-    /// refused.
+    /// The certificate the client proved it holds in the handshake, when it
+    /// chains to the truststore of the domain the client asked for. A
+    /// certificate the truststore does not trust, or that this gateway cannot
+    /// describe, is not reported, so the domain refuses the request.
     fn verified_client_certificate(
+        &self,
         io: &server::TlsStream<ClientStream>,
     ) -> Option<ClientCertDetails> {
-        let certificate = io.get_ref().1.peer_certificates()?.first()?;
-        match ClientCertDetails::from_der(certificate.as_ref()) {
+        let connection = io.get_ref().1;
+        let chain = connection.peer_certificates()?;
+        let domain = self.domain_for(connection.server_name()?)?;
+        if !domain.trusts(chain) {
+            tracing::info!(domain = %domain.name, "client certificate not trusted by the domain's truststore");
+            return None;
+        }
+        match ClientCertDetails::from_der(chain.first()?.as_ref()) {
             Ok(details) => Some(details),
             Err(err) => {
                 tracing::warn!(%err, "a verified client certificate could not be read");
@@ -400,14 +508,20 @@ impl Tls {
         let Some(server_name) = server_name else {
             return Some(Arc::clone(&self.default));
         };
+        match self.domain_for(server_name) {
+            Some(domain) => domain.config(),
+            None => Some(Arc::clone(&self.default)),
+        }
+    }
+
+    /// The custom domain a client asking for `server_name` reaches: an exact
+    /// name before a wildcard that also matches.
+    fn domain_for(&self, server_name: &str) -> Option<&Arc<DomainTls>> {
         let exact = self
             .domains
             .iter()
             .find(|d| !d.name.as_str().starts_with("*.") && d.name.matches(server_name));
-        match exact.or_else(|| self.domains.iter().find(|d| d.name.matches(server_name))) {
-            Some(domain) => domain.config(),
-            None => Some(Arc::clone(&self.default)),
-        }
+        exact.or_else(|| self.domains.iter().find(|d| d.name.matches(server_name)))
     }
 
     /// Whether a client asking for `server_name` would be served at all, rather
@@ -462,8 +576,10 @@ impl Tls {
                 _ = ticker.tick() => {}
             }
             match self.reload_if_changed() {
-                Ok(_) => {}
+                Ok(true) => GatewayMetrics::global().tls_reload(Outcome::Success),
+                Ok(false) => {}
                 Err(err) => {
+                    GatewayMetrics::global().tls_reload(Outcome::Failure);
                     tracing::warn!(%err, "TLS certificate changed but failed to load; keeping the previous one");
                 }
             }
@@ -733,7 +849,7 @@ async fn serve_connection(
         },
     };
 
-    let verified_cert = Tls::verified_client_certificate(&io);
+    let verified_cert = tls.verified_client_certificate(&io);
     let activity = Activity::default();
     let idle = activity.subscribe();
     let header_case = HeaderCaseQueue::default();
@@ -1023,6 +1139,7 @@ mod tests {
     use super::*;
     use crate::client_cert::tests::{TestCa, TestClient, ca as new_ca};
     use crate::domain::Truststore;
+    use crate::model::ApiKind;
 
     const SHORT: ConnLimits = ConnLimits {
         proxy_header: Duration::from_millis(300),
@@ -1070,7 +1187,7 @@ mod tests {
                             identity.client_cert().map_or_else(
                                 || "none".to_owned(),
                                 |c| c
-                                    .to_json()
+                                    .to_json(ApiKind::Http)
                                     .get("subjectDN")
                                     .map_or_else(String::new, ToString::to_string)
                             )
@@ -1397,36 +1514,44 @@ GET /spelling HTTP/1.1\r\nhost: localhost\r\nx-MIXED-case: x\r\nconnection: clos
     }
 
     #[tokio::test]
-    async fn clients_without_a_trusted_certificate_cannot_connect_to_a_mutual_tls_domain() {
+    async fn a_mutual_tls_domain_needs_a_certificate_and_verifies_trust_after_the_handshake() {
         let secure = generate_for(&["secure.example.test"]);
         let ca = new_ca("test ca");
         let other_ca = new_ca("other ca");
         let (addr, shutdown, _tls) = start_mutual_tls(&generate(), &secure, Some(&ca)).await;
         let name = "secure.example.test";
+        // Measured: API Gateway closes the handshake of a client without a certificate.
         assert!(
             client_cert_response(&secure, addr, name, None)
                 .await
                 .is_none(),
             "no certificate"
         );
-        assert!(
-            client_cert_response(&secure, addr, name, Some(&other_ca.issue("x", 2020, 2090)))
-                .await
-                .is_none(),
-            "a certificate from another CA"
-        );
-        assert!(
-            client_cert_response(&secure, addr, name, Some(&ca.issue("x", 2000, 2001)))
-                .await
-                .is_none(),
-            "an expired certificate"
-        );
-        assert!(
-            client_cert_response(&secure, addr, name, Some(&ca.issue("x", 2090, 2095)))
-                .await
-                .is_none(),
-            "a certificate that is not valid yet"
-        );
+        // An untrusted certificate completes the handshake but is not verified, so
+        // the domain answers 403 as API Gateway does.
+        for (what, client) in [
+            (
+                "a certificate from another CA",
+                other_ca.issue("x", 2020, 2090),
+            ),
+            ("an expired certificate", ca.issue("x", 2000, 2001)),
+            (
+                "a certificate that is not valid yet",
+                ca.issue("x", 2090, 2095),
+            ),
+        ] {
+            let response = client_cert_response(&secure, addr, name, Some(&client)).await;
+            assert!(
+                response
+                    .as_deref()
+                    .is_some_and(|response| response.ends_with("false|none")),
+                "{what}: {response:?}"
+            );
+        }
+        let trusted = client_cert_response(&secure, addr, name, Some(&ca.issue("x", 2020, 2090)))
+            .await
+            .unwrap();
+        assert!(trusted.contains("true|"), "{trusted}");
         shutdown.cancel();
     }
 

@@ -1,0 +1,16 @@
+{
+  "name": "domain-mtls-lambda-identity",
+  "source": "recorded",
+  "api": "domain_mtls",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-requestid": "[masked]",
+      "x-amzn-trace-id": "[masked]"
+    },
+    "body": "{\"body\": null, \"headers\": {\"Host\": \"mtls.parity.dev.playdate.today\", \"User-Agent\": \"apigw-parity\", \"X-Amzn-Trace-Id\": \"Root=1-6b033ad9-36605fff3a9d6951f5986534\", \"X-Forwarded-For\": \"<ip-1>\", \"accept\": \"*/*\"}, \"httpMethod\": \"GET\", \"isBase64Encoded\": false, \"multiValueHeaders\": {\"Host\": [\"mtls.parity.dev.playdate.today\"], \"User-Agent\": [\"apigw-parity\"], \"X-Amzn-Trace-Id\": [\"Root=1-6b033ad9-36605fff3a9d6951f5986534\"], \"X-Forwarded-For\": [\"<ip-1>\"], \"accept\": [\"*/*\"]}, \"multiValueQueryStringParameters\": null, \"path\": \"/lambda-proxy/x\", \"pathParameters\": {\"proxy\": \"x\"}, \"queryStringParameters\": null, \"requestContext\": {\"accountId\": \"[account-id]\", \"apiId\": \"19zs0ofmuj\", \"deploymentId\": \"bswyz9\", \"domainName\": \"mtls.parity.dev.playdate.today\", \"domainPrefix\": \"mtls\", \"extendedRequestId\": \"HQYiGGPuoAMF2wQ=\", \"httpMethod\": \"GET\", \"identity\": {\"accessKey\": null, \"accountId\": null, \"caller\": null, \"clientCert\": {\"clientCertPem\": \"-----BEGIN CERTIFICATE-----\\nMIIBvzCCAWWgAwIBAgIQJcdbdoJ44s09QUcUVc+KzzAKBggqhkjOPQQDAjA8MRUw\\nEwYDVQQKEwxhcGlndyBwYXJpdHkxIzAhBgNVBAMTGmFwaWd3LXJlZiBwYXJpdHkg\\nY2xpZW50IENBMB4XDTI2MTEyMjE4NTI0NFoXDTI3MDIyMDE4NTI0NFowLzEVMBMG\\nA1UEChMMYXBpZ3cgcGFyaXR5MRYwFAYDVQQDEw1wYXJpdHktY2xpZW50MFkwEwYH\\nKoZIzj0CAQYIKoZIzj0DAQcDQgAE4dxpjrpGrGCD37NUYr0RU+R1D98vEqkjUZiN\\nS+w4I7fEwqgAi/S43zo9P/FUE+Y2LsoIPadDa5VNX1Mx/KI3UqNWMFQwDgYDVR0P\\nAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMCMAwGA1UdEwEB/wQCMAAwHwYD\\nVR0jBBgwFoAUKSb1H02MJRoY1c0IrmZAJ5kl7e4wCgYIKoZIzj0EAwIDSAAwRQIh\\nANq92JAQ9x6d4eBPOuoXV0rdvuHZP9XqqZfTJI+25aw/AiBXpSka9G2yfw8cZm/d\\nRwZdqBHAeTuFbuGYMCcQ4WSM1w==\\n-----END CERTIFICATE-----\\n\", \"issuerDN\": \"O=apigw parity,CN=apigw-ref parity client CA\", \"serialNumber\": \"50216558007466620396669010585867750095\", \"subjectDN\": \"O=apigw parity,CN=parity-client\", \"validity\": {\"notAfter\": \"Feb 20 18:52:44 2027 GMT\", \"notBefore\": \"Nov 22 18:52:44 2026 GMT\"}}, \"cognitoAuthenticationProvider\": null, \"cognitoAuthenticationType\": null, \"cognitoIdentityId\": null, \"cognitoIdentityPoolId\": null, \"principalOrgId\": null, \"sourceIp\": \"<ip-1>\", \"user\": null, \"userAgent\": \"apigw-parity\", \"userArn\": null}, \"path\": \"/lambda-proxy/x\", \"protocol\": \"HTTP/1.1\", \"requestId\": \"eca53661-1f91-4e46-bb12-1d5fb55bc0be\", \"requestTime\": \"22/Nov/2026:18:56:25 +0000\", \"requestTimeEpoch\": 1795373785778, \"resourceId\": \"m2u78h\", \"resourcePath\": \"/lambda-proxy/{proxy+}\", \"stage\": \"ref\"}, \"resource\": \"/lambda-proxy/{proxy+}\", \"stageVariables\": {\"echo_host\": \"vhj7j5563m4uhc4u47wpg6umhi0svzio.lambda-url.us-east-1.on.aws\", \"echo_secret\": \"[redacted]\", \"unresolvable_host\": \"apigw-parity.invalid\"}}"
+  }
+}

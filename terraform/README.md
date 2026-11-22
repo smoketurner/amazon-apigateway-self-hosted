@@ -42,12 +42,12 @@ the environment pins exact versions and configures the provider and backend.
 
 | Area | Resources |
 |---|---|
-| REST API (`<prefix>-rest`) | `HTTP_PROXY`, `AWS_PROXY` (payload 1.0), `MOCK` (plain, non-200, VTL-rendered), `HTTP` and `AWS` non-proxy integrations with mapping templates, request validators and a body model, gateway responses, binary media types, API key + usage plan, TOKEN and REQUEST Lambda authorizers, a Cognito authorizer (with and without scopes), CORS, stage variables, method settings and throttling, optional access logs, optional cache cluster, optional VPC-link route |
+| REST API (`<prefix>-rest`) | `HTTP_PROXY`, `AWS_PROXY` (payload 1.0), `MOCK` (plain, non-200, VTL-rendered), `HTTP` and `AWS` non-proxy integrations with mapping templates (one of them reports the headers and body its backend received), two `HTTP_PROXY` routes that cannot reach a backend (an unresolvable host and an unset stage variable host), request validators and a body model, gateway responses, binary media types, API key + usage plan, TOKEN and REQUEST Lambda authorizers, a Cognito authorizer (with and without scopes), CORS, stage variables, method settings and throttling, optional access logs, optional cache cluster, optional VPC-link route |
 | REST API with a resource policy (`<prefix>-rest-policy`) | Separate API so the policy cannot block the others. `/open` is allowed, `/ip-restricted` is denied outside `policy_restricted_cidrs`, `/ip-denied` is always denied |
 | HTTP API (`<prefix>-http`) | `HTTP_PROXY`, `AWS_PROXY` 1.0 and 2.0, the `$default` route, parameter mapping (path, query, header, response), CORS, JWT authorizer (with and without scopes), Lambda authorizers (simple response and IAM policy), route throttling, optional access logs |
 | Backends | Python echo Lambda (returns the event it received); the same echo behind a Lambda function URL that requires a shared-secret `x-echo-secret` header, used as the HTTP backend through the `echo_host` and `echo_secret` stage variables; a deterministic authorizer Lambda |
 | Identity | Cognito user pool, app client (`USER_PASSWORD_AUTH`), and a test user |
-| Service targets | SQS queue, DynamoDB table, Step Functions EXPRESS state machine, EventBridge bus (events are also written to a log group) |
+| Service targets | SQS queue, DynamoDB table, Step Functions EXPRESS state machine, EventBridge bus (events are also written to a log group), SNS topic, one-shard Kinesis stream (about $11 a month), an S3 bucket whose objects expire after a day, an SQS queue nothing sends to (for the receive, delete, and purge subtypes), and an AppConfig application with a deployed hosted configuration. REST `AWS` integrations and HTTP API integration subtypes call them; `make parity-live` compares them with `apigw` on ECS |
 | CI | GitHub OIDC provider (unless you pass an existing one) and a read-only role for the parity workflow |
 
 Gateway responses are customized only for `BAD_REQUEST_BODY`, `BAD_REQUEST_PARAMETERS`,
@@ -56,8 +56,8 @@ stock so their default form can be recorded.
 
 The echo Lambda accepts `echo_status=<code>`, `echo_binary=1`, and `echo_content_type=<mime>`
 query parameters to control the response, and redacts the shared secret from the event it
-returns. The authorizer returns Allow for the credential `allow`, Deny for `deny`, and raises
-(401) for anything else; the credential is the `Authorization` token for the TOKEN
+returns. The authorizer returns Allow for the credential `allow`, Deny for `deny`, a response without
+a policy document for `malformed`, and raises (401) for anything else; the credential is the `Authorization` token for the TOKEN
 authorizer and the `x-auth` header for the REQUEST and HTTP API authorizers.
 
 ## Apply
@@ -82,6 +82,7 @@ Variables worth knowing (all in `environments/dev/variables.tf`):
 | `enable_logging` | `false` | Access logs and execution logs. REST APIs need the account-wide CloudWatch role |
 | `manage_account_cloudwatch_role` | `false` | Creates the role and sets it in `aws_api_gateway_account`. This **overwrites** the account's current role, and destroying it clears the setting. Leave it off if the account already has one |
 | `enable_cache_cluster` | `false` | Stage cache cluster (billed hourly while it exists) |
+| `custom_domain_zone` | `null` | A public hosted zone in the account. Creates `api.parity.<zone>` (REST at `rest` and `v1/orders`, HTTP at `http`) and `mtls.parity.<zone>` (REST at the root, mutual TLS with a truststore of a test CA), an ACM certificate for both, and on the ECS gateway a domain container on port 8445. It only adds records under `parity.<zone>`, and Route 53 refuses to overwrite an existing one |
 | `enable_vpc_link` | `false` | Internal NLB, VPC link, and a `/vpc-link` REST route. Needs `vpc_id` and `vpc_link_subnet_ids` |
 | `enable_ecs_gateway` | `false` | `apigw` on ECS Fargate against the reference REST API. See [Running apigw on ECS](#running-apigw-on-ecs) |
 | `enable_lambda_gateway` | `false` | `apigw` as a Lambda function behind a public function URL. See [Running apigw on Lambda](#running-apigw-on-lambda) |
@@ -201,7 +202,8 @@ terraform apply                       # creates the repository and the role
 repo="$(terraform output -json lambda_gateway | jq -r .repository_url)"
 aws ecr get-login-password | docker login --username AWS --password-stdin "${repo%%/*}"
 docker build --platform linux/arm64 -t apigw:local ../../..
-docker build --platform linux/arm64 --build-arg APIGW_IMAGE=apigw:local \
+# Lambda refuses an image index; without provenance the push is a single manifest.
+docker build --provenance=false --platform linux/arm64 --build-arg APIGW_IMAGE=apigw:local \
   -t "$repo:dev" ../../modules/lambda-gateway/image
 docker push "$repo:dev"
 # terraform.tfvars: lambda_gateway_image_tag = "dev"

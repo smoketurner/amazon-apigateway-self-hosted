@@ -15,6 +15,8 @@ use serde::Deserialize;
 use tokio::sync::{Mutex as AsyncMutex, RwLock};
 use tokio::time::Instant;
 
+use crate::telemetry::{GatewayMetrics, Outcome};
+
 /// How long API Gateway waits for an identity provider.
 const FETCH_TIMEOUT: Duration = Duration::from_millis(1500);
 /// The most the gateway reads from an identity provider in one response.
@@ -231,7 +233,9 @@ impl KeyStore {
             return Err(KeyError::Throttled);
         }
         *last_attempt = Some(now);
-        let keys = self.fetch(issuer, location).await?;
+        let fetched = self.fetch(issuer, location).await;
+        GatewayMetrics::global().jwks_fetch(issuer.as_str(), Outcome::from(&fetched));
+        let keys = fetched?;
         let found = keys
             .iter()
             .find(|jwk| jwk.common.key_id.as_deref() == Some(kid))

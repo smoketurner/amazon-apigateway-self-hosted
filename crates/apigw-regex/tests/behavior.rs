@@ -31,6 +31,25 @@ fn backtrack_limit_is_a_typed_error() {
     );
 }
 
+/// The cases where `java_regex` 0.1.0 silently answers "no match" at its fixed limits
+/// (docs/regex-engine.md): here they either answer correctly or fail with a typed error.
+#[test]
+fn limits_never_turn_into_a_silent_non_match() {
+    let literal = "a".repeat(600);
+    assert!(regex(&literal).matches(&literal).unwrap());
+    assert!(regex("(?:a|b)*").matches(&"ab".repeat(124)).unwrap());
+    let input = "a".repeat(300_000);
+    assert_eq!(regex("b|a").find_iter(&input).count(), 300_000);
+
+    let options = RegexOptions::default().with_backtrack_limit(5_000);
+    let backtracking = JavaRegex::with_options(r"(?=(a|b)*)(?:a|b)*\1", &options).unwrap();
+    let outcome = backtracking.matches(&"ab".repeat(10_000));
+    assert!(
+        matches!(outcome, Ok(true) | Err(RegexError::BacktrackLimitExceeded)),
+        "{outcome:?}"
+    );
+}
+
 #[test]
 fn linear_patterns_are_not_subject_to_the_backtrack_limit() {
     let options = RegexOptions::default().with_backtrack_limit(1);
@@ -66,16 +85,16 @@ fn syntax_errors_and_untranslatable_constructs_are_distinct() {
     assert!(matches!(syntax, RegexError::Syntax { .. }));
     assert!(!syntax.is_untranslatable());
 
-    let unsupported = JavaRegex::new(r"\G").unwrap_err();
+    let unsupported = JavaRegex::new(r"a\N{LATIN SMALL LETTER A}").unwrap_err();
     assert!(matches!(
         unsupported,
         RegexError::Unsupported {
-            construct: Unsupported::EndOfPreviousMatch,
-            index: 0
+            construct: Unsupported::NamedCharacter,
+            index: 1
         }
     ));
     assert!(unsupported.is_untranslatable());
-    assert!(unsupported.to_string().contains(r"\G"));
+    assert!(unsupported.to_string().contains(r"\N{name}"));
 }
 
 #[test]

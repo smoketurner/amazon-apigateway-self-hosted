@@ -1,0 +1,16 @@
+{
+  "name": "domain-mtls-trusted",
+  "source": "recorded",
+  "api": "domain_mtls",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-requestid": "[masked]",
+      "x-mock": "yes"
+    },
+    "body": "{\"message\":\"mock\"}"
+  }
+}

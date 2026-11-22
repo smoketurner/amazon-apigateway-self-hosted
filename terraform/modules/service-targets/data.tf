@@ -20,3 +20,5 @@ data "aws_iam_policy_document" "events_logs" {
     }
   }
 }
+
+data "aws_caller_identity" "current" {}

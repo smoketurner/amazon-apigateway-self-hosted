@@ -1,0 +1,24 @@
+{"name":"map-int-key","output":"{1=a, b=2} a [$m.get('1')] a true false [1, b]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-index-keys","output":"{1=x, 1=y} 2","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-put-keys","output":"{1=a, 1.0=b, true=c, true=d}","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-list-key","output":"{[1, 2]=l} l","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-map-key","output":"{{a=1}=m} m","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-null-key","output":"{null=1} 1","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-put-null","output":"{null=1} 1 [1]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-long-key","output":"L i","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-long-int-key","output":"[$m.get($k)] false","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-double-key","output":"{1.5=d} d [$m.get('1.5')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-entry-key","output":"1 1 1=a","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-keyset-contains","output":"true false","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-property-number","output":"[{1=a}.1]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-equality","output":" ne false","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-context-keys","output":"{1=a, b={2=3}}","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}},"x":{"1":"a","b":{"2":3}}}}
+{"name":"map-path-keys","output":"a [$o.get(1)] [1, b]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-path-put","output":"{1=a, 1=x}","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-tostring","output":"{1=a}{1=a}","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-bool-key","output":"{true=1, false=0} 1 [$m.get('true')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-reference-key","output":"v","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-remove-key","output":"a {1=b}","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-get-or-default","output":"a z","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-put-all","output":"{1=a} a [$n.get('1')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"map-values-keys","output":"1:a,2.5:b,c:c,","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}

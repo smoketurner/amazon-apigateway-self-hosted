@@ -19,7 +19,7 @@
     "query": "appended=ref&fixed=literal&q=1",
     "headers": {
       "accept": "*/*",
-      "forwarded": "by=<ip-1>;for=<ip-2>;host=a2jjc5tao1.execute-api.us-east-1.amazonaws.com;proto=https",
+      "forwarded": "by=<ip-1>;for=<ip-2>;host=skx1sib1w1.execute-api.us-east-1.amazonaws.com;proto=https",
       "user-agent": "apigw-parity",
       "x-appended": "ref",
       "x-echo-secret": "[redacted]"

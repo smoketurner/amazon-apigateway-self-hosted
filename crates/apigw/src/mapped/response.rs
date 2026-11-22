@@ -80,8 +80,11 @@ enum Selection {
     /// No pattern: the response used when no other matches.
     Default,
     Pattern(Box<JavaRegex>),
-    /// A pattern that does not compile never matches.
+    /// A pattern Java rejects never matches, as API Gateway could not have deployed it.
     Invalid(String),
+    /// A pattern Java accepts that cannot be translated. Whether it would have matched is
+    /// unknown, so selection fails rather than fall through to another response.
+    Untranslatable(String),
 }
 
 /// `method.response.header.<name>` or `method.response.multivalueheader.<name>`.
@@ -186,8 +189,14 @@ impl ResponseSide {
     pub(crate) fn problems(&self) -> Vec<String> {
         let mut problems = Vec::new();
         for response in self.patterns.iter().chain(&self.default) {
-            if let Selection::Invalid(ref reason) = response.selection {
-                problems.push(format!("selectionPattern is invalid: {reason}"));
+            match response.selection {
+                Selection::Invalid(ref reason) => {
+                    problems.push(format!("selectionPattern is invalid: {reason}"));
+                }
+                Selection::Untranslatable(ref reason) => {
+                    problems.push(format!("selectionPattern cannot be evaluated: {reason}"));
+                }
+                Selection::Default | Selection::Pattern(_) => {}
             }
             for (content_type, template) in &response.templates {
                 if let Some(reason) = template.problem() {
@@ -202,15 +211,30 @@ impl ResponseSide {
 
     /// The first response whose pattern matches `text` (a status code or an
     /// error message), else the default. Without text only the default applies.
-    fn select(&self, text: Option<&str>) -> Option<&IntegrationResponse> {
-        let matched = text.and_then(|text| self.patterns.iter().find(|response| match response.selection {
-            Selection::Pattern(ref pattern) => pattern.matches(text).unwrap_or_else(|err| {
-                tracing::warn!(%err, pattern = pattern.as_str(), "selectionPattern could not be evaluated");
-                false
-            }),
-            Selection::Default | Selection::Invalid(_) => false,
-        }));
-        matched.or(self.default.as_ref())
+    ///
+    /// A pattern that cannot be evaluated, because it cannot be translated or
+    /// matching it exceeds a limit, is an error: guessing that it does not match
+    /// could pick a different response than API Gateway.
+    fn select(&self, text: Option<&str>) -> Result<Option<&IntegrationResponse>, GatewayError> {
+        if let Some(text) = text {
+            for response in &self.patterns {
+                let matched = match response.selection {
+                    Selection::Pattern(ref pattern) => pattern.matches(text).map_err(|err| {
+                        tracing::error!(%err, pattern = pattern.as_str(), "selectionPattern could not be evaluated");
+                        GatewayError::ApiConfiguration
+                    })?,
+                    Selection::Untranslatable(ref reason) => {
+                        tracing::error!(reason, "selectionPattern cannot be evaluated");
+                        return Err(GatewayError::ApiConfiguration);
+                    }
+                    Selection::Default | Selection::Invalid(_) => false,
+                };
+                if matched {
+                    return Ok(Some(response));
+                }
+            }
+        }
+        Ok(self.default.as_ref())
     }
 
     /// Selects the integration response for `reply`, maps it, and builds the
@@ -220,7 +244,7 @@ impl ResponseSide {
         ctx: &RequestContext,
         reply: &BackendReply,
     ) -> Result<Response, GatewayError> {
-        let selected = self.select(reply.selector.as_deref()).ok_or_else(|| {
+        let selected = self.select(reply.selector.as_deref())?.ok_or_else(|| {
             tracing::warn!(
                 status = reply.status,
                 "no integration response matches and none is the default"
@@ -249,6 +273,7 @@ impl IntegrationResponse {
         } else {
             match JavaRegex::new(key) {
                 Ok(pattern) => Selection::Pattern(Box::new(pattern)),
+                Err(err) if err.is_untranslatable() => Selection::Untranslatable(err.to_string()),
                 Err(err) => Selection::Invalid(err.to_string()),
             }
         };
@@ -390,5 +415,76 @@ impl IntegrationResponse {
                 replaced = true;
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod tests {
+    use serde::Deserialize;
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    fn side(responses: &Value) -> ResponseSide {
+        let spec =
+            IntegrationSpec::deserialize(json!({"type": "HTTP", "responses": responses})).unwrap();
+        ResponseSide::compile(&spec)
+    }
+
+    fn selected_status(side: &ResponseSide, text: &str) -> Result<Option<u16>, GatewayError> {
+        side.select(Some(text))
+            .map(|selected| selected.and_then(|response| response.status))
+    }
+
+    #[test]
+    fn the_first_matching_pattern_wins_else_the_default() {
+        let side = side(&json!({
+            "default": {"statusCode": "200"},
+            "4\\d{2}": {"statusCode": "400"},
+        }));
+        assert_eq!(selected_status(&side, "404").unwrap(), Some(400));
+        assert_eq!(selected_status(&side, "500").unwrap(), Some(200));
+    }
+
+    #[test]
+    fn a_pattern_that_exceeds_the_backtrack_limit_fails_instead_of_not_matching() {
+        let side = side(&json!({
+            "default": {"statusCode": "200"},
+            "(a|aa)+\\1c": {"statusCode": "400"},
+        }));
+        let text = format!("{}b", "a".repeat(40));
+        assert!(matches!(
+            selected_status(&side, &text),
+            Err(GatewayError::ApiConfiguration)
+        ));
+    }
+
+    #[test]
+    fn an_untranslatable_pattern_fails_instead_of_falling_through() {
+        let side = side(&json!({
+            "default": {"statusCode": "200"},
+            "\\N{DIGIT FIVE}.*": {"statusCode": "502"},
+        }));
+        assert!(matches!(
+            selected_status(&side, "503"),
+            Err(GatewayError::ApiConfiguration)
+        ));
+        assert_eq!(
+            side.problems(),
+            [
+                "selectionPattern cannot be evaluated: unsupported regex construct: \\N{name} character names near index 0"
+            ]
+        );
+        assert_eq!(side.select(None).unwrap().and_then(|r| r.status), Some(200));
+    }
+
+    #[test]
+    fn a_pattern_java_rejects_never_matches() {
+        let side = side(&json!({
+            "default": {"statusCode": "200"},
+            "5(\\d": {"statusCode": "502"},
+        }));
+        assert_eq!(selected_status(&side, "503").unwrap(), Some(200));
     }
 }

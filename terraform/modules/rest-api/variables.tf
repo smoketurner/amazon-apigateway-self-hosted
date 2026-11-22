@@ -54,6 +54,21 @@ variable "event_bus_name" {
   type        = string
 }
 
+variable "topic_arn" {
+  description = "SNS topic the /aws/sns route publishes to."
+  type        = string
+}
+
+variable "stream_name" {
+  description = "Kinesis stream the /aws/kinesis route puts records on."
+  type        = string
+}
+
+variable "bucket_name" {
+  description = "S3 bucket the /aws/s3 routes write and read."
+  type        = string
+}
+
 variable "cors_allowed_origin" {
   description = "Origin allowed by the CORS configuration."
   type        = string

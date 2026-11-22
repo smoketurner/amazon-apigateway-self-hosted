@@ -41,6 +41,18 @@ class EchoTests(unittest.TestCase):
         self.assertTrue(response["isBase64Encoded"])
         self.assertEqual(response["headers"]["content-type"], "image/png")
 
+    def test_sleep_is_capped_and_ignores_non_numbers(self):
+        slept = []
+        original = echo.time.sleep
+        echo.time.sleep = slept.append
+        try:
+            for value in ("250", "99999", "soon"):
+                event = {**V2_EVENT, "queryStringParameters": {"echo_sleep_ms": value}}
+                self.assertEqual(echo.handler(event, None)["statusCode"], 200)
+        finally:
+            echo.time.sleep = original
+        self.assertEqual(slept, [0.25, 3.0])
+
     def test_shared_secret_is_enforced_when_configured(self):
         os.environ["ECHO_SHARED_SECRET"] = "s3cret"
         try:
@@ -66,6 +78,16 @@ class AuthorizerTests(unittest.TestCase):
             {"type": "TOKEN", "authorizationToken": "deny", "methodArn": METHOD_ARN}, None
         )
         self.assertEqual(deny["policyDocument"]["Statement"][0]["Effect"], "Deny")
+        for event in (
+            {"type": "TOKEN", "authorizationToken": "error", "methodArn": METHOD_ARN},
+            {"version": "2.0", "headers": {"x-auth": "error"}},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "^Error: authorizer failure$"):
+                authorizer.handler(event, None)
+        malformed = authorizer.handler(
+            {"type": "TOKEN", "authorizationToken": "malformed", "methodArn": METHOD_ARN}, None
+        )
+        self.assertNotIn("policyDocument", malformed)
         with self.assertRaisesRegex(Exception, "^Unauthorized$"):
             authorizer.handler(
                 {"type": "TOKEN", "authorizationToken": "other", "methodArn": METHOD_ARN}, None

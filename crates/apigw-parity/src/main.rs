@@ -15,6 +15,7 @@ mod record;
 mod replay;
 
 use std::io::Write as _;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -23,10 +24,11 @@ use clap::{Args, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use crate::case::CaseSet;
+use crate::client::ClientOptions;
 use crate::export::{ExportInput, ExportStore};
 use crate::fixture::FixtureStore;
 use crate::outputs::RunnerOutputs;
-use crate::record::Record;
+use crate::record::{ClientCerts, Record};
 use crate::replay::Replay;
 
 const APIGW_BINARY: &str = "apigw";
@@ -70,6 +72,18 @@ struct RecordArgs {
     /// Environment variable whose value must never appear in fixtures (repeatable).
     #[arg(long = "secret-env", value_name = "NAME")]
     secret_env: Vec<String>,
+    /// `terraform output -json parity_client_certificates`, for the cases that
+    /// present a client certificate.
+    #[arg(long)]
+    client_certs: Option<PathBuf>,
+    /// Connect to NAME at ADDRESS (ip:port) instead of resolving it, keeping NAME
+    /// for SNI and Host: records the cases against a self-hosted gateway (repeatable).
+    #[arg(long = "resolve", value_name = "NAME=ADDRESS", value_parser = parse_resolve)]
+    resolve: Vec<(String, SocketAddr)>,
+    /// Accept any server certificate, for a self-hosted gateway with a
+    /// self-signed one. Never use it against API Gateway.
+    #[arg(long)]
+    insecure: bool,
     /// Pause between requests, to stay under API Gateway throttles.
     #[arg(long, default_value_t = 250)]
     delay_ms: u64,
@@ -101,6 +115,17 @@ impl RecordArgs {
                 .map(|dir| FixtureStore::new(dir.join("fixtures"))),
             secret_env: self.secret_env,
             delay: Duration::from_millis(self.delay_ms),
+            client: ClientOptions {
+                identity: None,
+                resolve: self.resolve,
+                insecure: self.insecure,
+            },
+            client_certs: self
+                .client_certs
+                .as_deref()
+                .map(ClientCerts::load)
+                .transpose()
+                .context("reading client certificates")?,
         };
         let drift = record.run().await.context("recording")?;
         if let Some(path) = self.drift_report
@@ -140,6 +165,17 @@ impl ReplayArgs {
             failures => Err(error::ParityError::Mismatches(failures).into()),
         }
     }
+}
+
+/// Parses `NAME=IP:PORT`.
+fn parse_resolve(text: &str) -> Result<(String, SocketAddr), String> {
+    let (name, address) = text
+        .split_once('=')
+        .ok_or_else(|| format!("{text:?} is not NAME=IP:PORT"))?;
+    let address = address
+        .parse()
+        .map_err(|e| format!("{address:?} is not IP:PORT: {e}"))?;
+    Ok((name.to_owned(), address))
 }
 
 fn main() -> anyhow::Result<()> {

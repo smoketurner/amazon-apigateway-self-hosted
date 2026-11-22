@@ -5,7 +5,17 @@ and Jayway JsonPath, so `apigw-vtl` can be compared against them. Nothing here c
 
 `VtlOracle.java` stubs `$input`, `$util`, `$context`, and `$stageVariables` the way the gateway
 documents them, runs each template through Velocity with `directive.foreach.maxloops=1000`, and
-records the output and the `$context` map after rendering. The jars are fetched by Maven
+records the output and the `$context` map after rendering.
+
+Where a deployed API Gateway was recorded to differ from Velocity's defaults
+(`parity/fixtures/rest-vtl-*.json`), the oracle is configured to match it: inline macros are
+off (`velocimacro.permissions.allow.inline=false`, so a definition is ignored and a call renders
+as written), the `#evaluate` directive is removed (it renders as written), `$input.path` of a
+definite path that addresses nothing is an empty string, and `$input.json` of such a path, or of
+a path whose function throws a `JsonPathException`, is `""`. Every read compiles its JSON path
+afresh, because Jayway's cached paths keep state from one evaluation to the next. API Gateway also
+renders a null reference as nothing; the oracle keeps Velocity's rendering (the reference as
+written), which `apigw-vtl` produces with `NullReferences::Literal`. The jars are fetched by Maven
 coordinate and checked against pinned SHA-256 sums in the `Dockerfile`, on a JDK image pinned by
 digest. The run itself has no network access.
 
@@ -27,6 +37,12 @@ case: `{"name", "output", "context"}`, or `{"name", "error"}` when Velocity thre
 | `builtins.json` | `$input`, `$util`, `$context`, and the String, List, and Map methods | hand-written |
 | `jsonpath.json` | JSON path syntax, filters, functions, and Jayway's quirks | hand-written |
 | `gateway-templates.json` | templates in the shape real APIs use: DynamoDB, SQS, Lambda wrappers, error mapping, response overrides | hand-written |
+| `api-gateway.json` | the templates of the `rest-vtl-*` parity recordings, whose output matches what API Gateway returned | the parity routes |
+| `directives.json` | `#macro`, `#evaluate`, block macro calls, and `#define`: bodies, whitespace, scope, recursion, errors | hand-written |
+| `numbers.json` | `Integer`/`Long` widening, `BigInteger` promotion, `BigDecimal` arithmetic, big JSON numbers | hand-written |
+| `maps.json` | map keys of every type: lookup, `toString`, `equals`, JSON bodies | hand-written |
+| `jsonpath-scan.json` | functions after `..`, missing paths, and failing functions in `$input.json` | hand-written |
+| `lexer.json` | Velocity's lexer states after a property reference, `#set`, comments, and a `(` left open | hand-written |
 | `operators-arithmetic.json` | every arithmetic operator over 23 operand types, plus unary `!` and bare conditions | `generate.py operators-arithmetic` |
 | `operators-comparison.json` | every comparison and logical operator over 23 operand types | `generate.py operators-comparison` |
 | `whitespace.json` | directive and reference placement against spaces, tabs, and line endings | `generate.py whitespace` |
@@ -40,7 +56,7 @@ workflow regenerates the generated files and fails on any diff. Every committed 
 
 `KNOWN_DIVERGENCES` in `crates/apigw-vtl/tests/oracle.rs` lists the corpus cases that still
 differ, each with its reason. A listed case must keep differing; one that starts matching fails
-the test so the list cannot go stale.
+the test so the list cannot go stale. The list is empty: every case in the corpus matches.
 
 ## Scheduled run
 

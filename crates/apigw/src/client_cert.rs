@@ -5,7 +5,8 @@
 //! was reported by a trusted proxy in `X-Forwarded-Client-Cert`. In both cases
 //! it is described with API Gateway's field names and formats:
 //! `subjectDN`/`issuerDN` as comma-separated attributes in certificate order
-//! (`C=US,O=Acme,CN=client`), `serialNumber` as colon-separated hex bytes, and
+//! (`C=US,O=Acme,CN=client`), `serialNumber` in decimal for REST APIs
+//! (measured) and as colon-separated hex bytes for HTTP APIs (documented), and
 //! validity dates as `May 28 12:30:02 2019 GMT`.
 //!
 //! <https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-develop-integrations-lambda.html>
@@ -16,6 +17,8 @@ use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject as _;
 use serde_json::{Map, Value, json};
 use x509_parser::prelude::{FromDer as _, X509Certificate, X509Name};
+
+use crate::model::ApiKind;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub(crate) enum CertError {
@@ -39,8 +42,16 @@ pub(crate) struct ClientCertDetails {
     pem: Option<String>,
     subject_dn: Option<String>,
     issuer_dn: Option<String>,
-    serial_number: Option<String>,
+    serial_number: Option<SerialNumber>,
     validity: Option<Validity>,
+}
+
+/// A certificate's serial number in the two forms API Gateway reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SerialNumber {
+    /// `a1:b2:...`, the serial number's bytes in lowercase hex.
+    hex: String,
+    decimal: String,
 }
 
 impl ClientCertDetails {
@@ -52,7 +63,10 @@ impl ClientCertDetails {
             pem: Some(Self::pem_of(der)),
             subject_dn: Some(Self::distinguished_name(cert.subject())),
             issuer_dn: Some(Self::distinguished_name(cert.issuer())),
-            serial_number: Some(Self::serial(cert.raw_serial())),
+            serial_number: Some(SerialNumber {
+                hex: Self::serial(cert.raw_serial()),
+                decimal: cert.serial.to_string(),
+            }),
             validity: Some(Validity {
                 not_before: Self::date(cert.validity().not_before.timestamp()),
                 not_after: Self::date(cert.validity().not_after.timestamp()),
@@ -74,8 +88,9 @@ impl ClientCertDetails {
         }
     }
 
-    /// The `clientCert` object, with only the fields that are known.
-    pub(crate) fn to_json(&self) -> Value {
+    /// The `clientCert` object for an API of `kind`, with only the fields that
+    /// are known.
+    pub(crate) fn to_json(&self, kind: ApiKind) -> Value {
         let mut fields = Map::new();
         if let Some(ref pem) = self.pem {
             fields.insert("clientCertPem".to_owned(), json!(pem));
@@ -87,7 +102,11 @@ impl ClientCertDetails {
             fields.insert("issuerDN".to_owned(), json!(issuer));
         }
         if let Some(ref serial) = self.serial_number {
-            fields.insert("serialNumber".to_owned(), json!(serial));
+            let text = match kind {
+                ApiKind::Rest => &serial.decimal,
+                ApiKind::Http => &serial.hex,
+            };
+            fields.insert("serialNumber".to_owned(), json!(text));
         }
         if let Some(ref validity) = self.validity {
             fields.insert(
@@ -227,7 +246,7 @@ pub(crate) mod tests {
     fn certificates_are_described_with_api_gateways_fields_and_formats() {
         let (der, pem) = certificate("client one");
         let details = ClientCertDetails::from_der(der.as_ref()).unwrap();
-        let json = details.to_json();
+        let json = details.to_json(ApiKind::Http);
         assert_eq!(json["subjectDN"], "C=US,O=Acme,CN=client one");
         assert_eq!(json["issuerDN"], "C=US,O=Acme,CN=client one");
         assert_eq!(json["validity"]["notBefore"], "May 28 00:00:00 2024 GMT");
@@ -240,6 +259,20 @@ pub(crate) mod tests {
             "{serial}"
         );
         assert_eq!(serial, serial.to_lowercase());
+        // A REST API reports the same number in decimal (measured).
+        let decimal = details.to_json(ApiKind::Rest)["serialNumber"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(decimal.chars().all(|c| c.is_ascii_digit()), "{decimal}");
+        let bytes: Vec<u8> = serial
+            .split(':')
+            .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+            .collect();
+        assert_eq!(
+            decimal,
+            x509_parser::num_bigint::BigUint::from_bytes_be(&bytes).to_string()
+        );
         let regenerated = json["clientCertPem"].as_str().unwrap();
         assert!(regenerated.starts_with("-----BEGIN CERTIFICATE-----\n"));
         assert!(regenerated.ends_with("-----END CERTIFICATE-----\n"));
@@ -253,7 +286,10 @@ pub(crate) mod tests {
     #[test]
     fn certificates_known_only_by_subject_report_only_that() {
         let details = ClientCertDetails::from_subject("CN=proxy-reported");
-        assert_eq!(details.to_json(), json!({"subjectDN": "CN=proxy-reported"}));
+        assert_eq!(
+            details.to_json(ApiKind::Rest),
+            json!({"subjectDN": "CN=proxy-reported"})
+        );
     }
 
     #[test]

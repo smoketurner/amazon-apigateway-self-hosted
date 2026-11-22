@@ -39,6 +39,46 @@ variable "cognito_client_id" {
   type        = string
 }
 
+variable "queue_url" {
+  description = "SQS queue the SQS-SendMessage subtype route sends to."
+  type        = string
+}
+
+variable "event_bus_name" {
+  description = "Event bus the EventBridge-PutEvents subtype route publishes to."
+  type        = string
+}
+
+variable "state_machine_arn" {
+  description = "State machine the StepFunctions-StartSyncExecution subtype route starts."
+  type        = string
+}
+
+variable "stream_name" {
+  description = "Kinesis stream the Kinesis-PutRecord subtype route puts records on."
+  type        = string
+}
+
+variable "empty_queue_url" {
+  description = "SQS queue the receive, delete, and purge subtype routes act on."
+  type        = string
+}
+
+variable "appconfig_application" {
+  description = "AppConfig application the GetConfiguration subtype route reads."
+  type        = string
+}
+
+variable "appconfig_environment" {
+  description = "AppConfig environment the GetConfiguration subtype route reads."
+  type        = string
+}
+
+variable "appconfig_configuration" {
+  description = "AppConfig configuration profile the GetConfiguration subtype route reads."
+  type        = string
+}
+
 variable "cors_allowed_origin" {
   description = "Origin allowed by the CORS configuration."
   type        = string

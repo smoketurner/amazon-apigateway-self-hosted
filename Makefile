@@ -5,7 +5,7 @@ export
 
 CARGO ?= cargo
 
-.PHONY: all build check clean fmt fmt-check lint test test-coverage test-mutants parity deny hooks image binary chart-lint run help
+.PHONY: all build check clean fmt fmt-check lint test test-coverage test-mutants parity parity-record parity-live parity-domain-live reference-images deny hooks image binary chart-lint run help
 
 all: build
 
@@ -44,6 +44,18 @@ test-mutants: ## Run mutation testing (requires cargo-mutants)
 parity: ## Replay the recorded API Gateway fixtures against a local apigw build
 	$(CARGO) build -p apigw -p apigw-parity
 	./target/debug/apigw-parity replay
+
+parity-record: ## Record every parity case against the deployed reference stack into parity/ (needs AWS_PROFILE)
+	./scripts/parity-record.sh
+
+parity-live: ## Compare AWS-service integrations between the reference APIs and apigw on ECS (needs AWS_PROFILE)
+	./scripts/parity-live.sh
+
+parity-domain-live: ## Compare custom domain and mutual TLS cases between API Gateway and apigw on ECS (needs AWS_PROFILE)
+	./scripts/parity-domain-live.sh
+
+reference-images: ## Build, push, and pin the reference stack's gateway images at HEAD (needs AWS_PROFILE)
+	./scripts/reference-images.sh
 
 deny: ## Check advisories, licenses, bans, and sources
 	$(CARGO) deny check

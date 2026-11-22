@@ -1,6 +1,9 @@
 import com.jayway.jsonpath.Configuration;
+import com.jayway.jsonpath.InvalidPathException;
 import com.jayway.jsonpath.JsonPath;
+import com.jayway.jsonpath.JsonPathException;
 import com.jayway.jsonpath.Option;
+import com.jayway.jsonpath.PathNotFoundException;
 import com.jayway.jsonpath.spi.json.JsonSmartJsonProvider;
 import com.jayway.jsonpath.spi.mapper.JsonSmartMappingProvider;
 import java.io.IOException;
@@ -34,6 +37,12 @@ public final class VtlOracle {
             .options(Option.SUPPRESS_EXCEPTIONS)
             .build();
 
+    /** The same, but throwing, so $input.json can tell a missing member from a null one. */
+    private static final Configuration STRICT_JSON_PATH = Configuration.builder()
+            .jsonProvider(new JsonSmartJsonProvider())
+            .mappingProvider(new JsonSmartMappingProvider())
+            .build();
+
     private static final VelocityEngine ENGINE = newEngine();
 
     private static VelocityEngine newEngine() {
@@ -41,7 +50,12 @@ public final class VtlOracle {
         engine.setProperty(RuntimeConstants.RUNTIME_LOG_LOGSYSTEM_CLASS,
                 "org.apache.velocity.runtime.log.NullLogChute");
         engine.setProperty("directive.foreach.maxloops", "1000");
+        // API Gateway leaves #macro and #evaluate unprocessed (parity/fixtures/rest-vtl-macro.json,
+        // rest-vtl-macro-scope.json, rest-vtl-evaluate.json): a definition is ignored and a call
+        // or #evaluate renders as written, which is Velocity without inline macros or #evaluate.
+        engine.setProperty("velocimacro.permissions.allow.inline", "false");
         engine.init();
+        engine.removeDirective("evaluate");
         return engine;
     }
 
@@ -118,7 +132,12 @@ public final class VtlOracle {
         return value;
     }
 
-    /** The $input object. */
+    /**
+     * The $input object.
+     *
+     * <p>Every read compiles its path afresh: Jayway's cached compiled paths keep the array index
+     * a deep scan last visited, so reading one cached path twice can drop matches.
+     */
     public static final class Input {
         private final String body;
         private final Map<String, Object> params;
@@ -132,11 +151,39 @@ public final class VtlOracle {
             return body;
         }
 
+        /**
+         * A definite path that addresses nothing is an empty string, not null, as API Gateway
+         * renders it (parity/fixtures/rest-vtl-input.json).
+         */
         public Object path(String path) {
-            return normalize(JsonPath.using(JSON_PATH).parse(body).read(path));
+            try {
+                JsonPath.using(STRICT_JSON_PATH).parse(body).read(JsonPath.compile(path));
+            } catch (PathNotFoundException missing) {
+                return "";
+            } catch (RuntimeException other) {
+                // Anything else is left to the suppressed read below.
+            }
+            return normalize(JsonPath.using(JSON_PATH).parse(body).read(JsonPath.compile(path)));
         }
 
+        /**
+         * A path that addresses nothing, or whose function fails (such as `sum()` of a number),
+         * renders as an empty JSON string, as API Gateway does
+         * (parity/fixtures/rest-vtl-deep-scan-functions.json).
+         */
         public String json(String path) {
+            try {
+                JsonPath.using(STRICT_JSON_PATH).parse(body).read(JsonPath.compile(path));
+            } catch (PathNotFoundException missing) {
+                return "\"\"";
+            } catch (InvalidPathException malformed) {
+                // A malformed path stays an error (PathNotFoundException, above, extends this).
+                throw malformed;
+            } catch (JsonPathException failed) {
+                return "\"\"";
+            } catch (RuntimeException other) {
+                // Anything else is left to the suppressed read below.
+            }
             return Json.writeCompact(path(path));
         }
 

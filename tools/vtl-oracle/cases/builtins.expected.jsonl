@@ -40,7 +40,7 @@
 {"name":"map-getordefault","output":"7 true  {a=1, x=2}","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"list-more","output":"[1, 2] 2 true true [3, 1, 2, 7, 8] 3 [9, 1, 2, 7, 8] 9 [1, 2, 7, 8]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"list-json-body","output":"2 a 2 2 [{id=1, name=a}, {id=2, name=b}]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
-{"name":"input-json","output":"{\"id\":1,\"name\":\"a\"} 2 null [1,2] \"n\"","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"input-json","output":"{\"id\":1,\"name\":\"a\"} 2 \"\" [1,2] \"n\"","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"input-body","output":"[{\"items\":[{\"id\":1,\"name\":\"a\"},{\"id\":2,\"name\":\"b\"}],\"total\":2,\"price\":9.99,\"big\":3000000000,\"name\":\"n\",\"flag\":true}]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"input-params","output":"7 x y hv [] {path={id=7}, querystring={q=x y}, header={X-H=hv}} {id=7} hv","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"context-access","output":"r1 1.2.3.4 {header={}, querystring={}, path={}} dev {env=dev}","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}

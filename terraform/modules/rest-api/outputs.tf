@@ -18,3 +18,8 @@ output "api_key_value" {
   value       = aws_api_gateway_api_key.this.value
   sensitive   = true
 }
+
+output "log_group_arns" {
+  description = "Access and execution log groups of the stage; empty without logging."
+  value       = concat(aws_cloudwatch_log_group.access[*].arn, aws_cloudwatch_log_group.execution[*].arn)
+}

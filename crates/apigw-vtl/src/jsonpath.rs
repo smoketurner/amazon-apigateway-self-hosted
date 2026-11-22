@@ -10,26 +10,66 @@
 //! evaluates to `null` and an indefinite one to an empty list. Behaviors that look like Jayway
 //! quirks are reproduced because they were observed against the real library: a slice with a
 //! negative start and a positive end concatenates two slices, multiple property names yield one
-//! map, and functions after a wildcard run once per match.
+//! map, functions after a wildcard run once per match, a path that starts with `..` and ends in
+//! a function is rewritten to apply the function to the document with the scan's matches as its
+//! argument (`$..price.max()` is the largest price, `$..book.length()` counts the children of the
+//! matches), and a wildcard or index scan applies the next segment to every element of an array.
 
 use std::fmt;
 use std::str::FromStr;
 
-use apigw_regex::JavaRegex;
+use apigw_regex::{JavaRegex, RegexError};
 
-use crate::value::{List, Map, Value, doubles_equal};
+use crate::value::{List, Map, Value};
 
 /// A malformed or unsupported path expression, or a function that cannot be evaluated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JsonPathError {
     message: String,
+    origin: Origin,
+}
+
+/// What raises a [`JsonPathError`] in Java.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// Jayway's own `JsonPathException`, which API Gateway's `$input.json` turns into `""`.
+    Jayway,
+    /// A Java runtime exception, such as `IndexOutOfBoundsException`.
+    Runtime,
+    /// A runtime exception from a filter regex.
+    Regex,
 }
 
 impl JsonPathError {
     fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            origin: Origin::Jayway,
         }
+    }
+
+    /// A filter regex that cannot be evaluated, which Java reports as a runtime exception
+    /// (`PatternSyntaxException`). A filter must not treat such an item as unmatched, so the
+    /// error stops the whole evaluation, also from a nested path.
+    fn regex(error: &RegexError) -> Self {
+        Self {
+            message: format!("filter regular expression cannot be evaluated: {error}"),
+            origin: Origin::Regex,
+        }
+    }
+
+    /// A failure Jayway reports with a Java runtime exception rather than its own.
+    fn runtime(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            origin: Origin::Runtime,
+        }
+    }
+
+    /// Whether Jayway throws its own `JsonPathException` for this failure.
+    #[must_use]
+    pub const fn is_jayway_exception(&self) -> bool {
+        matches!(self.origin, Origin::Jayway)
     }
 }
 
@@ -101,14 +141,15 @@ impl Segments {
     }
 
     fn run(&self, start: &Value, root: &Value) -> Result<Found, JsonPathError> {
+        if let Some(found) = self.run_inverted(start, root)? {
+            return Ok(found);
+        }
         let mut current = vec![start.clone()];
         let mut multiple = false;
-        let mut scanned = false;
-        for segment in &self.0 {
+        let mut at = 0;
+        while let Some(segment) = self.0.get(at) {
+            at = at.saturating_add(1);
             if let Selector::Function(function) = &segment.selector {
-                if scanned {
-                    return Err(JsonPathError::new("functions after '..' are not supported"));
-                }
                 current = if multiple {
                     current
                         .iter()
@@ -124,13 +165,24 @@ impl Segments {
                 continue;
             }
             multiple |= segment.selector.is_multiple() || segment.scan;
-            scanned |= segment.scan;
             let mut next = Vec::new();
-            for node in &current {
-                if segment.scan {
-                    scan(node, &segment.selector, root, &mut next, 0);
-                } else {
-                    segment.selector.apply(node, root, false, &mut next);
+            let following = self.0.get(at).filter(|following| {
+                segment.scan && scans_through_arrays(&segment.selector, following)
+            });
+            if let Some(following) = following {
+                let tail = at.saturating_add(1) == self.0.len();
+                for node in &current {
+                    scan_through(node, &segment.selector, following, tail, root, &mut next, 0)?;
+                }
+                multiple |= following.selector.is_multiple();
+                at = at.saturating_add(1);
+            } else {
+                for node in &current {
+                    if segment.scan {
+                        scan(node, &segment.selector, root, &mut next, 0)?;
+                    } else {
+                        segment.selector.apply(node, root, false, &mut next)?;
+                    }
                 }
             }
             current = next;
@@ -143,6 +195,55 @@ impl Segments {
                 .next()
                 .map_or(Found::Nothing, Found::One)
         })
+    }
+}
+
+impl Segments {
+    /// Jayway rewrites a path that starts with `..` and ends in a function, `$..a.f()`, into
+    /// `f($..a)` applied to the document: the function sees the document itself and the
+    /// matches of the scan as its argument, and the result is one value. `None` for any other
+    /// path.
+    fn run_inverted(&self, start: &Value, root: &Value) -> Result<Option<Found>, JsonPathError> {
+        let starts_with_scan = self.0.first().is_some_and(|segment| segment.scan);
+        let ends_in_function = self
+            .0
+            .last()
+            .is_some_and(|segment| matches!(segment.selector, Selector::Function(_)));
+        if !starts_with_scan || !ends_in_function {
+            return Ok(None);
+        }
+        let Some(at) = self
+            .0
+            .iter()
+            .position(|segment| matches!(segment.selector, Selector::Function(_)))
+        else {
+            return Ok(None);
+        };
+        let (prefix, rest) = self.0.split_at(at);
+        let Some((
+            Segment {
+                selector: Selector::Function(function),
+                scan,
+            },
+            after,
+        )) = rest.split_first()
+        else {
+            return Ok(None);
+        };
+        if prefix.is_empty() || *scan {
+            return Err(JsonPathError::new("a function needs a path before it"));
+        }
+        let prefix = Self(prefix.to_vec());
+        let matches = match prefix.run(root, root)? {
+            Found::Many(values) => values,
+            Found::One(value) => vec![value],
+            Found::Nothing => Vec::new(),
+        };
+        let result = function.apply_inverted(start, &matches, &prefix)?;
+        if after.is_empty() {
+            return Ok(Some(Found::One(result)));
+        }
+        Self(after.to_vec()).run(&result, root).map(Some)
     }
 }
 
@@ -176,16 +277,20 @@ impl JsonPath {
     /// Returns [`JsonPathError`] when a function cannot be applied, for example `max()` of an
     /// empty array, as Jayway throws.
     pub fn evaluate(&self, document: &Value) -> Result<Value, JsonPathError> {
+        Ok(self.find(document)?.unwrap_or(Value::Null))
+    }
+
+    /// Like [`Self::evaluate`], but `None` when a definite path addresses nothing, so a
+    /// caller can tell a missing member from one that holds `null`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::evaluate`].
+    pub fn find(&self, document: &Value) -> Result<Option<Value>, JsonPathError> {
         Ok(match self.segments.run(document, document)? {
-            Found::One(value) => value,
-            Found::Many(values) => Value::List(List::from_values(values)),
-            Found::Nothing => {
-                if self.segments.is_definite() {
-                    Value::Null
-                } else {
-                    Value::List(List::new())
-                }
-            }
+            Found::One(value) => Some(value),
+            Found::Many(values) => Some(Value::List(List::from_values(values))),
+            Found::Nothing => (!self.segments.is_definite()).then(|| Value::List(List::new())),
         })
     }
 }
@@ -209,35 +314,130 @@ impl FromStr for JsonPath {
 }
 
 /// Applies `selector` to `node` and every container below it, in document order.
-fn scan(node: &Value, selector: &Selector, root: &Value, out: &mut Vec<Value>, depth: usize) {
+fn scan(
+    node: &Value,
+    selector: &Selector,
+    root: &Value,
+    out: &mut Vec<Value>,
+    depth: usize,
+) -> Result<(), JsonPathError> {
     if depth > MAX_DEPTH {
-        return;
+        return Ok(());
     }
-    selector.apply(node, root, true, out);
+    selector.apply(node, root, true, out)?;
     let children: Vec<Value> = match node {
         Value::Map(map) => map.entries().into_iter().map(|(_, child)| child).collect(),
         Value::List(list) => list.snapshot(),
         Value::Null
         | Value::Bool(_)
         | Value::Int(_)
+        | Value::Long(_)
+        | Value::BigInt(_)
         | Value::Double(_)
+        | Value::BigDecimal(_)
         | Value::Str(_)
         | Value::Entry(_)
         | Value::Input
         | Value::Util
-        | Value::Loop(_) => return,
+        | Value::Loop(_)
+        | Value::Block(_) => return Ok(()),
     };
     for child in children {
         if matches!(child, Value::Map(_) | Value::List(_)) {
-            scan(&child, selector, root, out, depth.saturating_add(1));
+            scan(&child, selector, root, out, depth.saturating_add(1))?;
         }
     }
+    Ok(())
+}
+
+/// Whether Jayway scans `..selector` followed by `following` element by element at arrays: a
+/// wildcard, index, or slice scan that the path continues after.
+const fn scans_through_arrays(selector: &Selector, following: &Segment) -> bool {
+    matches!(
+        selector,
+        Selector::Wildcard | Selector::Index(_) | Selector::Slice(..)
+    ) && !following.scan
+        && !matches!(following.selector, Selector::Function(_))
+}
+
+/// `..selector` and the segment after it, as Jayway's scan walks them. At a map, the selector
+/// applies and the following segment applies to what it found. At an array, the selector is
+/// skipped and the following segment applies to every element; when that segment ends the
+/// path and reads a property, Jayway keeps the result only if the selector is the element's own
+/// index, `[i]`, so `$..*.*` finds nothing through an array of objects.
+fn scan_through(
+    node: &Value,
+    selector: &Selector,
+    following: &Segment,
+    tail: bool,
+    root: &Value,
+    out: &mut Vec<Value>,
+    depth: usize,
+) -> Result<(), JsonPathError> {
+    if depth > MAX_DEPTH {
+        return Ok(());
+    }
+    let children = match node {
+        Value::Map(map) => {
+            let mut hits = Vec::new();
+            selector.apply(node, root, true, &mut hits)?;
+            for hit in &hits {
+                following.selector.apply(hit, root, false, out)?;
+            }
+            map.entries().into_iter().map(|(_, child)| child).collect()
+        }
+        Value::List(list) => {
+            let elements = list.snapshot();
+            for (index, element) in elements.iter().enumerate() {
+                let reads_property = matches!(element, Value::Map(_))
+                    && match &following.selector {
+                        Selector::Child(names) => names.len() == 1,
+                        Selector::Wildcard => true,
+                        Selector::Index(_)
+                        | Selector::Slice(..)
+                        | Selector::Filter(_)
+                        | Selector::Function(_) => false,
+                    };
+                let own_index = matches!(
+                    selector,
+                    Selector::Index(indexes)
+                        if indexes.len() == 1
+                            && indexes.first().copied() == i64::try_from(index).ok()
+                );
+                if !(tail && reads_property) || own_index {
+                    following.selector.apply(element, root, false, out)?;
+                }
+            }
+            elements
+        }
+        _ => return Ok(()),
+    };
+    for child in &children {
+        if matches!(child, Value::Map(_) | Value::List(_)) {
+            scan_through(
+                child,
+                selector,
+                following,
+                tail,
+                root,
+                out,
+                depth.saturating_add(1),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 impl Selector {
     /// Adds the matches of the selector at `node`. `scanning` is set when the selector is
     /// being applied at every descendant of a `..`.
-    fn apply(&self, node: &Value, root: &Value, scanning: bool, out: &mut Vec<Value>) {
+    fn apply(
+        &self,
+        node: &Value,
+        root: &Value,
+        scanning: bool,
+        out: &mut Vec<Value>,
+    ) -> Result<(), JsonPathError> {
         match self {
             Self::Child(names) => Self::apply_child(names, node, scanning, out),
             Self::Index(indexes) => {
@@ -262,23 +462,27 @@ impl Selector {
                 Value::Null
                 | Value::Bool(_)
                 | Value::Int(_)
+                | Value::Long(_)
+                | Value::BigInt(_)
                 | Value::Double(_)
+                | Value::BigDecimal(_)
                 | Value::Str(_)
                 | Value::Entry(_)
                 | Value::Input
                 | Value::Util
-                | Value::Loop(_) => {}
+                | Value::Loop(_)
+                | Value::Block(_) => {}
             },
             Self::Filter(filter) => match node {
                 Value::List(list) => {
                     for item in list.snapshot() {
-                        if filter.matches(&item, root, 0) {
+                        if filter.matches(&item, root, 0)? {
                             out.push(item);
                         }
                     }
                 }
                 Value::Map(_) if !scanning => {
-                    if filter.matches(node, root, 0) {
+                    if filter.matches(node, root, 0)? {
                         out.push(node.clone());
                     }
                 }
@@ -286,15 +490,20 @@ impl Selector {
                 | Value::Null
                 | Value::Bool(_)
                 | Value::Int(_)
+                | Value::Long(_)
+                | Value::BigInt(_)
                 | Value::Double(_)
+                | Value::BigDecimal(_)
                 | Value::Str(_)
                 | Value::Entry(_)
                 | Value::Input
                 | Value::Util
-                | Value::Loop(_) => {}
+                | Value::Loop(_)
+                | Value::Block(_) => {}
             },
             Self::Function(_) => {}
         }
+        Ok(())
     }
 
     /// One name yields its value; several yield a map of the names present, and during a scan
@@ -394,73 +603,33 @@ enum Function {
     Append(Vec<Value>),
 }
 
+fn length(count: usize) -> Value {
+    Value::Int(i32::try_from(count).unwrap_or(i32::MAX))
+}
+
 impl Function {
     /// Applies the function to one value. `None` is a `null` result; an error is a function
     /// Jayway throws for.
     fn apply(&self, input: &Value) -> Result<Option<Value>, JsonPathError> {
         match self {
             Self::Length => Ok(match input {
-                Value::List(list) => i64::try_from(list.len()).ok().map(Value::Int),
-                Value::Map(map) => i64::try_from(map.len()).ok().map(Value::Int),
+                Value::List(list) => Some(length(list.len())),
+                Value::Map(map) => Some(length(map.len())),
                 _ => None,
             }),
             Self::Min | Self::Max | Self::Avg | Self::Sum | Self::StdDev => {
-                let numbers = numbers(input);
-                if numbers.is_empty() {
-                    return Err(JsonPathError::new(
-                        "aggregation function attempted to calculate a value using an empty array",
-                    ));
-                }
-                Ok(Some(Value::Double(self.aggregate(&numbers))))
+                self.aggregated(&numbers(input)).map(Some)
             }
-            Self::Keys => Ok(match input {
-                Value::Map(map) => Some(Value::List(List::from_values(
-                    map.entries()
-                        .into_iter()
-                        .map(|(key, _)| Value::Str(key))
-                        .collect(),
-                ))),
-                _ => None,
-            }),
-            Self::First => match input {
-                Value::List(list) => list
-                    .get(0)
-                    .map(Some)
-                    .ok_or_else(|| JsonPathError::new("first() of an empty array")),
-                _ => Ok(None),
-            },
-            Self::Last => match input {
-                Value::List(list) => list
-                    .len()
-                    .checked_sub(1)
-                    .and_then(|last| list.get(last))
-                    .map(Some)
-                    .ok_or_else(|| JsonPathError::new("last() of an empty array")),
-                _ => Ok(None),
-            },
-            Self::Index(index) => match input {
-                Value::List(list) => normalize_index(*index, list.len())
-                    .and_then(|i| list.get(i))
-                    .map(Some)
-                    .ok_or_else(|| JsonPathError::new(format!("index({index}) is out of bounds"))),
+            Self::Keys => Ok(keys(input)),
+            Self::First | Self::Last | Self::Index(_) => match input {
+                Value::List(list) => pick(&list.snapshot(), self.target()).map(Some),
                 _ => Ok(None),
             },
             Self::Concat(extra) => {
-                let mut joined = String::new();
-                if let Value::List(list) = input {
-                    for item in list.snapshot() {
-                        if let Value::Str(text) = item {
-                            joined.push_str(&text);
-                        }
-                    }
-                }
+                let mut joined = strings_of(input);
                 for value in extra {
-                    if matches!(value, Value::Int(_) | Value::Double(_)) {
-                        joined.push_str(
-                            &value
-                                .to_java_string()
-                                .map_err(|e| JsonPathError::new(e.to_string()))?,
-                        );
+                    if is_number(value) {
+                        joined.push_str(&java_string(value)?);
                     }
                 }
                 Ok(Some(Value::from(joined)))
@@ -468,17 +637,111 @@ impl Function {
             Self::Append(extra) => Ok(Some(match input {
                 Value::List(list) => {
                     let mut items = list.snapshot();
-                    items.extend(
-                        extra
-                            .iter()
-                            .filter(|v| matches!(v, Value::Int(_) | Value::Double(_)))
-                            .cloned(),
-                    );
+                    items.extend(extra.iter().filter(|v| is_number(v)).cloned());
                     Value::List(List::from_values(items))
                 }
                 other => other.clone(),
             })),
         }
+    }
+
+    /// The position `first()`, `last()`, and `index(n)` pick.
+    const fn target(&self) -> i64 {
+        match self {
+            Self::Last => -1,
+            Self::Index(index) => *index,
+            Self::Length
+            | Self::Min
+            | Self::Max
+            | Self::Avg
+            | Self::Sum
+            | Self::StdDev
+            | Self::Keys
+            | Self::First
+            | Self::Concat(_)
+            | Self::Append(_) => 0,
+        }
+    }
+
+    /// Applies the function as Jayway does after rewriting `$..a.f()` to `f($..a)`: `model` is
+    /// the document the path started at and `matches` what the scan found, which replace the
+    /// function's own arguments.
+    fn apply_inverted(
+        &self,
+        model: &Value,
+        matches: &[Value],
+        prefix: &Segments,
+    ) -> Result<Value, JsonPathError> {
+        match self {
+            // `length` counts the children of what the path found.
+            Self::Length => {
+                let mut children = prefix.0.clone();
+                children.push(Segment {
+                    scan: false,
+                    selector: Selector::Wildcard,
+                });
+                Ok(match Segments(children).run(model, model)? {
+                    Found::Many(values) => length(values.len()),
+                    Found::One(_) => length(1),
+                    Found::Nothing => length(0),
+                })
+            }
+            Self::Min | Self::Max | Self::Avg | Self::Sum | Self::StdDev => {
+                let mut values = numbers(model);
+                values.extend(matches.iter().filter_map(as_f64));
+                self.aggregated(&values)
+            }
+            Self::Keys => Ok(keys(model).unwrap_or(Value::Null)),
+            Self::First | Self::Last | Self::Index(_) => {
+                let Value::List(list) = model else {
+                    return Err(JsonPathError::new(
+                        "aggregation function attempted to calculate a value using an empty array",
+                    ));
+                };
+                let target = match self {
+                    Self::Index(_) => matches
+                        .iter()
+                        .find_map(as_f64)
+                        .map(|number| i64::from(f64_to_int(number)))
+                        .ok_or_else(|| JsonPathError::runtime("index() found no number"))?,
+                    _ => self.target(),
+                };
+                pick(&list.snapshot(), target)
+            }
+            Self::Concat(_) => {
+                let mut joined = strings_of(model);
+                for item in matches {
+                    match item {
+                        Value::Null => {}
+                        Value::Str(text) => joined.push_str(text),
+                        Value::List(_) | Value::Map(_) => joined.push_str(
+                            &item
+                                .to_json()
+                                .map_err(|e| JsonPathError::new(e.to_string()))?,
+                        ),
+                        other => joined.push_str(&java_string(other)?),
+                    }
+                }
+                Ok(Value::from(joined))
+            }
+            Self::Append(_) => Ok(match model {
+                Value::List(list) => {
+                    let mut items = list.snapshot();
+                    items.push(Value::List(List::from_values(matches.to_vec())));
+                    Value::List(List::from_values(items))
+                }
+                other => other.clone(),
+            }),
+        }
+    }
+
+    fn aggregated(&self, numbers: &[f64]) -> Result<Value, JsonPathError> {
+        if numbers.is_empty() {
+            return Err(JsonPathError::new(
+                "aggregation function attempted to calculate a value using an empty array",
+            ));
+        }
+        Ok(Value::Double(self.aggregate(numbers)))
     }
 
     fn aggregate(&self, numbers: &[f64]) -> f64 {
@@ -489,13 +752,97 @@ impl Function {
             Self::Max => numbers.iter().copied().fold(f64::NEG_INFINITY, f64::max),
             Self::Sum => sum,
             Self::Avg => sum / count,
+            // Jayway's one-pass formula, whose rounding differs from the two-pass one.
             _ => {
-                let average = sum / count;
-                let variance = numbers.iter().map(|x| (x - average).powi(2)).sum::<f64>() / count;
-                variance.sqrt()
+                let squares: f64 = numbers.iter().map(|x| x * x).sum();
+                (squares / count - sum * sum / count / count).sqrt()
             }
         }
     }
+}
+
+/// The strings among the elements of an array, joined.
+fn strings_of(input: &Value) -> String {
+    let mut joined = String::new();
+    if let Value::List(list) = input {
+        for item in list.snapshot() {
+            if let Value::Str(text) = item {
+                joined.push_str(&text);
+            }
+        }
+    }
+    joined
+}
+
+/// Jayway's `first()`, `last()`, and `index(n)`: a negative target counts from the end, but
+/// only reaches elements after the first.
+fn pick(items: &[Value], target: i64) -> Result<Value, JsonPathError> {
+    let out_of_bounds = || JsonPathError::runtime(format!("index {target} is out of bounds"));
+    if target >= 0 {
+        return usize::try_from(target)
+            .ok()
+            .and_then(|at| items.get(at))
+            .cloned()
+            .ok_or_else(out_of_bounds);
+    }
+    let real = i64::try_from(items.len())
+        .unwrap_or(i64::MAX)
+        .saturating_add(target);
+    if real > 0 {
+        usize::try_from(real)
+            .ok()
+            .and_then(|at| items.get(at))
+            .cloned()
+            .ok_or_else(out_of_bounds)
+    } else {
+        Err(JsonPathError::new(format!(
+            "target index {target} larger than object count {}",
+            items.len()
+        )))
+    }
+}
+
+fn keys(input: &Value) -> Option<Value> {
+    match input {
+        Value::Map(map) => Some(Value::List(List::from_values(
+            map.entries().into_iter().map(|(key, _)| key).collect(),
+        ))),
+        _ => None,
+    }
+}
+
+const fn is_number(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Int(_) | Value::Long(_) | Value::BigInt(_) | Value::Double(_) | Value::BigDecimal(_)
+    )
+}
+
+fn java_string(value: &Value) -> Result<String, JsonPathError> {
+    value
+        .to_java_string()
+        .map_err(|e| JsonPathError::new(e.to_string()))
+}
+
+/// A number's `doubleValue()`.
+fn as_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Int(n) => Some(f64::from(*n)),
+        Value::Long(n) => Some(f64_from_i64(*n)),
+        Value::BigInt(n) => Some(n.to_f64()),
+        Value::Double(d) => Some(*d),
+        Value::BigDecimal(d) => Some(d.to_f64()),
+        _ => None,
+    }
+}
+
+/// `Number.intValue()` of a double.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "Java's narrowing from double saturates the same way"
+)]
+const fn f64_to_int(value: f64) -> i32 {
+    value as i32
 }
 
 /// The numbers in an array; other elements are skipped.
@@ -503,14 +850,7 @@ fn numbers(input: &Value) -> Vec<f64> {
     let Value::List(list) = input else {
         return Vec::new();
     };
-    list.snapshot()
-        .into_iter()
-        .filter_map(|item| match item {
-            Value::Int(value) => Some(f64_from_i64(value)),
-            Value::Double(value) => Some(value),
-            _ => None,
-        })
-        .collect()
+    list.snapshot().iter().filter_map(as_f64).collect()
 }
 
 /// Converts an integer to a double, losing precision beyond 2^53 like Java's widening.
@@ -567,28 +907,30 @@ enum Operand {
 type Resolved = Option<Value>;
 
 impl Filter {
-    fn matches(&self, current: &Value, root: &Value, depth: usize) -> bool {
+    fn matches(&self, current: &Value, root: &Value, depth: usize) -> Result<bool, JsonPathError> {
         if depth > MAX_DEPTH {
-            return false;
+            return Ok(false);
         }
         let next = depth.saturating_add(1);
-        match self {
-            Self::Or(a, b) => a.matches(current, root, next) || b.matches(current, root, next),
-            Self::And(a, b) => a.matches(current, root, next) && b.matches(current, root, next),
-            Self::Not(inner) => !inner.matches(current, root, next),
-            Self::Exists(operand) => operand.resolve(current, root).is_some(),
+        Ok(match self {
+            Self::Or(a, b) => a.matches(current, root, next)? || b.matches(current, root, next)?,
+            Self::And(a, b) => a.matches(current, root, next)? && b.matches(current, root, next)?,
+            Self::Not(inner) => !inner.matches(current, root, next)?,
+            Self::Exists(operand) => operand.resolve(current, root)?.is_some(),
             Self::Compare(left, op, right) => {
-                let left = left.resolve(current, root);
-                let right = right.resolve(current, root);
-                op.holds(left.as_ref(), right.as_ref())
+                let left = left.resolve(current, root)?;
+                let right = right.resolve(current, root)?;
+                op.holds(left.as_ref(), right.as_ref())?
             }
-        }
+        })
     }
 }
 
 impl Operand {
-    fn resolve(&self, current: &Value, root: &Value) -> Resolved {
-        match self {
+    /// The operand's value. A nested path that fails resolves to nothing, except for a
+    /// filter regex that cannot be evaluated.
+    fn resolve(&self, current: &Value, root: &Value) -> Result<Resolved, JsonPathError> {
+        Ok(match self {
             Self::Literal(value) => Some(value.clone()),
             Self::Regex(pattern) => Some(Value::from(pattern.as_str())),
             Self::Path {
@@ -601,21 +943,22 @@ impl Operand {
                     Ok(Found::Many(values)) if !values.is_empty() => {
                         Some(Value::List(List::from_values(values)))
                     }
+                    Err(error) if matches!(error.origin, Origin::Regex) => return Err(error),
                     Ok(Found::Many(_) | Found::Nothing) | Err(_) => None,
                 }
             }
-        }
+        })
     }
 }
 
 impl CompareOp {
-    fn holds(self, left: Option<&Value>, right: Option<&Value>) -> bool {
-        match self {
+    fn holds(self, left: Option<&Value>, right: Option<&Value>) -> Result<bool, JsonPathError> {
+        Ok(match self {
             Self::Eq => values_equal(left, right),
             Self::Ne => !values_equal(left, right),
             Self::Lt | Self::Le | Self::Gt | Self::Ge => {
                 let (Some(left), Some(right)) = (left, right) else {
-                    return false;
+                    return Ok(false);
                 };
                 match compare_values(left, right) {
                     Some(ordering) => match self {
@@ -627,14 +970,15 @@ impl CompareOp {
                     None => false,
                 }
             }
-            Self::Regex => regex_matches(left, right),
+            Self::Regex => regex_matches(left, right)?,
             Self::In => membership(left, right).unwrap_or(false),
             Self::NotIn => !membership(left, right).unwrap_or(false),
             Self::SubsetOf => subset(left, right).unwrap_or(false),
             Self::AnyOf => overlap(left, right).unwrap_or(false),
             Self::NoneOf => overlap(left, right).is_some_and(|found| !found),
             Self::Size => size_of(left).is_some_and(|size| match right {
-                Some(Value::Int(expected)) => size == *expected,
+                Some(Value::Int(expected)) => size == i64::from(*expected),
+                Some(Value::Long(expected)) => size == *expected,
                 _ => false,
             }),
             Self::Empty => {
@@ -642,7 +986,7 @@ impl CompareOp {
                     Some(Value::List(list)) => list.is_empty(),
                     Some(Value::Str(text)) => text.is_empty(),
                     Some(Value::Map(map)) => map.is_empty(),
-                    _ => return false,
+                    _ => return Ok(false),
                 };
                 matches!(right, Some(Value::Bool(expected)) if *expected == empty)
             }
@@ -653,7 +997,7 @@ impl CompareOp {
                 }
                 _ => false,
             },
-        }
+        })
     }
 }
 
@@ -667,10 +1011,10 @@ fn values_equal(left: Option<&Value>, right: Option<&Value>) -> bool {
 
 /// Equality as Jayway compares JSON nodes: numbers by value across integer and double.
 fn json_equal(a: &Value, b: &Value) -> bool {
+    if is_number(a) && is_number(b) {
+        return compare_values(a, b).is_some_and(std::cmp::Ordering::is_eq);
+    }
     match (a, b) {
-        (Value::Int(x), Value::Double(y)) | (Value::Double(y), Value::Int(x)) => {
-            doubles_equal(f64_from_i64(*x), *y)
-        }
         (Value::List(x), Value::List(y)) => {
             let (x, y) = (x.snapshot(), y.snapshot());
             x.len() == y.len() && x.iter().zip(&y).all(|(p, q)| json_equal(p, q))
@@ -688,24 +1032,27 @@ fn json_equal(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// Jayway compares numbers by value whatever their types.
 fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
     match (left, right) {
         (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
-        (Value::Int(a), Value::Double(b)) => f64_from_i64(*a).partial_cmp(b),
-        (Value::Double(a), Value::Int(b)) => a.partial_cmp(&f64_from_i64(*b)),
-        (Value::Double(a), Value::Double(b)) => a.partial_cmp(b),
+        (Value::Long(a), Value::Long(b)) => Some(a.cmp(b)),
+        (Value::Int(a), Value::Long(b)) => Some(i64::from(*a).cmp(b)),
+        (Value::Long(a), Value::Int(b)) => Some(a.cmp(&i64::from(*b))),
         (Value::Str(a), Value::Str(b)) => Some(a.encode_utf16().cmp(b.encode_utf16())),
-        _ => None,
+        _ => as_f64(left)?.partial_cmp(&as_f64(right)?),
     }
 }
 
-fn regex_matches(left: Option<&Value>, right: Option<&Value>) -> bool {
+/// `=~`: whether the whole string matches. A pattern that does not compile or cannot be
+/// evaluated is an error, never a non-match.
+fn regex_matches(left: Option<&Value>, right: Option<&Value>) -> Result<bool, JsonPathError> {
     let (Some(Value::Str(text)), Some(Value::Str(pattern))) = (left, right) else {
-        return false;
+        return Ok(false);
     };
     JavaRegex::new(pattern)
         .and_then(|regex| regex.matches(text))
-        .unwrap_or(false)
+        .map_err(|error| JsonPathError::regex(&error))
 }
 
 fn membership(left: Option<&Value>, right: Option<&Value>) -> Option<bool> {
@@ -909,7 +1256,8 @@ impl PathParser {
             "first" => Function::First,
             "last" => Function::Last,
             "index" => match args.first() {
-                Some(Value::Int(index)) => Function::Index(*index),
+                Some(Value::Int(index)) => Function::Index(i64::from(*index)),
+                Some(Value::Long(index)) => Function::Index(*index),
                 _ => return self.fail("index() takes an integer"),
             },
             "concat" => Function::Concat(args),
@@ -1284,7 +1632,7 @@ impl PathParser {
                 .map_err(|_| JsonPathError::new(format!("invalid number {text}")))
         } else {
             text.parse::<i64>()
-                .map(Value::Int)
+                .map(Value::integer)
                 .map_err(|_| JsonPathError::new(format!("invalid number {text}")))
         }
     }
@@ -1317,6 +1665,15 @@ mod tests {
 
     #[test]
     fn missing_paths_are_null_or_empty() {
+        let document = Value::from_json(STORE).unwrap_or(Value::Null);
+        let found = |path: &str| {
+            path.parse::<JsonPath>()
+                .ok()
+                .and_then(|path| path.find(&document).ok())
+        };
+        assert_eq!(found("$.nothing"), Some(None));
+        assert_eq!(found("$.store.book[9]"), Some(None));
+        assert!(matches!(found("$.store.book[*].nothing"), Some(Some(_))));
         assert_eq!(eval("$.nothing", STORE), "null");
         assert_eq!(eval("$.store.nothing.deeper", STORE), "null");
         assert_eq!(eval("$.store.book[9]", STORE), "null");
@@ -1366,6 +1723,20 @@ mod tests {
     }
 
     #[test]
+    fn a_filter_regex_that_cannot_be_evaluated_is_an_error_not_a_non_match() {
+        assert!(eval("$.store.book[?(@.author =~ /(a/)].price", STORE).starts_with("ERR "));
+        let slow = format!(r#"{{"items":[{{"v":"{}b"}}]}}"#, "a".repeat(40));
+        let err = eval(r"$.items[?(@.v =~ /(a|aa)+\1c/)]", &slow);
+        assert!(err.contains("backtrack limit"), "{err}");
+        let nested = format!(
+            r#"{{"groups":[{{"items":[{{"v":"{}b"}}]}}]}}"#,
+            "a".repeat(40)
+        );
+        let err = eval(r"$.groups[?(@.items[?(@.v =~ /(a|aa)+\1c/)])]", &nested);
+        assert!(err.contains("backtrack limit"), "{err}");
+    }
+
+    #[test]
     fn functions() {
         assert_eq!(eval("$.store.book.length()", STORE), "3");
         assert_eq!(eval("$.n.max()", r#"{"n":[3,1,2]}"#), "3.0");
@@ -1393,8 +1764,39 @@ mod tests {
     }
 
     #[test]
-    fn functions_after_a_scan_are_not_supported() {
-        assert!(eval("$..price.max()", STORE).starts_with("ERR"));
+    fn functions_after_a_leading_scan_apply_to_all_matches() {
+        assert_eq!(eval("$..price.max()", STORE), "19.95");
+        assert_eq!(eval("$..price.length()", STORE), "0");
+        assert_eq!(eval("$..book.length()", STORE), "3");
+        assert_eq!(eval("$..price.keys()", STORE), r#"["store","expensive"]"#);
+        assert_eq!(
+            eval("$..category.concat()", STORE),
+            r#""referencefictionfiction""#
+        );
+        assert!(eval("$..price.first()", STORE).starts_with("ERR"));
+        assert!(eval("$..nothing.max()", STORE).starts_with("ERR"));
+        assert!(eval("$..max()", STORE).starts_with("ERR"));
+        let array = r#"[{"a":1},{"a":2},{"b":[3,4]}]"#;
+        assert_eq!(eval("$..a.index(1)", array), r#"{"a":2}"#);
+        assert_eq!(
+            eval("$..a.append(9)", array),
+            r#"[{"a":1},{"a":2},{"b":[3,4]},[1,2]]"#
+        );
+    }
+
+    #[test]
+    fn functions_after_a_later_scan_run_once_per_match() {
+        assert_eq!(
+            eval("$.store..price.length()", STORE),
+            "[null,null,null,null]"
+        );
+        assert!(eval("$.store..price.max()", STORE).starts_with("ERR"));
+    }
+
+    #[test]
+    fn last_reaches_only_elements_after_the_first() {
+        assert!(eval("$.n.last()", r#"{"n":[7]}"#).starts_with("ERR"));
+        assert_eq!(eval("$.n.last()", r#"{"n":[7,8]}"#), "8");
     }
 
     #[test]

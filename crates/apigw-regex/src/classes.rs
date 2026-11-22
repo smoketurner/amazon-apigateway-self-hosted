@@ -1,21 +1,28 @@
-//! Predefined classes (`\d`, `\w`, ...), POSIX classes, and Unicode properties.
+//! Predefined classes (`\d`, `\w`, ...), POSIX classes, and Unicode properties, resolved the way
+//! `java.util.regex.Pattern` and `CharPredicates` resolve them.
 
 use crate::ast::{ClassItem, ClassSet};
-use crate::error::Unsupported;
+use crate::tables::{BLOCKS, SCRIPTS};
 
 const fn range(low: char, high: char) -> ClassItem {
     ClassItem::Range(low, high)
+}
+
+const fn single(c: char) -> ClassItem {
+    ClassItem::Range(c, c)
 }
 
 fn engine(text: &str) -> ClassItem {
     ClassItem::Engine(text.to_owned())
 }
 
-const GENERAL_CATEGORIES: &[&str] = &[
-    "L", "LC", "Lu", "Ll", "Lt", "Lm", "Lo", "M", "Mn", "Mc", "Me", "N", "Nd", "Nl", "No", "P",
-    "Pc", "Pd", "Ps", "Pe", "Pi", "Pf", "Po", "S", "Sm", "Sc", "Sk", "So", "Z", "Zs", "Zl", "Zp",
-    "C", "Cc", "Cf", "Cs", "Co", "Cn",
-];
+fn union(items: Vec<ClassItem>) -> ClassItem {
+    ClassItem::Predicate(ClassSet::union(false, items))
+}
+
+fn complement(items: Vec<ClassItem>) -> ClassItem {
+    ClassItem::Predicate(ClassSet::union(true, items))
+}
 
 /// The escapes `\d \D \s \S \w \W \h \H \v \V`.
 #[derive(Debug)]
@@ -25,7 +32,6 @@ impl Predefined {
     /// The class for an escape letter. Without `UNICODE_CHARACTER_CLASS` the digit, word and
     /// space classes are ASCII only, as in Java.
     pub(crate) fn item(letter: char, unicode: bool) -> ClassItem {
-        let negated = letter.is_ascii_uppercase();
         let base = match letter.to_ascii_lowercase() {
             'd' => Self::digit(unicode),
             'w' => Self::word(unicode),
@@ -33,18 +39,12 @@ impl Predefined {
             'h' => Self::horizontal_space(),
             _ => Self::vertical_space(),
         };
-        if negated {
-            ClassItem::Nested(ClassSet::union(true, base))
-        } else if let [single] = base.as_slice() {
-            single.clone()
-        } else {
-            ClassItem::Nested(ClassSet::union(false, base))
-        }
+        ClassItem::Predicate(ClassSet::union(letter.is_ascii_uppercase(), base))
     }
 
     fn digit(unicode: bool) -> Vec<ClassItem> {
         if unicode {
-            vec![engine(r"\d")]
+            vec![engine(r"\p{Nd}")]
         } else {
             vec![range('0', '9')]
         }
@@ -58,37 +58,37 @@ impl Predefined {
                 range('a', 'z'),
                 range('A', 'Z'),
                 range('0', '9'),
-                range('_', '_'),
+                single('_'),
             ]
         }
     }
 
     fn space(unicode: bool) -> Vec<ClassItem> {
         if unicode {
-            vec![engine(r"\s")]
+            vec![engine(r"\p{White_Space}")]
         } else {
-            vec![range(' ', ' '), range('\t', '\r')]
+            vec![single(' '), range('\t', '\r')]
         }
     }
 
     fn horizontal_space() -> Vec<ClassItem> {
         vec![
-            range(' ', ' '),
-            range('\t', '\t'),
-            range('\u{A0}', '\u{A0}'),
-            range('\u{1680}', '\u{1680}'),
-            range('\u{180E}', '\u{180E}'),
+            single(' '),
+            single('\t'),
+            single('\u{A0}'),
+            single('\u{1680}'),
+            single('\u{180E}'),
             range('\u{2000}', '\u{200A}'),
-            range('\u{202F}', '\u{202F}'),
-            range('\u{205F}', '\u{205F}'),
-            range('\u{3000}', '\u{3000}'),
+            single('\u{202F}'),
+            single('\u{205F}'),
+            single('\u{3000}'),
         ]
     }
 
     fn vertical_space() -> Vec<ClassItem> {
         vec![
             range('\n', '\r'),
-            range('\u{85}', '\u{85}'),
+            single('\u{85}'),
             range('\u{2028}', '\u{2029}'),
         ]
     }
@@ -97,109 +97,300 @@ impl Predefined {
 /// A resolved `\p{...}` property, before negation is applied.
 #[derive(Debug)]
 pub(crate) struct Property {
-    items: Vec<ClassItem>,
+    item: ClassItem,
 }
 
 impl Property {
-    /// Resolves a Java property name.
+    /// Resolves a Java property name as `Pattern.family` does, or `None` when Java rejects it.
     ///
-    /// Returns `Ok(None)` when Java would reject the name as unknown, and an
-    /// [`Unsupported`] when Java accepts it but there is no equivalent here. Names that look
-    /// like Unicode properties or scripts are passed to the engine, which rejects any it does
-    /// not know when the pattern is compiled.
-    pub(crate) fn resolve(name: &str, unicode: bool) -> Result<Option<Self>, Unsupported> {
-        if unicode && matches!(name, "Graph" | "Print") {
-            return Err(Unsupported::UnicodePosixClass(name.to_owned()));
-        }
-        if let Some(items) = Self::posix(name, unicode) {
-            return Ok(Some(Self { items }));
-        }
-        if name.starts_with("java") {
-            return Err(Unsupported::JavaCharacterPredicate(name.to_owned()));
-        }
-        if let Some((key, value)) = name.split_once('=') {
-            return Self::resolve_key_value(name, key, value);
-        }
-        if name.starts_with("In") {
-            return Err(Unsupported::UnicodeBlock(name.to_owned()));
-        }
-        if let Some(bare) = name.strip_prefix("Is") {
-            return Ok((!bare.is_empty()).then(|| Self::unicode_property(bare)));
-        }
-        Ok(GENERAL_CATEGORIES
-            .contains(&name)
-            .then(|| Self::unicode_property(name)))
-    }
-
-    fn resolve_key_value(name: &str, key: &str, value: &str) -> Result<Option<Self>, Unsupported> {
-        match key.to_ascii_lowercase().as_str() {
-            "script" | "sc" => Ok(Some(Self::unicode_property(&format!("Script={value}")))),
-            "general_category" | "gc" => Ok(Some(Self::unicode_property(value))),
-            "block" | "blk" => Err(Unsupported::UnicodeBlock(name.to_owned())),
-            _ => Ok(None),
-        }
-    }
-
-    fn unicode_property(name: &str) -> Self {
-        let mapped = match name {
-            "Titlecase" => "Lt",
-            "Punctuation" => "P",
-            "Control" => "Cc",
-            "Digit" => "Nd",
-            "Letter" => "L",
-            other => other,
-        };
-        Self {
-            items: vec![ClassItem::Engine(format!(r"\p{{{mapped}}}"))],
-        }
-    }
-
-    /// The POSIX classes, ASCII-only unless `UNICODE_CHARACTER_CLASS` is on.
-    fn posix(name: &str, unicode: bool) -> Option<Vec<ClassItem>> {
-        if name == "ASCII" {
-            return Some(vec![range('\0', '\u{7F}')]);
-        }
-        match (name, unicode) {
-            ("Lower", false) => Some(vec![range('a', 'z')]),
-            ("Upper", false) => Some(vec![range('A', 'Z')]),
-            ("Alpha", false) => Some(vec![range('a', 'z'), range('A', 'Z')]),
-            ("Digit", false) => Some(vec![range('0', '9')]),
-            ("Alnum", false) => Some(vec![range('a', 'z'), range('A', 'Z'), range('0', '9')]),
-            ("Punct", false) => Some(vec![
-                range('!', '/'),
-                range(':', '@'),
-                range('[', '`'),
-                range('{', '~'),
-            ]),
-            ("Graph", false) => Some(vec![range('!', '~')]),
-            ("Print", false) => Some(vec![range(' ', '~')]),
-            ("Blank", false) => Some(vec![range(' ', ' '), range('\t', '\t')]),
-            ("Cntrl", false) => Some(vec![range('\0', '\u{1F}'), range('\u{7F}', '\u{7F}')]),
-            ("XDigit", false) => Some(vec![range('0', '9'), range('a', 'f'), range('A', 'F')]),
-            ("Space", false) => Some(vec![range(' ', ' '), range('\t', '\r')]),
-            ("Lower", true) => Some(vec![engine(r"\p{Lowercase}")]),
-            ("Upper", true) => Some(vec![engine(r"\p{Uppercase}")]),
-            ("Alpha", true) => Some(vec![engine(r"\p{Alphabetic}")]),
-            ("Digit", true) => Some(vec![engine(r"\p{Nd}")]),
-            ("Alnum", true) => Some(vec![engine(r"\p{Alphabetic}"), engine(r"\p{Nd}")]),
-            ("Punct", true) => Some(vec![engine(r"\p{P}")]),
-            ("Blank", true) => Some(vec![engine(r"\p{Zs}"), range('\t', '\t')]),
-            ("Cntrl", true) => Some(vec![engine(r"\p{Cc}")]),
-            ("XDigit", true) => Some(vec![engine(r"\p{Hex_Digit}")]),
-            ("Space", true) => Some(vec![engine(r"\s")]),
-            _ => None,
-        }
+    /// `unicode` is `UNICODE_CHARACTER_CLASS` and `case_insensitive` is `CASE_INSENSITIVE`,
+    /// which selects Java's case-insensitive variants of the case properties.
+    pub(crate) fn resolve(name: &str, unicode: bool, case_insensitive: bool) -> Option<Self> {
+        let item = if let Some((key, value)) = name.split_once('=') {
+            match key.to_ascii_lowercase().as_str() {
+                "sc" | "script" => Self::script(value),
+                "blk" | "block" => Self::block(value),
+                "gc" | "general_category" => Self::property(value, case_insensitive),
+                _ => None,
+            }
+        } else if let Some(block) = name.strip_prefix("In") {
+            Self::block(block)
+        } else if let Some(short) = name.strip_prefix("Is") {
+            Self::unicode_property(&short.to_uppercase(), case_insensitive)
+                .or_else(|| Self::property(short, case_insensitive))
+                .or_else(|| Self::script(short))
+        } else {
+            unicode
+                .then(|| Self::posix(&name.to_uppercase(), case_insensitive))
+                .flatten()
+                .or_else(|| Self::property(name, case_insensitive))
+        }?;
+        Some(Self { item })
     }
 
     /// Applies `\P` negation, returning an item usable in a class.
     pub(crate) fn into_item(self, negated: bool) -> ClassItem {
-        let mut items = self.items;
-        if !negated
-            && items.len() == 1
-            && let Some(single) = items.pop()
-        {
-            return single;
+        if negated {
+            complement(vec![self.item])
+        } else {
+            self.item
         }
-        ClassItem::Nested(ClassSet::union(negated, items))
+    }
+
+    /// `Character.UnicodeBlock.forName`.
+    fn block(name: &str) -> Option<ClassItem> {
+        let key = name.to_uppercase();
+        let index = BLOCKS
+            .binary_search_by(|(known, _, _)| (*known).cmp(key.as_str()))
+            .ok()?;
+        let &(_, first, last) = BLOCKS.get(index)?;
+        Some(if first > last {
+            ClassItem::nothing()
+        } else {
+            ClassItem::code_range(first, last)
+        })
+    }
+
+    /// `Character.UnicodeScript.forName`: a constant name or a four-letter alias.
+    fn script(name: &str) -> Option<ClassItem> {
+        let key = name.to_uppercase();
+        let index = SCRIPTS
+            .binary_search_by(|(known, _)| (*known).cmp(key.as_str()))
+            .ok()?;
+        let &(_, script) = SCRIPTS.get(index)?;
+        Some(if script == "UNKNOWN" {
+            // The engine has no Unknown script: it is every code point that `Scripts.txt`
+            // leaves out, the unassigned, private use, and surrogate ones.
+            union(vec![
+                engine(r"\p{Cn}"),
+                engine(r"\p{Co}"),
+                engine(r"\p{Cs}"),
+            ])
+        } else {
+            engine(&format!(r"\p{{Script={script}}}"))
+        })
+    }
+
+    /// Lower, upper, and title case together, Java's case-insensitive form of each of them.
+    fn any_case() -> ClassItem {
+        union(vec![
+            engine(r"\p{Lowercase}"),
+            engine(r"\p{Uppercase}"),
+            engine(r"\p{Lt}"),
+        ])
+    }
+
+    fn cased(case_insensitive: bool, exact: &str) -> ClassItem {
+        if case_insensitive {
+            Self::any_case()
+        } else {
+            engine(exact)
+        }
+    }
+
+    /// `CharPredicates.WHITE_SPACE`.
+    fn white_space() -> ClassItem {
+        union(vec![engine(r"\p{Z}"), range('\t', '\r'), single('\u{85}')])
+    }
+
+    /// `CharPredicates.HEX_DIGIT`: every decimal digit plus the ASCII and full-width letters.
+    fn hex_digit() -> ClassItem {
+        union(vec![
+            engine(r"\p{Nd}"),
+            range('A', 'F'),
+            range('a', 'f'),
+            range('\u{FF21}', '\u{FF26}'),
+            range('\u{FF41}', '\u{FF46}'),
+        ])
+    }
+
+    /// `CharPredicates.GRAPH`: not a separator, control, surrogate, or unassigned.
+    fn graph() -> ClassItem {
+        complement(vec![
+            engine(r"\p{Z}"),
+            engine(r"\p{Cc}"),
+            engine(r"\p{Cs}"),
+            engine(r"\p{Cn}"),
+        ])
+    }
+
+    /// `Character.isIdentifierIgnorable`.
+    fn identifier_ignorable() -> ClassItem {
+        union(vec![
+            range('\0', '\u{8}'),
+            range('\u{E}', '\u{1B}'),
+            range('\u{7F}', '\u{9F}'),
+            engine(r"\p{Cf}"),
+        ])
+    }
+
+    /// `CharPredicates.forPOSIXName`, used under `UNICODE_CHARACTER_CLASS`.
+    fn posix(name: &str, case_insensitive: bool) -> Option<ClassItem> {
+        Some(match name {
+            "ALPHA" => engine(r"\p{Alphabetic}"),
+            "LOWER" => Self::cased(case_insensitive, r"\p{Lowercase}"),
+            "UPPER" => Self::cased(case_insensitive, r"\p{Uppercase}"),
+            "SPACE" => Self::white_space(),
+            "PUNCT" => engine(r"\p{P}"),
+            "XDIGIT" => Self::hex_digit(),
+            "ALNUM" => union(vec![engine(r"\p{Alphabetic}"), engine(r"\p{Nd}")]),
+            "CNTRL" => engine(r"\p{Cc}"),
+            "DIGIT" => engine(r"\p{Nd}"),
+            "BLANK" => union(vec![engine(r"\p{Zs}"), single('\t')]),
+            "GRAPH" => Self::graph(),
+            "PRINT" => complement(vec![
+                engine(r"\p{Zl}"),
+                engine(r"\p{Zp}"),
+                engine(r"\p{Cc}"),
+                engine(r"\p{Cs}"),
+                engine(r"\p{Cn}"),
+            ]),
+            _ => return None,
+        })
+    }
+
+    /// `CharPredicates.forUnicodeProperty`, for `\p{IsName}`; `name` is upper case.
+    fn unicode_property(name: &str, case_insensitive: bool) -> Option<ClassItem> {
+        let item = match name {
+            "ALPHABETIC" => engine(r"\p{Alphabetic}"),
+            "ASSIGNED" => complement(vec![engine(r"\p{Cn}")]),
+            "CONTROL" => engine(r"\p{Cc}"),
+            "EMOJI" => engine(r"\p{Emoji}"),
+            "EMOJI_PRESENTATION" => engine(r"\p{Emoji_Presentation}"),
+            "EMOJI_MODIFIER" => engine(r"\p{Emoji_Modifier}"),
+            "EMOJI_MODIFIER_BASE" => engine(r"\p{Emoji_Modifier_Base}"),
+            "EMOJI_COMPONENT" => engine(r"\p{Emoji_Component}"),
+            "EXTENDED_PICTOGRAPHIC" => engine(r"\p{Extended_Pictographic}"),
+            "HEXDIGIT" | "HEX_DIGIT" => Self::hex_digit(),
+            "IDEOGRAPHIC" => engine(r"\p{Ideographic}"),
+            "JOINCONTROL" | "JOIN_CONTROL" => range('\u{200C}', '\u{200D}'),
+            "LETTER" => engine(r"\p{L}"),
+            "LOWERCASE" => Self::cased(case_insensitive, r"\p{Lowercase}"),
+            "NONCHARACTERCODEPOINT" | "NONCHARACTER_CODE_POINT" => {
+                engine(r"\p{Noncharacter_Code_Point}")
+            }
+            "TITLECASE" => Self::cased(case_insensitive, r"\p{Lt}"),
+            "PUNCTUATION" => engine(r"\p{P}"),
+            "UPPERCASE" => Self::cased(case_insensitive, r"\p{Uppercase}"),
+            "WHITESPACE" | "WHITE_SPACE" => Self::white_space(),
+            "WORD" => engine(r"\w"),
+            _ => return Self::posix(name, case_insensitive),
+        };
+        Some(item)
+    }
+
+    /// `CharPredicates.forProperty`: general categories, ASCII POSIX classes, and the
+    /// `java.lang.Character` predicates. Names are case-sensitive.
+    fn property(name: &str, case_insensitive: bool) -> Option<ClassItem> {
+        if let Some(item) = Self::category(name, case_insensitive) {
+            return Some(item);
+        }
+        if let Some(items) = Self::ascii_posix(name, case_insensitive) {
+            return Some(union(items));
+        }
+        Self::java_predicate(name, case_insensitive)
+    }
+
+    fn category(name: &str, case_insensitive: bool) -> Option<ClassItem> {
+        const CATEGORIES: &[&str] = &[
+            "Cn", "Lm", "Lo", "Mn", "Me", "Mc", "Nd", "Nl", "No", "Zs", "Zl", "Zp", "Cc", "Cf",
+            "Co", "Cs", "Pd", "Ps", "Pe", "Pc", "Po", "Sm", "Sc", "Sk", "So", "Pi", "Pf", "L", "M",
+            "N", "Z", "C", "P", "S", "LC",
+        ];
+        Some(match name {
+            "Lu" | "Ll" | "Lt" if case_insensitive => engine(r"\p{LC}"),
+            "Lu" | "Ll" | "Lt" => engine(&format!(r"\p{{{name}}}")),
+            "LD" => union(vec![engine(r"\p{L}"), engine(r"\p{Nd}")]),
+            "L1" => range('\0', '\u{FF}'),
+            "all" => range('\0', char::MAX),
+            _ if CATEGORIES.contains(&name) => engine(&format!(r"\p{{{name}}}")),
+            _ => return None,
+        })
+    }
+
+    /// The ASCII POSIX classes of `CharPredicates.forProperty`.
+    fn ascii_posix(name: &str, case_insensitive: bool) -> Option<Vec<ClassItem>> {
+        let alpha = || vec![range('a', 'z'), range('A', 'Z')];
+        Some(match name {
+            "ASCII" => vec![range('\0', '\u{7F}')],
+            "Alnum" => vec![range('a', 'z'), range('A', 'Z'), range('0', '9')],
+            "Alpha" => alpha(),
+            "Blank" => vec![single(' '), single('\t')],
+            "Cntrl" => vec![range('\0', '\u{1F}'), single('\u{7F}')],
+            "Digit" => vec![range('0', '9')],
+            "Graph" => vec![range('!', '~')],
+            "Lower" | "Upper" if case_insensitive => alpha(),
+            "Lower" => vec![range('a', 'z')],
+            "Print" => vec![range(' ', '~')],
+            "Punct" => vec![
+                range('!', '/'),
+                range(':', '@'),
+                range('[', '`'),
+                range('{', '~'),
+            ],
+            "Space" => vec![single(' '), range('\t', '\r')],
+            "Upper" => vec![range('A', 'Z')],
+            "XDigit" => vec![range('0', '9'), range('a', 'f'), range('A', 'F')],
+            _ => return None,
+        })
+    }
+
+    /// `\p{javaXxx}`: the `java.lang.Character` predicates of the same name.
+    fn java_predicate(name: &str, case_insensitive: bool) -> Option<ClassItem> {
+        Some(match name {
+            "javaLowerCase" => Self::cased(case_insensitive, r"\p{Lowercase}"),
+            "javaUpperCase" => Self::cased(case_insensitive, r"\p{Uppercase}"),
+            "javaTitleCase" => Self::cased(case_insensitive, r"\p{Lt}"),
+            "javaAlphabetic" => engine(r"\p{Alphabetic}"),
+            "javaIdeographic" => engine(r"\p{Ideographic}"),
+            "javaDigit" => engine(r"\p{Nd}"),
+            "javaDefined" => complement(vec![engine(r"\p{Cn}")]),
+            "javaLetter" => engine(r"\p{L}"),
+            "javaLetterOrDigit" => union(vec![engine(r"\p{L}"), engine(r"\p{Nd}")]),
+            "javaJavaIdentifierStart" => union(vec![
+                engine(r"\p{L}"),
+                engine(r"\p{Nl}"),
+                engine(r"\p{Sc}"),
+                engine(r"\p{Pc}"),
+            ]),
+            "javaJavaIdentifierPart" => union(vec![
+                engine(r"\p{L}"),
+                engine(r"\p{Nl}"),
+                engine(r"\p{Sc}"),
+                engine(r"\p{Pc}"),
+                engine(r"\p{Nd}"),
+                engine(r"\p{Mc}"),
+                engine(r"\p{Mn}"),
+                Self::identifier_ignorable(),
+            ]),
+            "javaUnicodeIdentifierStart" => {
+                union(vec![engine(r"\p{ID_Start}"), single('\u{2E2F}')])
+            }
+            "javaUnicodeIdentifierPart" => union(vec![
+                engine(r"\p{ID_Continue}"),
+                single('\u{2E2F}'),
+                Self::identifier_ignorable(),
+            ]),
+            "javaIdentifierIgnorable" => Self::identifier_ignorable(),
+            "javaSpaceChar" => engine(r"\p{Z}"),
+            "javaWhitespace" => union(vec![
+                ClassItem::Predicate(ClassSet {
+                    negated: false,
+                    operands: vec![
+                        vec![engine(r"\p{Z}")],
+                        vec![complement(vec![
+                            single('\u{A0}'),
+                            single('\u{2007}'),
+                            single('\u{202F}'),
+                        ])],
+                    ],
+                }),
+                range('\t', '\r'),
+                range('\u{1C}', '\u{1F}'),
+            ]),
+            "javaISOControl" => union(vec![range('\0', '\u{1F}'), range('\u{7F}', '\u{9F}')]),
+            "javaMirrored" => engine(r"\p{Bidi_Mirrored}"),
+            _ => return None,
+        })
     }
 }
