@@ -56,6 +56,15 @@ paths:
         responseParameters:
           "200":
             "append:header.x-reference-response": "mapped"
+  # An integration host that does not resolve, for HTTP API's answer
+  /broken/unresolvable:
+    get:
+      x-amazon-apigateway-integration:
+        type: http_proxy
+        httpMethod: GET
+        uri: "https://$${stageVariables.unresolvable_host}/unresolvable"
+        payloadFormatVersion: "1.0"
+        timeoutInMillis: 5000
   /throttled:
     get:
       x-amazon-apigateway-integration:

@@ -2,7 +2,10 @@
   "source": "recorded",
   "api": "rest_policy",
   "stage": "ref",
-  "stage_variables": {},
+  "stage_variables": {
+    "echo_host": "vhj7j5563m4uhc4u47wpg6umhi0svzio.lambda-url.us-east-1.on.aws",
+    "unresolvable_host": "apigw-parity.invalid"
+  },
   "openapi": {
     "openapi": "3.0.1",
     "info": {
@@ -12,7 +15,7 @@
     },
     "servers": [
       {
-        "url": "https://34wn6kifji.execute-api.us-east-1.amazonaws.com/{basePath}",
+        "url": "https://3wj6q6vhae.execute-api.us-east-1.amazonaws.com/{basePath}",
         "variables": {
           "basePath": {
             "default": "ref"
@@ -30,7 +33,6 @@
             }
           },
           "x-amazon-apigateway-integration": {
-            "type": "mock",
             "responses": {
               "default": {
                 "statusCode": "200",
@@ -42,7 +44,8 @@
             "requestTemplates": {
               "application/json": "{\"statusCode\": 200}"
             },
-            "passthroughBehavior": "when_no_match"
+            "passthroughBehavior": "when_no_match",
+            "type": "mock"
           }
         }
       },
@@ -55,7 +58,6 @@
             }
           },
           "x-amazon-apigateway-integration": {
-            "type": "mock",
             "responses": {
               "default": {
                 "statusCode": "200",
@@ -67,7 +69,8 @@
             "requestTemplates": {
               "application/json": "{\"statusCode\": 200}"
             },
-            "passthroughBehavior": "when_no_match"
+            "passthroughBehavior": "when_no_match",
+            "type": "mock"
           }
         }
       },
@@ -80,7 +83,6 @@
             }
           },
           "x-amazon-apigateway-integration": {
-            "type": "mock",
             "responses": {
               "default": {
                 "statusCode": "200",
@@ -92,7 +94,8 @@
             "requestTemplates": {
               "application/json": "{\"statusCode\": 200}"
             },
-            "passthroughBehavior": "when_no_match"
+            "passthroughBehavior": "when_no_match",
+            "type": "mock"
           }
         }
       }
@@ -106,13 +109,13 @@
           "Effect": "Allow",
           "Principal": "*",
           "Action": "execute-api:Invoke",
-          "Resource": "arn:aws:execute-api:us-east-1:[account-id]:34wn6kifji/*"
+          "Resource": "arn:aws:execute-api:us-east-1:[account-id]:3wj6q6vhae/*"
         },
         {
           "Effect": "Deny",
           "Principal": "*",
           "Action": "execute-api:Invoke",
-          "Resource": "arn:aws:execute-api:us-east-1:[account-id]:34wn6kifji/*/GET/ip-denied",
+          "Resource": "arn:aws:execute-api:us-east-1:[account-id]:3wj6q6vhae/*/GET/ip-denied",
           "Condition": {
             "IpAddress": {
               "aws:SourceIp": [
@@ -126,7 +129,7 @@
           "Effect": "Deny",
           "Principal": "*",
           "Action": "execute-api:Invoke",
-          "Resource": "arn:aws:execute-api:us-east-1:[account-id]:34wn6kifji/*/GET/ip-restricted",
+          "Resource": "arn:aws:execute-api:us-east-1:[account-id]:3wj6q6vhae/*/GET/ip-restricted",
           "Condition": {
             "NotIpAddress": {
               "aws:SourceIp": [

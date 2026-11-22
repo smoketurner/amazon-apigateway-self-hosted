@@ -474,7 +474,6 @@ cases:
     api: rest
     path: /http-nonproxy-headers/42
     headers: {x-from-client: abc, accept: application/json}
-    unrecorded: true
     compare:
       headers: [content-type]
 
@@ -484,7 +483,6 @@ cases:
     path: /http-nonproxy-headers/42
     headers: {x-from-client: abc, content-type: text/plain}
     body: hello
-    unrecorded: true
     compare:
       headers: [content-type]
 
@@ -493,6 +491,24 @@ cases:
     method: POST
     path: /http-nonproxy-headers/42
     headers: {content-type: application/json}
+    body: '{"a":1}'
+    compare:
+      headers: [content-type]
+
+  # Whether the backend's Accept is the client's or follows the content type
+  - name: rest-http-nonproxy-headers-accept-get
+    api: rest
+    path: /http-nonproxy-headers/42
+    headers: {accept: text/html}
+    unrecorded: true
+    compare:
+      headers: [content-type]
+
+  - name: rest-http-nonproxy-headers-accept-post-json
+    api: rest
+    method: POST
+    path: /http-nonproxy-headers/42
+    headers: {content-type: application/json, accept: text/html}
     body: '{"a":1}'
     unrecorded: true
     compare:
@@ -504,20 +520,17 @@ cases:
     api: rest
     path: /authz/token
     headers: {Authorization: malformed}
-    unrecorded: true
     compare:
       headers: [content-type, x-amzn-errortype, x-reference-gateway-response]
 
   - name: rest-http-proxy-unresolvable-host
     api: rest
     path: /broken/unresolvable
-    unrecorded: true
     compare:
       headers: [content-type, x-amzn-errortype, x-reference-gateway-response]
 
   - name: rest-http-proxy-unset-stage-variable-host
     api: rest
     path: /broken/unset-host
-    unrecorded: true
     compare:
       headers: [content-type, x-amzn-errortype, x-reference-gateway-response]

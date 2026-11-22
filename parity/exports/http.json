@@ -2,17 +2,20 @@
   "source": "recorded",
   "api": "http",
   "stage": "ref",
-  "stage_variables": {},
+  "stage_variables": {
+    "echo_host": "vhj7j5563m4uhc4u47wpg6umhi0svzio.lambda-url.us-east-1.on.aws",
+    "unresolvable_host": "apigw-parity.invalid"
+  },
   "openapi": {
     "openapi": "3.0.1",
     "info": {
       "title": "apigw-ref-http",
       "description": "HTTP API covering the in-scope features, used as the parity reference.",
-      "version": "2026-11-19 14:18:37UTC"
+      "version": "2026-11-22 16:42:17UTC"
     },
     "servers": [
       {
-        "url": "https://a2jjc5tao1.execute-api.us-east-1.amazonaws.com/{basePath}",
+        "url": "https://skx1sib1w1.execute-api.us-east-1.amazonaws.com/{basePath}",
         "variables": {
           "basePath": {
             "default": "ref"
@@ -310,9 +313,9 @@
             "identitySource": "$request.header.Authorization",
             "jwtConfiguration": {
               "audience": [
-                "28pv53f24rnoao0usj605dakn2"
+                "67qveb1anjg2sij4cqltjadb6b"
               ],
-              "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_2nwDzvKWd"
+              "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_JmQmtpTk4"
             },
             "type": "jwt"
           }

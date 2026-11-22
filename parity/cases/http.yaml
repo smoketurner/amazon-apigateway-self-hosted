@@ -224,3 +224,10 @@ cases:
     compare:
       headers: [access-control-allow-origin, access-control-expose-headers, access-control-allow-credentials, vary]
       body: ignore
+
+  - name: http-http-proxy-unresolvable-host
+    api: http
+    path: /broken/unresolvable
+    unrecorded: true
+    compare:
+      headers: [content-type]

@@ -1,0 +1,16 @@
+{
+  "name": "rest-http-nonproxy-headers-post-json",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-requestid": "[masked]",
+      "x-amzn-trace-id": "[masked]"
+    },
+    "body": "{\"contentType\":\"application/json\",\"accept\":\"application/json\",\"fromClient\":\"\",\"mapped\":\"\",\"body\":\"{\\\"a\\\":1}\"}"
+  }
+}
