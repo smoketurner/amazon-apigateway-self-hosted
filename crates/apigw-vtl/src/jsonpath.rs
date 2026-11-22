@@ -15,7 +15,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use apigw_regex::JavaRegex;
+use apigw_regex::{JavaRegex, RegexError};
 
 use crate::value::{List, Map, Value, doubles_equal};
 
@@ -23,12 +23,23 @@ use crate::value::{List, Map, Value, doubles_equal};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JsonPathError {
     message: String,
+    /// Set for a filter regex that cannot be evaluated. A filter must not treat such an item
+    /// as unmatched, so the error stops the whole evaluation, also from a nested path.
+    regex: bool,
 }
 
 impl JsonPathError {
     fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            regex: false,
+        }
+    }
+
+    fn regex(error: &RegexError) -> Self {
+        Self {
+            message: format!("filter regular expression cannot be evaluated: {error}"),
+            regex: true,
         }
     }
 }
@@ -128,9 +139,9 @@ impl Segments {
             let mut next = Vec::new();
             for node in &current {
                 if segment.scan {
-                    scan(node, &segment.selector, root, &mut next, 0);
+                    scan(node, &segment.selector, root, &mut next, 0)?;
                 } else {
-                    segment.selector.apply(node, root, false, &mut next);
+                    segment.selector.apply(node, root, false, &mut next)?;
                 }
             }
             current = next;
@@ -213,11 +224,17 @@ impl FromStr for JsonPath {
 }
 
 /// Applies `selector` to `node` and every container below it, in document order.
-fn scan(node: &Value, selector: &Selector, root: &Value, out: &mut Vec<Value>, depth: usize) {
+fn scan(
+    node: &Value,
+    selector: &Selector,
+    root: &Value,
+    out: &mut Vec<Value>,
+    depth: usize,
+) -> Result<(), JsonPathError> {
     if depth > MAX_DEPTH {
-        return;
+        return Ok(());
     }
-    selector.apply(node, root, true, out);
+    selector.apply(node, root, true, out)?;
     let children: Vec<Value> = match node {
         Value::Map(map) => map.entries().into_iter().map(|(_, child)| child).collect(),
         Value::List(list) => list.snapshot(),
@@ -229,19 +246,26 @@ fn scan(node: &Value, selector: &Selector, root: &Value, out: &mut Vec<Value>, d
         | Value::Entry(_)
         | Value::Input
         | Value::Util
-        | Value::Loop(_) => return,
+        | Value::Loop(_) => return Ok(()),
     };
     for child in children {
         if matches!(child, Value::Map(_) | Value::List(_)) {
-            scan(&child, selector, root, out, depth.saturating_add(1));
+            scan(&child, selector, root, out, depth.saturating_add(1))?;
         }
     }
+    Ok(())
 }
 
 impl Selector {
     /// Adds the matches of the selector at `node`. `scanning` is set when the selector is
     /// being applied at every descendant of a `..`.
-    fn apply(&self, node: &Value, root: &Value, scanning: bool, out: &mut Vec<Value>) {
+    fn apply(
+        &self,
+        node: &Value,
+        root: &Value,
+        scanning: bool,
+        out: &mut Vec<Value>,
+    ) -> Result<(), JsonPathError> {
         match self {
             Self::Child(names) => Self::apply_child(names, node, scanning, out),
             Self::Index(indexes) => {
@@ -276,13 +300,13 @@ impl Selector {
             Self::Filter(filter) => match node {
                 Value::List(list) => {
                     for item in list.snapshot() {
-                        if filter.matches(&item, root, 0) {
+                        if filter.matches(&item, root, 0)? {
                             out.push(item);
                         }
                     }
                 }
                 Value::Map(_) if !scanning => {
-                    if filter.matches(node, root, 0) {
+                    if filter.matches(node, root, 0)? {
                         out.push(node.clone());
                     }
                 }
@@ -299,6 +323,7 @@ impl Selector {
             },
             Self::Function(_) => {}
         }
+        Ok(())
     }
 
     /// One name yields its value; several yield a map of the names present, and during a scan
@@ -571,28 +596,30 @@ enum Operand {
 type Resolved = Option<Value>;
 
 impl Filter {
-    fn matches(&self, current: &Value, root: &Value, depth: usize) -> bool {
+    fn matches(&self, current: &Value, root: &Value, depth: usize) -> Result<bool, JsonPathError> {
         if depth > MAX_DEPTH {
-            return false;
+            return Ok(false);
         }
         let next = depth.saturating_add(1);
-        match self {
-            Self::Or(a, b) => a.matches(current, root, next) || b.matches(current, root, next),
-            Self::And(a, b) => a.matches(current, root, next) && b.matches(current, root, next),
-            Self::Not(inner) => !inner.matches(current, root, next),
-            Self::Exists(operand) => operand.resolve(current, root).is_some(),
+        Ok(match self {
+            Self::Or(a, b) => a.matches(current, root, next)? || b.matches(current, root, next)?,
+            Self::And(a, b) => a.matches(current, root, next)? && b.matches(current, root, next)?,
+            Self::Not(inner) => !inner.matches(current, root, next)?,
+            Self::Exists(operand) => operand.resolve(current, root)?.is_some(),
             Self::Compare(left, op, right) => {
-                let left = left.resolve(current, root);
-                let right = right.resolve(current, root);
-                op.holds(left.as_ref(), right.as_ref())
+                let left = left.resolve(current, root)?;
+                let right = right.resolve(current, root)?;
+                op.holds(left.as_ref(), right.as_ref())?
             }
-        }
+        })
     }
 }
 
 impl Operand {
-    fn resolve(&self, current: &Value, root: &Value) -> Resolved {
-        match self {
+    /// The operand's value. A nested path that fails resolves to nothing, except for a
+    /// filter regex that cannot be evaluated.
+    fn resolve(&self, current: &Value, root: &Value) -> Result<Resolved, JsonPathError> {
+        Ok(match self {
             Self::Literal(value) => Some(value.clone()),
             Self::Regex(pattern) => Some(Value::from(pattern.as_str())),
             Self::Path {
@@ -605,21 +632,22 @@ impl Operand {
                     Ok(Found::Many(values)) if !values.is_empty() => {
                         Some(Value::List(List::from_values(values)))
                     }
+                    Err(error) if error.regex => return Err(error),
                     Ok(Found::Many(_) | Found::Nothing) | Err(_) => None,
                 }
             }
-        }
+        })
     }
 }
 
 impl CompareOp {
-    fn holds(self, left: Option<&Value>, right: Option<&Value>) -> bool {
-        match self {
+    fn holds(self, left: Option<&Value>, right: Option<&Value>) -> Result<bool, JsonPathError> {
+        Ok(match self {
             Self::Eq => values_equal(left, right),
             Self::Ne => !values_equal(left, right),
             Self::Lt | Self::Le | Self::Gt | Self::Ge => {
                 let (Some(left), Some(right)) = (left, right) else {
-                    return false;
+                    return Ok(false);
                 };
                 match compare_values(left, right) {
                     Some(ordering) => match self {
@@ -631,7 +659,7 @@ impl CompareOp {
                     None => false,
                 }
             }
-            Self::Regex => regex_matches(left, right),
+            Self::Regex => regex_matches(left, right)?,
             Self::In => membership(left, right).unwrap_or(false),
             Self::NotIn => !membership(left, right).unwrap_or(false),
             Self::SubsetOf => subset(left, right).unwrap_or(false),
@@ -646,7 +674,7 @@ impl CompareOp {
                     Some(Value::List(list)) => list.is_empty(),
                     Some(Value::Str(text)) => text.is_empty(),
                     Some(Value::Map(map)) => map.is_empty(),
-                    _ => return false,
+                    _ => return Ok(false),
                 };
                 matches!(right, Some(Value::Bool(expected)) if *expected == empty)
             }
@@ -657,7 +685,7 @@ impl CompareOp {
                 }
                 _ => false,
             },
-        }
+        })
     }
 }
 
@@ -703,13 +731,15 @@ fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
     }
 }
 
-fn regex_matches(left: Option<&Value>, right: Option<&Value>) -> bool {
+/// `=~`: whether the whole string matches. A pattern that does not compile or cannot be
+/// evaluated is an error, never a non-match.
+fn regex_matches(left: Option<&Value>, right: Option<&Value>) -> Result<bool, JsonPathError> {
     let (Some(Value::Str(text)), Some(Value::Str(pattern))) = (left, right) else {
-        return false;
+        return Ok(false);
     };
     JavaRegex::new(pattern)
         .and_then(|regex| regex.matches(text))
-        .unwrap_or(false)
+        .map_err(|error| JsonPathError::regex(&error))
 }
 
 fn membership(left: Option<&Value>, right: Option<&Value>) -> Option<bool> {
@@ -1376,6 +1406,20 @@ mod tests {
             "[8.95,8.99]"
         );
         assert_eq!(eval("$.store.book[?(!@.isbn)].price", STORE), "[8.95,8.99]");
+    }
+
+    #[test]
+    fn a_filter_regex_that_cannot_be_evaluated_is_an_error_not_a_non_match() {
+        assert!(eval("$.store.book[?(@.author =~ /(a/)].price", STORE).starts_with("ERR "));
+        let slow = format!(r#"{{"items":[{{"v":"{}b"}}]}}"#, "a".repeat(40));
+        let err = eval(r"$.items[?(@.v =~ /(a|aa)+\1c/)]", &slow);
+        assert!(err.contains("backtrack limit"), "{err}");
+        let nested = format!(
+            r#"{{"groups":[{{"items":[{{"v":"{}b"}}]}}]}}"#,
+            "a".repeat(40)
+        );
+        let err = eval(r"$.groups[?(@.items[?(@.v =~ /(a|aa)+\1c/)])]", &nested);
+        assert!(err.contains("backtrack limit"), "{err}");
     }
 
     #[test]
