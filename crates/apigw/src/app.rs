@@ -551,6 +551,13 @@ impl ApiRuntime {
         self.loaded.clone()
     }
 
+    /// Keeps refreshing until `shutdown` is cancelled, then waits for the
+    /// refresh tasks to end.
+    pub(crate) async fn run_until(self, shutdown: CancellationToken) {
+        shutdown.cancelled().await;
+        self.stop().await;
+    }
+
     /// Stops refreshing and waits for the refresh task to end.
     pub(crate) async fn stop(self) {
         self.stop.cancel();
@@ -585,7 +592,8 @@ async fn serve_apis(
         )
         .await?;
         let routes = runtime.loaded();
-        tasks.spawn(async move { runtime.stop().await });
+        // Stopping right away would end the refresh as soon as it started.
+        tasks.spawn(runtime.run_until(shutdown.clone()));
         return Ok((
             router::dispatcher(routes.clone(), AllowedHosts::only(&config.allowed_hosts)),
             router::admin(routes, Arc::clone(aws)),
@@ -903,6 +911,46 @@ mod tests {
         assert!(!known.is_same_deployment(&moved));
         let unknown = DeploymentStamp::default();
         assert!(!unknown.is_same_deployment(&unknown.clone()));
+    }
+
+    /// The runtime `serve_apis` starts keeps refreshing until shutdown; it once
+    /// stopped refreshing as soon as it started.
+    #[tokio::test]
+    async fn a_running_api_keeps_refreshing_until_shutdown() {
+        let doc = scratch("api.json");
+        let write = |status: u16| {
+            json!({"paths": {"/pets": {"get": {"x-amazon-apigateway-integration": {"type": "mock",
+                "requestTemplates": {"application/json": format!("{{\"statusCode\": {status}}}")},
+                "responses": {"default": {"statusCode": status.to_string()}}}}}}})
+            .to_string()
+        };
+        tokio::fs::write(&doc, write(200)).await.unwrap();
+        let shutdown = CancellationToken::new();
+        let runtime = ApiRuntime::start(
+            Source::File {
+                path: doc.clone(),
+                kind: ApiKind::Rest,
+                stage: None,
+            },
+            builder(None),
+            None,
+            Some(Duration::from_millis(50)),
+            &sdk_config(),
+            &shutdown,
+        )
+        .await
+        .unwrap();
+        let mut loaded = runtime.loaded();
+        let supervisor = tokio::spawn(runtime.run_until(shutdown.clone()));
+        tokio::fs::write(&doc, write(201)).await.unwrap();
+        let swapped = tokio::time::timeout(Duration::from_secs(5), loaded.changed()).await;
+        assert!(
+            matches!(swapped, Ok(Ok(()))),
+            "the running API did not pick up the new definition"
+        );
+        shutdown.cancel();
+        supervisor.await.unwrap();
+        tokio::fs::remove_file(&doc).await.unwrap();
     }
 
     #[tokio::test]
