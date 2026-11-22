@@ -22,6 +22,10 @@ pub(crate) struct RunnerOutputs {
     rest_policy: Endpoint,
     http: Endpoint,
     #[serde(default)]
+    domain: Option<Endpoint>,
+    #[serde(default)]
+    domain_mtls: Option<Endpoint>,
+    #[serde(default)]
     pub(crate) stage_variables: BTreeMap<String, String>,
 }
 
@@ -44,11 +48,13 @@ impl RunnerOutputs {
     /// [`ParityError::MissingEndpoint`] when the outputs carry an empty URL.
     pub(crate) fn base_url(&self, api: ApiName) -> Result<&str> {
         let endpoint = match api {
-            ApiName::Rest => &self.rest,
-            ApiName::Http => &self.http,
-            ApiName::RestPolicy => &self.rest_policy,
+            ApiName::Rest => Some(&self.rest),
+            ApiName::Http => Some(&self.http),
+            ApiName::RestPolicy => Some(&self.rest_policy),
+            ApiName::Domain => self.domain.as_ref(),
+            ApiName::DomainMtls => self.domain_mtls.as_ref(),
         };
-        let url = endpoint.base_url.trim_end_matches('/');
+        let url = endpoint.map_or("", |e| e.base_url.trim_end_matches('/'));
         if url.is_empty() {
             Err(ParityError::MissingEndpoint(api))
         } else {

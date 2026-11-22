@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::case::{ApiName, CaseName};
+use crate::case::{ApiName, CaseName, ClientCert};
 
 pub(crate) type Result<T> = std::result::Result<T, ParityError>;
 
@@ -34,6 +34,10 @@ pub(crate) enum ParityError {
     MissingExport(ApiName),
     #[error("outputs file has no base URL for the {0} API")]
     MissingEndpoint(ApiName),
+    #[error("the {0} API has no export, so it cannot be replayed")]
+    NotReplayable(ApiName),
+    #[error("client certificate {0:?} is not configured; pass --client-certs")]
+    MissingClientCert(ClientCert),
     #[error("request for case {case} failed: {source}")]
     Request {
         case: CaseName,

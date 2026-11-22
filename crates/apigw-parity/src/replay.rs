@@ -30,6 +30,9 @@ pub(crate) enum Outcome {
     Unrecorded,
     /// Marked `unrecorded` but has a fixture: the marker is stale.
     StaleUnrecorded,
+    /// A custom domain case, which has no export to replay offline; `record`
+    /// compares it against a deployed gateway instead.
+    LiveOnly,
     Error(String),
 }
 
@@ -37,7 +40,7 @@ impl Outcome {
     pub(crate) fn is_failure(&self) -> bool {
         match self {
             Self::Fail(_) | Self::StaleGap { .. } | Self::StaleUnrecorded | Self::Error(_) => true,
-            Self::Pass | Self::KnownGap { .. } | Self::Unrecorded => false,
+            Self::Pass | Self::KnownGap { .. } | Self::Unrecorded | Self::LiveOnly => false,
         }
     }
 
@@ -48,6 +51,7 @@ impl Outcome {
             Self::KnownGap { .. } => "GAP ",
             Self::StaleGap { .. } | Self::StaleUnrecorded => "STALE",
             Self::Unrecorded => "NEW ",
+            Self::LiveOnly => "LIVE",
             Self::Error(_) => "ERROR",
         }
     }
@@ -124,6 +128,13 @@ impl ReplayReport {
                 Outcome::Unrecorded => {
                     writeln!(out, "{label} {} (not recorded yet)", result.name)?;
                 }
+                Outcome::LiveOnly => {
+                    writeln!(
+                        out,
+                        "{label} {} (custom domain: compared live)",
+                        result.name
+                    )?;
+                }
                 Outcome::StaleUnrecorded => writeln!(
                     out,
                     "{label} {} has a fixture, so unrecorded should be removed",
@@ -176,7 +187,15 @@ impl Replay {
         let normalizer = Normalizer::default();
         let expander = Expander::new(ProcessEnv, UnsetEnv::Placeholder);
         let mut report = ReplayReport::default();
-        for api in ApiName::ALL {
+        for api in [ApiName::Domain, ApiName::DomainMtls] {
+            for case in self.cases.for_api(api) {
+                report.results.push(CaseResult {
+                    name: case.name.clone(),
+                    outcome: Outcome::LiveOnly,
+                });
+            }
+        }
+        for api in ApiName::EXPORTED {
             let cases: Vec<&Case> = self.cases.for_api(api).collect();
             if cases.is_empty() {
                 continue;

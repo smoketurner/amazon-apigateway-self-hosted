@@ -44,6 +44,7 @@ cases:
     body: '{"a":1}'
     known_gap: "#19"                   # optional: an issue for a feature apigw lacks
     unrecorded: true                   # optional: added to the stack, not recorded yet
+    client_cert: trusted               # optional: trusted | stranger, for mutual TLS cases
     compare:
       status: true                     # default true
       headers: [content-type]          # response headers to compare, by name
@@ -66,6 +67,18 @@ marker in the same change; replay fails while a case with a fixture keeps it.
 `{{env:NAME}}` in a path, header, query value, or body is replaced by the environment variable
 `NAME`. `record` requires it to be set; `replay` substitutes a placeholder so fixtures never
 need real credentials. Every substituted value is redacted from what `record` writes.
+
+## Custom domains
+
+Cases with `api: domain` or `api: domain_mtls` go to the custom domains `api.parity.<zone>`
+and `mtls.parity.<zone>` (`custom_domain_zone` in Terraform). Replay cannot serve a custom
+domain offline and lists them as `LIVE`. `make parity-domain-live` instead records them
+against `apigw` on ECS, connecting to the domain container with `--resolve NAME=IP:PORT` (the
+domain name stays the SNI and `Host`) and `--insecure` for its self-signed certificate, with
+the committed fixtures as the baseline: every case it lists answers differently from API
+Gateway. A case with `client_cert` presents the trusted or the stranger certificate from
+`terraform output -json parity_client_certificates`, passed with `--client-certs`. A request
+that gets no response, such as a refused handshake, is reported and the rest go on.
 
 ## Record (needs the deployed stack)
 

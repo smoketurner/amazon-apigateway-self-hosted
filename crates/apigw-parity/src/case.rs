@@ -54,16 +54,24 @@ pub(crate) enum ApiName {
     Http,
     /// The REST API that carries a resource policy.
     RestPolicy,
+    /// The custom domain with REST and HTTP API mappings.
+    Domain,
+    /// The custom domain that requires a client certificate.
+    DomainMtls,
 }
 
 impl ApiName {
-    pub(crate) const ALL: [Self; 3] = [Self::Rest, Self::Http, Self::RestPolicy];
+    /// The APIs with an export, which replay serves offline. Custom domains have
+    /// none: their cases are recorded, and compared against a deployed gateway.
+    pub(crate) const EXPORTED: [Self; 3] = [Self::Rest, Self::Http, Self::RestPolicy];
 
-    /// The `--api-type` value apigw needs to serve this API's export.
-    pub(crate) fn api_type(self) -> &'static str {
+    /// The `--api-type` value apigw needs to serve this API's export; `None` for
+    /// a custom domain, which has no export.
+    pub(crate) fn api_type(self) -> Option<&'static str> {
         match self {
-            Self::Rest | Self::RestPolicy => "rest",
-            Self::Http => "http",
+            Self::Rest | Self::RestPolicy => Some("rest"),
+            Self::Http => Some("http"),
+            Self::Domain | Self::DomainMtls => None,
         }
     }
 
@@ -72,8 +80,20 @@ impl ApiName {
             Self::Rest => "rest",
             Self::Http => "http",
             Self::RestPolicy => "rest_policy",
+            Self::Domain => "domain",
+            Self::DomainMtls => "domain_mtls",
         }
     }
+}
+
+/// The client certificate a case presents in the TLS handshake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ClientCert {
+    /// Chained to the mutual TLS domain's truststore.
+    Trusted,
+    /// From a CA the truststore does not hold.
+    Stranger,
 }
 
 impl fmt::Display for ApiName {
@@ -229,6 +249,9 @@ pub(crate) struct Case {
     /// a fixture exists, so the marker cannot outlive the recording.
     #[serde(default)]
     pub(crate) unrecorded: bool,
+    /// The client certificate to present; none by default.
+    #[serde(default)]
+    pub(crate) client_cert: Option<ClientCert>,
 }
 
 #[derive(Debug, Deserialize)]

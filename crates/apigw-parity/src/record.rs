@@ -1,11 +1,17 @@
 //! Record: sends every case to the deployed reference APIs, stores normalized
 //! fixtures and the redacted exports, and reports drift from a baseline.
 
+use std::collections::BTreeMap;
 use std::io::Write;
+use std::path::Path;
 use std::time::Duration;
 
-use crate::case::{ApiName, CaseName, CaseSet, Compare, Expander, ProcessEnv, UnsetEnv};
-use crate::client::Requester;
+use serde::Deserialize;
+
+use crate::case::{
+    ApiName, Case, CaseName, CaseSet, ClientCert, Compare, Expander, ProcessEnv, UnsetEnv,
+};
+use crate::client::{ClientOptions, Requester};
 use crate::compare::Mismatch;
 use crate::error::{ParityError, Result};
 use crate::export::{ExportInput, ExportStore};
@@ -24,6 +30,8 @@ pub(crate) struct Drift {
 enum DriftKind {
     Changed(Vec<Mismatch>),
     NoBaseline,
+    /// No response at all, such as a connection closed in the TLS handshake.
+    RequestFailed(String),
 }
 
 /// The cases whose recorded behavior differs from the baseline.
@@ -63,6 +71,9 @@ impl DriftReport {
                     }
                     writeln!(out)?;
                 }
+                DriftKind::RequestFailed(reason) => {
+                    writeln!(out, "The request got no response: {reason}\n")?;
+                }
             }
         }
         Ok(())
@@ -80,6 +91,76 @@ pub(crate) struct Record {
     pub(crate) baseline: Option<FixtureStore>,
     pub(crate) secret_env: Vec<String>,
     pub(crate) delay: Duration,
+    /// Address overrides and certificate checks shared by every request.
+    pub(crate) client: ClientOptions,
+    /// The client certificates mutual TLS cases present.
+    pub(crate) client_certs: Option<ClientCerts>,
+}
+
+/// `terraform output -json parity_client_certificates`: PEM certificates and keys.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ClientCerts {
+    trusted_cert: String,
+    trusted_key: String,
+    stranger_cert: String,
+    stranger_key: String,
+}
+
+impl ClientCerts {
+    /// Reads the certificates file.
+    ///
+    /// # Errors
+    /// Fails when the file cannot be read or is not the expected JSON.
+    pub(crate) fn load(path: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path).map_err(|e| ParityError::io(path, e))?;
+        serde_json::from_str(&text).map_err(|source| ParityError::Json {
+            path: path.to_owned(),
+            source,
+        })
+    }
+
+    fn identity(&self, which: ClientCert) -> Vec<u8> {
+        let (cert, key) = match which {
+            ClientCert::Trusted => (&self.trusted_cert, &self.trusted_key),
+            ClientCert::Stranger => (&self.stranger_cert, &self.stranger_key),
+        };
+        format!("{cert}\n{key}").into_bytes()
+    }
+}
+
+/// One client per certificate a case can present.
+struct Requesters {
+    plain: Requester,
+    with_cert: BTreeMap<ClientCert, Requester>,
+}
+
+impl Requesters {
+    fn new(options: &ClientOptions, certs: Option<&ClientCerts>) -> Result<Self> {
+        let mut with_cert = BTreeMap::new();
+        if let Some(certs) = certs {
+            for which in [ClientCert::Trusted, ClientCert::Stranger] {
+                let options = ClientOptions {
+                    identity: Some(certs.identity(which)),
+                    ..options.clone()
+                };
+                with_cert.insert(which, Requester::with_options(&options)?);
+            }
+        }
+        Ok(Self {
+            plain: Requester::with_options(options)?,
+            with_cert,
+        })
+    }
+
+    fn for_case(&self, case: &Case) -> Result<&Requester> {
+        match case.client_cert {
+            None => Ok(&self.plain),
+            Some(which) => self
+                .with_cert
+                .get(&which)
+                .ok_or(ParityError::MissingClientCert(which)),
+        }
+    }
 }
 
 impl Record {
@@ -90,7 +171,7 @@ impl Record {
     /// variable, or a file cannot be written.
     pub(crate) async fn run(&self) -> Result<DriftReport> {
         let global_secrets = self.global_secrets();
-        let requester = Requester::new()?;
+        let requesters = Requesters::new(&self.client, self.client_certs.as_ref())?;
         let expander = Expander::new(ProcessEnv, UnsetEnv::Fail);
         let mut drift = DriftReport::default();
         for (index, case) in self.cases.iter().enumerate() {
@@ -99,7 +180,26 @@ impl Record {
             }
             let request = case.request(&expander)?;
             let base_url = self.outputs.base_url(case.api)?;
-            let raw = requester.send(&case.name, base_url, &request.spec).await?;
+            let raw = match requesters
+                .for_case(case)?
+                .send(&case.name, base_url, &request.spec)
+                .await
+            {
+                Ok(raw) => raw,
+                // One case without a response (a refused handshake) does not
+                // stop the rest; it is reported, and no fixture is written.
+                Err(ParityError::Request { source, .. }) => {
+                    let reason = std::error::Error::source(&source)
+                        .map_or_else(|| source.to_string(), |cause| format!("{source}: {cause}"));
+                    tracing::warn!(case = %case.name, reason, "request failed");
+                    drift.entries.push(Drift {
+                        case: case.name.clone(),
+                        kind: DriftKind::RequestFailed(reason),
+                    });
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
             let redactor = Redactor::new(global_secrets.iter().cloned().chain(request.secrets));
             let observation = Normalizer::new(redactor).observe(case, &raw)?;
             let fixture = Fixture {
@@ -157,7 +257,7 @@ impl Record {
             tracing::info!("no export directory given; exports were not recorded");
             return Ok(());
         };
-        for api in ApiName::ALL {
+        for api in ApiName::EXPORTED {
             let recorded = input.record(
                 api,
                 &self.outputs.stage,
@@ -214,7 +314,26 @@ mod tests {
             baseline,
             secret_env: vec!["APIGW_PARITY_TEST_UNSET_VARIABLE".to_owned()],
             delay: Duration::ZERO,
+            client: ClientOptions::default(),
+            client_certs: None,
         }
+    }
+
+    #[test]
+    fn client_certificates_join_cert_and_key_and_must_be_given() {
+        let certs: ClientCerts = serde_json::from_str(
+            r#"{"trusted_cert":"C1","trusted_key":"K1","stranger_cert":"C2","stranger_key":"K2"}"#,
+        )
+        .unwrap();
+        assert_eq!(certs.identity(ClientCert::Stranger), b"C2\nK2");
+        let case: Case =
+            serde_saphyr::from_str("name: m\napi: domain_mtls\npath: /x\nclient_cert: trusted\n")
+                .unwrap();
+        let requesters = Requesters::new(&ClientOptions::default(), None).unwrap();
+        assert!(matches!(
+            requesters.for_case(&case),
+            Err(ParityError::MissingClientCert(ClientCert::Trusted))
+        ));
     }
 
     #[test]
