@@ -38,11 +38,13 @@ fn java_constructs_beyond_plain_regular_expressions_work() {
     assert!(matches("Bearer (?!none$).+", "Bearer x"));
     assert!(!matches("Bearer (?!none$).+", "Bearer none"));
     assert!(matches(r"(\w)\1", "aa"));
+    assert!(matches(r"\p{javaLowerCase}+", "abc"));
+    assert!(matches(r"(?i)(ab)\1", "abAB"));
 }
 
 #[test]
 fn token_patterns_that_cannot_be_evaluated_are_rejected() {
-    for expression in [r"\G", r"\X", "(", "[", r"\p{javaLowerCase}"] {
+    for expression in [r"\N{LATIN SMALL LETTER A}", "(", "["] {
         assert!(expression.parse::<TokenPattern>().is_err(), "{expression}");
     }
 }

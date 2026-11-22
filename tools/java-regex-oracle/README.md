@@ -12,6 +12,17 @@ network access, and writes `crates/apigw-regex/tests/fixtures/java-regex.jsonl`.
 only requirement; Java does not need to be installed. Commit the regenerated fixtures together
 with any change to `cases.json`.
 
+## Tables
+
+```bash
+tools/java-regex-oracle/tables.sh
+```
+
+runs `Tables.java` in the same image and writes `crates/apigw-regex/src/tables.rs`: every Unicode
+block name `Character.UnicodeBlock.forName` accepts with the block's range, and every script
+name `Character.UnicodeScript.forName` accepts. Regenerate it with the fixtures when the JDK
+changes.
+
 ## Cases
 
 `cases.json` is a list of groups:
@@ -29,4 +40,4 @@ expected value is the exception class.
 ## Updating the JDK
 
 Pull the new image, read its digest with `docker inspect --format '{{index .RepoDigests 0}}'`,
-update `IMAGE` in `run.sh`, regenerate, and review the fixture diff.
+update `IMAGE` in `run.sh` and `tables.sh`, regenerate both, and review the diffs.

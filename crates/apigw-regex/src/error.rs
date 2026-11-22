@@ -9,40 +9,17 @@ use thiserror::Error;
 /// Patterns using these are rejected when the pattern is compiled so that a misbehaving
 /// pattern is reported at load time instead of silently matching differently.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Unsupported {
-    /// `\G`, the end of the previous match.
-    EndOfPreviousMatch,
-    /// `\X` or `\b{g}`, grapheme cluster handling.
-    GraphemeCluster,
-    /// `\N{name}`, a character by Unicode name.
+    /// `\N{name}`, a character by Unicode name: the crate does not carry the Unicode
+    /// character name table.
     NamedCharacter,
-    /// `\p{InBlock}` or `\p{block=...}`; the Unicode block tables are not available.
-    UnicodeBlock(String),
-    /// `\p{javaXxx}`, the `java.lang.Character` predicates.
-    JavaCharacterPredicate(String),
-    /// `\p{Graph}` or `\p{Print}` combined with Unicode character classes.
-    UnicodePosixClass(String),
-    /// A back reference evaluated case-insensitively.
-    CaseInsensitiveBackReference,
-    /// A lone UTF-16 surrogate, which cannot appear in a Rust string.
-    LoneSurrogate,
 }
 
 impl fmt::Display for Unsupported {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::EndOfPreviousMatch => f.write_str("\\G (end of previous match)"),
-            Self::GraphemeCluster => f.write_str("grapheme cluster matching (\\X, \\b{g})"),
             Self::NamedCharacter => f.write_str("\\N{name} character names"),
-            Self::UnicodeBlock(name) => write!(f, "Unicode block property {name}"),
-            Self::JavaCharacterPredicate(name) => {
-                write!(f, "java.lang.Character predicate {name}")
-            }
-            Self::UnicodePosixClass(name) => {
-                write!(f, "POSIX class {name} with Unicode character classes")
-            }
-            Self::CaseInsensitiveBackReference => f.write_str("case-insensitive back reference"),
-            Self::LoneSurrogate => f.write_str("lone UTF-16 surrogate"),
         }
     }
 }

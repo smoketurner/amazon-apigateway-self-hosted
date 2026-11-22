@@ -7,7 +7,7 @@ pub(crate) enum CaseMode {
     Sensitive,
     /// `CASE_INSENSITIVE` alone: only `A-Z` and `a-z` fold.
     Ascii,
-    /// `CASE_INSENSITIVE | UNICODE_CASE`: Unicode simple case folding.
+    /// `CASE_INSENSITIVE | UNICODE_CASE`: Java's `toUpperCase`/`toLowerCase` comparison.
     Unicode,
 }
 
@@ -119,6 +119,17 @@ pub(crate) enum Anchor {
     WordBoundary { unicode: bool },
     /// `\B`
     NotWordBoundary { unicode: bool },
+    /// `\G`: where the previous match ended, or where the search started.
+    PreviousMatchEnd,
+    /// `\b{g}`: a grapheme cluster boundary.
+    GraphemeBoundary,
+}
+
+impl Anchor {
+    /// Whether the assertion depends on where the previous match ended.
+    pub(crate) const fn reads_previous_match_end(self) -> bool {
+        matches!(self, Self::PreviousMatchEnd | Self::GraphemeBoundary)
+    }
 }
 
 /// Quantifier greediness.
@@ -135,8 +146,8 @@ pub(crate) enum Greed {
 /// The kind of group around a sub-pattern.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum GroupKind {
-    /// `(...)`, with the name for `(?<name>...)`.
-    Capture(Option<String>),
+    /// `(...)` or `(?<name>...)`; the parser resolves names to group numbers.
+    Capture,
     /// `(?:...)`
     NonCapture,
     /// `(?=...)`
@@ -164,12 +175,51 @@ impl GroupKind {
 /// An element of a bracketed character class.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ClassItem {
-    /// An inclusive range of characters; a single character has equal ends.
+    /// A single character written in the class.
+    Single(char),
+    /// An inclusive range of characters written in the class.
     Range(char, char),
-    /// A Unicode class written in the matching engine's own syntax, such as `\w` or `\p{L}`.
+    /// A Unicode class written in the matching engine's own syntax, such as `\p{L}`.
     Engine(String),
     /// A nested class.
     Nested(ClassSet),
+    /// A predefined class or property, such as `\w` or `\p{Lower}`. Case-insensitive matching
+    /// never folds it: Java resolves case insensitivity when it looks the property up.
+    Predicate(ClassSet),
+}
+
+impl ClassItem {
+    /// An item that matches no character.
+    pub(crate) fn nothing() -> Self {
+        Self::Predicate(ClassSet::union(true, vec![Self::Range('\0', char::MAX)]))
+    }
+
+    /// The characters from `low` to `high`, code points that may include UTF-16 surrogates.
+    ///
+    /// A Rust string cannot contain a lone surrogate, and Java never matches half of a
+    /// surrogate pair against a class, so the surrogates in the range match nothing.
+    pub(crate) fn code_range(low: u32, high: u32) -> Self {
+        const FIRST_SURROGATE: u32 = 0xD800;
+        const LAST_SURROGATE: u32 = 0xDFFF;
+        let mut items = Vec::new();
+        let below = high.min(FIRST_SURROGATE.saturating_sub(1));
+        if low <= below
+            && let (Some(start), Some(end)) = (char::from_u32(low), char::from_u32(below))
+        {
+            items.push(Self::Range(start, end));
+        }
+        let above = low.max(LAST_SURROGATE.saturating_add(1));
+        if above <= high
+            && let (Some(start), Some(end)) = (char::from_u32(above), char::from_u32(high))
+        {
+            items.push(Self::Range(start, end));
+        }
+        match items.len() {
+            0 => Self::nothing(),
+            1 => items.pop().unwrap_or_else(Self::nothing),
+            _ => Self::Predicate(ClassSet::union(false, items)),
+        }
+    }
 }
 
 /// A bracketed class: the intersection of one or more unions, optionally negated.
@@ -195,8 +245,13 @@ impl ClassSet {
 pub(crate) enum Node {
     /// Matches the empty string.
     Empty,
-    /// A literal character.
-    Literal(char, CaseMode),
+    /// A literal character. `slice` is set when Java reads it as part of a run of literal
+    /// characters, which compares case-insensitively slightly differently from a lone one.
+    Literal {
+        ch: char,
+        mode: CaseMode,
+        slice: bool,
+    },
     /// `.`
     Dot { dot_all: bool, lines: LineMode },
     /// A bracketed class.
@@ -205,8 +260,10 @@ pub(crate) enum Node {
     Anchor(Anchor),
     /// `\R`: `\r\n` or any single vertical whitespace character.
     LineBreak,
-    /// A back reference to group `n`, or to a group that does not exist (which never matches).
-    BackReference(BackReference),
+    /// `\X`: one extended grapheme cluster.
+    Grapheme,
+    /// A back reference to group `group`, which may not exist (and then never matches).
+    BackReference { group: usize, mode: CaseMode },
     /// A sequence of nodes.
     Concat(Vec<Self>),
     /// Alternatives separated by `|`.
@@ -222,24 +279,24 @@ pub(crate) enum Node {
     },
 }
 
-/// The target of a back reference.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum BackReference {
-    /// `\n`
-    Number(usize),
-    /// `\k<name>`
-    Named(String),
-}
-
 impl Node {
+    /// A node that matches no character, for a lone surrogate.
+    pub(crate) fn nothing() -> Self {
+        Self::Class(
+            ClassSet::union(false, vec![ClassItem::nothing()]),
+            CaseMode::Sensitive,
+        )
+    }
+
     /// Whether the node can be the operand of a quantifier without extra grouping.
     pub(crate) const fn is_single_unit(&self) -> bool {
         match self {
-            Self::Literal(..)
+            Self::Literal { .. }
             | Self::Dot { .. }
             | Self::Class(..)
             | Self::LineBreak
-            | Self::BackReference(_)
+            | Self::Grapheme
+            | Self::BackReference { .. }
             | Self::Group(..) => true,
             Self::Empty
             | Self::Anchor(_)
@@ -256,11 +313,53 @@ impl Node {
             Self::Group(kind, inner) => kind.is_look_around() || inner.is_zero_width(),
             Self::Concat(nodes) | Self::Alternate(nodes) => nodes.iter().all(Self::is_zero_width),
             Self::Repeat { node, .. } => node.is_zero_width(),
-            Self::Literal(..)
+            Self::Literal { .. }
             | Self::Dot { .. }
             | Self::Class(..)
             | Self::LineBreak
-            | Self::BackReference(_) => false,
+            | Self::Grapheme
+            | Self::BackReference { .. } => false,
+        }
+    }
+
+    /// Whether the node is zero-width with a single way to match. Java repeats a capturing
+    /// group around such a node with `GroupCurly`, which keeps no capture for an empty
+    /// iteration, instead of with its general loop.
+    pub(crate) fn is_deterministic_zero_width(&self) -> bool {
+        match self {
+            Self::Empty | Self::Anchor(_) => true,
+            Self::Group(kind, inner) => {
+                kind.is_look_around() || inner.is_deterministic_zero_width()
+            }
+            Self::Concat(nodes) => nodes.iter().all(Self::is_deterministic_zero_width),
+            Self::Repeat { node, min, max, .. } => {
+                *max == Some(*min) && node.is_deterministic_zero_width()
+            }
+            Self::Alternate(_)
+            | Self::Literal { .. }
+            | Self::Dot { .. }
+            | Self::Class(..)
+            | Self::LineBreak
+            | Self::Grapheme
+            | Self::BackReference { .. } => false,
+        }
+    }
+
+    /// Whether the node can match the empty string.
+    pub(crate) fn can_match_empty(&self) -> bool {
+        match self {
+            Self::Empty | Self::Anchor(_) | Self::BackReference { .. } => true,
+            Self::Group(kind, inner) => kind.is_look_around() || inner.can_match_empty(),
+            Self::Concat(nodes) => nodes.iter().all(Self::can_match_empty),
+            Self::Alternate(nodes) => nodes.iter().any(Self::can_match_empty),
+            Self::Repeat { node, min, max, .. } => {
+                *min == 0 || *max == Some(0) || node.can_match_empty()
+            }
+            Self::Literal { .. }
+            | Self::Dot { .. }
+            | Self::Class(..)
+            | Self::LineBreak
+            | Self::Grapheme => false,
         }
     }
 
@@ -268,20 +367,31 @@ impl Node {
     ///
     /// Java refuses look-behinds that contain one because their width cannot be bounded.
     pub(crate) fn contains_back_reference(&self) -> bool {
+        self.any(&|node| matches!(node, Self::BackReference { .. }))
+    }
+
+    /// Whether an assertion that depends on the previous match end occurs inside the node.
+    pub(crate) fn reads_previous_match_end(&self) -> bool {
+        self.any(&|node| matches!(node, Self::Anchor(anchor) if anchor.reads_previous_match_end()))
+    }
+
+    fn any(&self, predicate: &impl Fn(&Self) -> bool) -> bool {
+        if predicate(self) {
+            return true;
+        }
         match self {
-            Self::BackReference(_) => true,
             Self::Concat(nodes) | Self::Alternate(nodes) => {
-                nodes.iter().any(Self::contains_back_reference)
+                nodes.iter().any(|node| node.any(predicate))
             }
-            Self::Group(_, inner) | Self::Repeat { node: inner, .. } => {
-                inner.contains_back_reference()
-            }
+            Self::Group(_, inner) | Self::Repeat { node: inner, .. } => inner.any(predicate),
             Self::Empty
-            | Self::Literal(..)
+            | Self::Literal { .. }
             | Self::Dot { .. }
             | Self::Class(..)
             | Self::Anchor(_)
-            | Self::LineBreak => false,
+            | Self::LineBreak
+            | Self::Grapheme
+            | Self::BackReference { .. } => false,
         }
     }
 }
