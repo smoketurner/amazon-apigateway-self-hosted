@@ -1193,7 +1193,7 @@ async fn unevaluable_cognito_authorizers_fail_closed() {
         json!({"providerARNs": ["arn:aws:cognito-idp:us-east-1:123456789012:identitypool/x"]}),
         json!({"providerARNs": ["arn:aws:s3:::bucket"]}),
         json!({"providerARNs": ["arn:aws-us-gov:cognito-idp:us-gov-west-1:1:userpool/p"]}),
-        json!({"identityValidationExpression": r"\G"}),
+        json!({"identityValidationExpression": r"\N{DIGIT ONE}"}),
         json!({"identitySource": "method.request.header.A,method.request.header.B"}),
     ] {
         let idp = Idp::start(COGNITO_ISSUER, &[key_a()]).await;

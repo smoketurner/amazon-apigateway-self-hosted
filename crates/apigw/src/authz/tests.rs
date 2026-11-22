@@ -708,7 +708,7 @@ async fn an_overlong_method_arn_is_414() {
 #[tokio::test]
 async fn unevaluable_authorizers_fail_closed_and_are_reported() {
     for authorizer in [
-        json!({"identityValidationExpression": r"\G\X"}),
+        json!({"identityValidationExpression": r"\N{DIGIT ONE}"}),
         json!({"authorizerUri": "arn:aws:apigateway:us-east-1:s3:path/x"}),
         json!({"authorizerCredentials": "arn:aws:iam::*:user/*"}),
         json!({"identitySource": "method.request.header.A,method.request.header.B"}),
