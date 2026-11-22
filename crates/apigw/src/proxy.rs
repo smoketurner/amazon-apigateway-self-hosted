@@ -205,9 +205,7 @@ impl HttpProxy {
             );
         }
         ctx.integration.transfer_mode = Some(self.transfer);
-        let (client, url) = self
-            .client_for(client, route, ctx.api.kind, url, &mut headers)
-            .await?;
+        let (client, url) = self.client_for(client, route, url, &mut headers).await?;
         let started = Instant::now();
         let result = client
             .request(method, url)
@@ -223,8 +221,9 @@ impl HttpProxy {
                 return Err(GatewayError::IntegrationTimeout);
             }
             Err(err) if is_dns_failure(&err) => {
+                // Deployed REST and HTTP APIs answer this as an API configuration error.
                 tracing::warn!(route = %route.key, err = %err, "integration host could not be resolved");
-                return Err(GatewayError::unresolvable_host(ctx.api.kind));
+                return Err(GatewayError::ApiConfiguration);
             }
             Err(err) => {
                 tracing::warn!(route = %route.key, err = %err, "integration request failed");
@@ -274,7 +273,6 @@ impl HttpProxy {
         &self,
         shared: &reqwest::Client,
         route: &Route,
-        kind: ApiKind,
         url: reqwest::Url,
         headers: &mut HeaderMap,
     ) -> Result<(reqwest::Client, reqwest::Url), GatewayError> {
@@ -290,7 +288,7 @@ impl HttpProxy {
             }
             Err(err @ TlsClientError::Resolve { .. }) => {
                 tracing::warn!(route = %route.key, %err, "integration host could not be resolved");
-                Err(GatewayError::unresolvable_host(kind))
+                Err(GatewayError::ApiConfiguration)
             }
             Err(err) => {
                 tracing::error!(route = %route.key, %err, "invalid integration tlsConfig");
@@ -1471,7 +1469,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error, GatewayError::ApiConfiguration);
-        // A REST API calls a host that does not resolve a configuration error.
+        // A host that does not resolve is a configuration error.
         let error = send(
             proxy("http://apigw-test.invalid/"),
             "/x",
@@ -1480,10 +1478,6 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error, GatewayError::ApiConfiguration);
-        assert_eq!(
-            GatewayError::unresolvable_host(ApiKind::Http),
-            GatewayError::IntegrationUnreachable
-        );
     }
 
     proptest! {
