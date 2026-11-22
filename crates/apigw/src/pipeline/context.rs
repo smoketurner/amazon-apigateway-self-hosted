@@ -27,6 +27,7 @@ use crate::observability::{Trace, TraceId};
 use crate::payload::PayloadSettings;
 use crate::rest_path::ReportedPath;
 use crate::route::Route;
+use crate::telemetry::{ChildSpan, RequestSpan};
 
 /// The API and stage a request was received on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -296,6 +297,11 @@ pub(crate) struct RequestContext {
     pub(crate) payload: Arc<PayloadSettings>,
     /// This request's place in an X-Ray trace, when the stage traces.
     pub(crate) trace: Option<Trace>,
+    /// The request's OpenTelemetry server span, when spans are exported.
+    pub(crate) otel: Option<RequestSpan>,
+    /// The span of the integration call in progress, whose context HTTP
+    /// integrations propagate.
+    pub(crate) otel_integration: Option<ChildSpan>,
     pub(crate) integration: IntegrationOutcome,
 }
 
@@ -397,6 +403,7 @@ impl RequestContext {
             .get::<RequestId>()
             .map_or_else(Uuid::now_v7, |id| id.0);
         let trace = extensions.get::<Trace>().copied();
+        let otel = extensions.get::<RequestSpan>().cloned();
         let identity = extensions.remove::<ClientIdentity>().unwrap_or_else(|| {
             tracing::warn!("request reached the pipeline without a client identity");
             ClientIdentity::unknown()
@@ -450,6 +457,8 @@ impl RequestContext {
             stage_variables: Arc::clone(&api.stage_variables),
             payload: Arc::clone(&api.payload),
             trace,
+            otel,
+            otel_integration: None,
             integration: IntegrationOutcome::default(),
         }
     }
@@ -674,6 +683,8 @@ pub(crate) mod tests {
             authorizer: AuthorizerContext::default(),
             api_key: None,
             trace: None,
+            otel: None,
+            otel_integration: None,
             stage_variables: Arc::default(),
             payload: Arc::default(),
             integration: IntegrationOutcome::default(),

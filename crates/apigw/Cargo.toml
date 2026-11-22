@@ -37,6 +37,11 @@ jiff                 = { workspace = true, features = ["std"] }
 jsonschema-regex     = { workspace = true }
 jsonwebtoken         = { workspace = true, features = ["aws_lc_rs"] }
 matchit              = { workspace = true }
+opentelemetry        = { workspace = true, features = ["trace", "metrics"] }
+opentelemetry-otlp   = { workspace = true, features = ["trace", "metrics", "http-proto", "reqwest-blocking-client", "grpc-tonic", "tls-aws-lc", "tls-roots"] }
+opentelemetry-prometheus = { workspace = true }
+opentelemetry_sdk    = { workspace = true, features = ["trace", "metrics"] }
+prometheus           = { workspace = true }
 proxy-header         = { workspace = true, features = ["tokio"] }
 redis                = { workspace = true, features = ["aio", "tokio-rustls-comp", "tls-rustls", "connection-manager", "script"] }
 reqwest              = { workspace = true, features = ["rustls", "http2", "stream"] }
@@ -57,3 +62,4 @@ x509-parser          = { workspace = true }
 tokio                = { workspace = true, features = ["test-util"] }
 rcgen                = { workspace = true, features = ["aws_lc_rs", "pem"] }
 proptest             = { workspace = true, features = ["std"] }
+opentelemetry_sdk    = { workspace = true, features = ["testing"] }

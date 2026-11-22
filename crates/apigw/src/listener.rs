@@ -45,11 +45,13 @@ use tokio::task::JoinSet;
 use tokio_rustls::{LazyConfigAcceptor, server};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
+use x509_parser::prelude::{FromDer as _, X509Certificate};
 
 use crate::client_cert::ClientCertDetails;
 use crate::domain::DomainName;
 use crate::header_case::{HeaderCaseQueue, HeaderCaseTap};
 use crate::identity::TrustedProxies;
+use crate::telemetry::{GatewayMetrics, Outcome};
 
 /// Time limits applied to every connection.
 #[derive(Clone, Copy, Debug)]
@@ -199,6 +201,8 @@ impl FileStamp {
 
 #[derive(Debug)]
 struct CertStore {
+    /// `default`, or the custom domain the certificate is served for.
+    name: String,
     cert_path: PathBuf,
     key_path: PathBuf,
     provider: Arc<rustls::crypto::CryptoProvider>,
@@ -228,18 +232,30 @@ fn load_certified_key(
 
 impl CertStore {
     fn open(
+        name: &str,
         cert_path: &Path,
         key_path: &Path,
         provider: &Arc<rustls::crypto::CryptoProvider>,
     ) -> Result<Self, TlsError> {
         let stamp = FileStamp::read(cert_path, key_path);
         let key = load_certified_key(cert_path, key_path, provider)?;
+        Self::report_expiry(name, &key);
         Ok(Self {
+            name: name.to_owned(),
             cert_path: cert_path.to_owned(),
             key_path: key_path.to_owned(),
             provider: Arc::clone(provider),
             current: RwLock::new((stamp, Arc::new(key))),
         })
+    }
+
+    /// Publishes when the leaf certificate of `key` expires.
+    fn report_expiry(name: &str, key: &CertifiedKey) {
+        let not_after = key.cert.first().and_then(|der| {
+            let (_, cert) = X509Certificate::from_der(der.as_ref()).ok()?;
+            jiff::Timestamp::from_second(cert.validity().not_after.timestamp()).ok()
+        });
+        GatewayMetrics::global().certificate(name, not_after);
     }
 
     fn load(&self) -> Result<CertifiedKey, TlsError> {
@@ -262,6 +278,7 @@ impl CertStore {
             return Ok(false);
         }
         let key = self.load()?;
+        Self::report_expiry(&self.name, &key);
         *self.current.write().unwrap_or_else(PoisonError::into_inner) = (stamp, Arc::new(key));
         Ok(true)
     }
@@ -327,11 +344,11 @@ impl Tls {
         for cert in certs {
             stores.push((
                 cert.name.clone(),
-                CertStore::open(&cert.cert, &cert.key, &provider)?,
+                CertStore::open(cert.name.as_str(), &cert.cert, &cert.key, &provider)?,
             ));
         }
         let certs = Arc::new(CertSet {
-            default: CertStore::open(cert_path, key_path, &provider)?,
+            default: CertStore::open("default", cert_path, key_path, &provider)?,
             domains: stores,
         });
         let resolver: Arc<dyn ResolvesServerCert> = Arc::<CertSet>::clone(&certs);
@@ -462,8 +479,10 @@ impl Tls {
                 _ = ticker.tick() => {}
             }
             match self.reload_if_changed() {
-                Ok(_) => {}
+                Ok(true) => GatewayMetrics::global().tls_reload(Outcome::Success),
+                Ok(false) => {}
                 Err(err) => {
+                    GatewayMetrics::global().tls_reload(Outcome::Failure);
                     tracing::warn!(%err, "TLS certificate changed but failed to load; keeping the previous one");
                 }
             }

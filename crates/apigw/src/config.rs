@@ -21,6 +21,7 @@ use crate::observability::{
 use crate::router::BasePath;
 use crate::source::Source;
 use crate::state::ValkeyUrl;
+use crate::telemetry::{OtelSettings, SettingsError};
 use crate::vpc_link::{VpcLinkTarget, VpcLinks};
 
 const STAGE_VARIABLE_ENV_PREFIX: &str = "APIGW_STAGE_VARIABLE_";
@@ -232,7 +233,7 @@ pub(crate) struct Config {
     )]
     pub(crate) allowed_hosts: Vec<String>,
 
-    /// Address for `/healthz` and `/routes`. Disabled when unset.
+    /// Address for `/healthz`, `/routes`, and `/metrics`. Disabled when unset.
     #[arg(long, env = "APIGW_ADMIN_LISTEN")]
     pub(crate) admin_listen: Option<SocketAddr>,
 
@@ -282,6 +283,13 @@ pub(crate) struct Config {
     /// when the caller made no sampling decision (X-Ray's default rule is 5).
     #[arg(long, env = "APIGW_XRAY_SAMPLING_PERCENT", default_value_t = 5, value_parser = clap::value_parser!(u8).range(..=100))]
     pub(crate) xray_sampling_percent: u8,
+
+    /// Export metrics and request spans with OpenTelemetry, configured with the
+    /// standard `OTEL_*` environment variables (`OTEL_EXPORTER_OTLP_ENDPOINT`,
+    /// `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_TRACES_EXPORTER`, ...). Prometheus
+    /// metrics on the admin listener need no flag.
+    #[arg(long, env = "APIGW_OTEL")]
+    pub(crate) otel: bool,
 
     /// Log stream this process writes to in each CloudWatch Logs log group.
     /// Defaults to `{HOSTNAME}/{start time}/{random suffix}`, unique per process.
@@ -389,6 +397,18 @@ impl Config {
         }
     }
 
+    /// What `--otel` and the `OTEL_*` variables in `env` ask for.
+    ///
+    /// # Errors
+    ///
+    /// When a variable names an exporter or protocol that is not supported.
+    pub(crate) fn otel(
+        &self,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<OtelSettings, SettingsError> {
+        OtelSettings::from_env(self.otel, env)
+    }
+
     pub(crate) fn trusted_proxies(&self) -> TrustedProxies {
         TrustedProxies::new(&self.trusted_proxies, self.trusted_proxy_hops)
     }
@@ -441,11 +461,24 @@ impl Config {
 #[expect(clippy::unwrap_used, reason = "tests assert on known-good fixtures")]
 mod tests {
     use super::*;
+    use crate::telemetry::TracesExporter;
 
     const TLS: [&str; 4] = ["--tls-cert", "c.pem", "--tls-key", "k.pem"];
 
     fn parse(args: &[&str]) -> Result<Config, clap::Error> {
         Config::try_parse_from(std::iter::once(&"apigw").chain(args).chain(TLS.iter()))
+    }
+
+    #[test]
+    fn opentelemetry_export_is_opt_in() {
+        let env = |name: &str| (name == "OTEL_TRACES_EXPORTER").then(|| "console".to_owned());
+        let off = parse(&["--openapi-file", "a.json"]).unwrap();
+        assert!(!off.otel(env).unwrap().enabled);
+        let on = parse(&["--openapi-file", "a.json", "--otel"]).unwrap();
+        let settings = on.otel(env).unwrap();
+        assert!(settings.enabled);
+        assert_eq!(settings.traces, TracesExporter::Console);
+        assert!(on.otel(|_| Some("bogus".to_owned())).is_err());
     }
 
     #[test]

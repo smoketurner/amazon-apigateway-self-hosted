@@ -10,6 +10,7 @@ use super::UsageData;
 use super::plan::UsageChecker;
 use super::source::{ControlPlane, UsageReader};
 use crate::backoff::Backoff;
+use crate::telemetry::{GatewayMetrics, Outcome};
 
 /// How long data stays usable when it cannot be refreshed. A key disabled in
 /// API Gateway keeps working until the next successful read, so an outage must
@@ -74,7 +75,9 @@ impl UsageStore {
         &self,
         reader: &UsageReader<S>,
     ) -> Result<(), super::source::UsageError> {
-        let data = reader.read().await?;
+        let read = reader.read().await;
+        GatewayMetrics::global().usage_refresh(&self.checker.labels(), Outcome::from(&read));
+        let data = read?;
         tracing::info!(
             keys = data.key_count(),
             plans = data.plan_count(),

@@ -11,19 +11,23 @@ use axum::http::{HeaderName, HeaderValue, Method, header};
 use axum::response::Response;
 use serde_json::{Value, json};
 
-use super::Observability;
 use super::exec::Outcome;
 use super::format::AccessLogFormat;
 use super::metrics::{MetricKey, MetricsAggregator, RequestMetrics, RouteDimensions};
 use super::queue::{LogEvent, LogQueue};
 use super::trace::{Sampler, SegmentOutcome, Trace};
+use super::{Instrumentation, Observability};
 use crate::cache::CacheOutcome;
 use crate::canary::Release;
-use crate::gateway::ApiContext;
+use crate::gateway::{ApiContext, RequestId};
+use crate::identity::ClientIdentity;
 use crate::model::{ApiKind, ApiModel, ExecutionLogging, MethodMatch, RouteKey};
 use crate::pipeline::RequestContext;
 use crate::pipeline::context::{ApiInfo, IntegrationOutcome};
 use crate::route::Route;
+use crate::telemetry::{
+    ApiStage, RequestLabels, RequestOutcome, RequestSpan, RequestTracer, ServerRequest,
+};
 
 /// How long the integration of a request took, attached to the response by the
 /// pipeline so the observer can report `$context.integrationLatency`.
@@ -92,6 +96,10 @@ struct RouteSettings {
     /// The route's `Method` and `Resource` dimensions when detailed metrics are
     /// on. The method is `None` for routes that accept any method.
     detailed: Option<(Option<String>, String)>,
+    /// The route's method, `None` for routes that accept any method.
+    method: Option<String>,
+    /// The route template (`/pets/{petId}`, `$default`), the `route` label.
+    template: String,
 }
 
 #[derive(Debug)]
@@ -102,6 +110,9 @@ struct Inner {
     metrics: Option<Metrics>,
     tracing: Option<Tracing>,
     routes: BTreeMap<RouteKey, RouteSettings>,
+    instrumentation: Instrumentation,
+    /// The `api_id` and `stage` labels.
+    labels: ApiStage,
 }
 
 /// The observation settings of one loaded stage. Cheap to clone; a disabled
@@ -117,9 +128,14 @@ pub(crate) struct Pending {
     method: Method,
     route: Option<RouteKey>,
     context: Option<RequestContext>,
+    labels: RequestLabels,
+    otel: Option<RequestSpan>,
+    /// The request body's length, when known before it is read.
+    request_bytes: u64,
 }
 
 impl StageObserver {
+    #[cfg(test)]
     pub(crate) fn disabled() -> Self {
         Self(None)
     }
@@ -158,18 +174,21 @@ impl StageObserver {
             let execution_logging = (model.kind == ApiKind::Rest)
                 .then(|| settings.execution_logging())
                 .flatten();
-            let detailed = settings.detailed_metrics().then(|| {
-                let method = match operation.method {
-                    MethodMatch::Any => None,
-                    MethodMatch::Exact(ref method) => Some(method.to_string()),
-                };
-                (method, operation.path.to_string())
-            });
+            let method = match operation.method {
+                MethodMatch::Any => None,
+                MethodMatch::Exact(ref method) => Some(method.to_string()),
+            };
+            let template = operation.path.to_string();
+            let detailed = settings
+                .detailed_metrics()
+                .then(|| (method.clone(), template.clone()));
             routes.insert(
                 operation.route_key.clone(),
                 RouteSettings {
                     execution_logging,
                     detailed,
+                    method,
+                    template,
                 },
             );
         }
@@ -198,13 +217,7 @@ impl StageObserver {
                 ),
             });
 
-        if access_log.is_none()
-            && execution_queues.is_empty()
-            && metrics.is_none()
-            && tracing.is_none()
-        {
-            return Self::disabled();
-        }
+        let labels = ApiStage::new(api_id, Some(api.stage_name()));
         Self(Some(Arc::new(Inner {
             api,
             access_log,
@@ -212,6 +225,8 @@ impl StageObserver {
             metrics,
             tracing,
             routes,
+            instrumentation: observability.instrumentation().clone(),
+            labels,
         })))
     }
 
@@ -254,6 +269,21 @@ impl StageObserver {
         let wants_context = inner.access_log.is_some()
             || settings.is_some_and(|s| s.execution_logging.is_some())
             || trace.is_some_and(|t| t.is_sampled());
+        let labels = RequestLabels::new(
+            inner.labels.clone(),
+            settings
+                .and_then(|s| s.method.as_deref())
+                .unwrap_or_else(|| request.method().as_str()),
+            settings.map_or(RequestLabels::UNMATCHED, |s| s.template.as_str()),
+        );
+        let otel = inner
+            .instrumentation
+            .tracer
+            .as_ref()
+            .map(|tracer| inner.start_span(tracer, request, settings));
+        if let Some(ref span) = otel {
+            request.extensions_mut().insert(span.clone());
+        }
         Some(Pending {
             started: Instant::now(),
             started_at,
@@ -261,7 +291,21 @@ impl StageObserver {
             method: request.method().clone(),
             route: route_key,
             context: wants_context.then(|| RequestContext::observed(api, route, request)),
+            labels,
+            otel,
+            request_bytes: Self::request_length(request),
         })
+    }
+
+    /// The request body length when it is known before the body is read.
+    fn request_length(request: &Request) -> u64 {
+        request
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok())
+            .or_else(|| request.body().size_hint().exact())
+            .unwrap_or(0)
     }
 
     /// Records the finished request and returns the response unchanged.
@@ -274,10 +318,27 @@ impl StageObserver {
         let integration_ms = timing.map(|t| Self::millis(t.0));
         let status = response.status().as_u16();
         let settings = pending.route.as_ref().and_then(|key| inner.routes.get(key));
+        let response_length = Self::response_length(&response);
+        let cache = response.extensions().get::<CacheOutcome>().copied();
+        inner.instrumentation.metrics.request(
+            &pending.labels,
+            RequestOutcome {
+                status,
+                latency: pending.started.elapsed(),
+                integration_latency: timing.map(|t| t.0),
+                cache_hit: cache.map(|c| c == CacheOutcome::Hit),
+                data_processed: pending
+                    .request_bytes
+                    .saturating_add(response_length.unwrap_or(0)),
+            },
+        );
+        if let Some(ref span) = pending.otel {
+            span.finish(status, response_length);
+        }
 
         if let Some(ref metrics) = inner.metrics {
             let request = RequestMetrics {
-                cache: response.extensions().get::<CacheOutcome>().copied(),
+                cache,
                 status,
                 latency_ms,
                 integration_latency_ms: integration_ms,
@@ -382,6 +443,37 @@ impl StageObserver {
 }
 
 impl Inner {
+    /// Starts the request's server span.
+    fn start_span(
+        &self,
+        tracer: &RequestTracer,
+        request: &Request,
+        settings: Option<&RouteSettings>,
+    ) -> RequestSpan {
+        let header = |name: HeaderName| request.headers().get(name).and_then(|v| v.to_str().ok());
+        tracer.server(
+            request.headers(),
+            &ServerRequest {
+                method: request.method(),
+                route: settings.map(|s| s.template.as_str()),
+                path: request.uri().path(),
+                host: header(header::HOST).or_else(|| request.uri().host()),
+                user_agent: header(header::USER_AGENT),
+                client_address: request
+                    .extensions()
+                    .get::<ClientIdentity>()
+                    .and_then(|identity| identity.source_ip().ip())
+                    .map(|ip| ip.to_string()),
+                api_id: &self.api.api_id,
+                stage: self.api.stage_name(),
+                request_id: request
+                    .extensions()
+                    .get::<RequestId>()
+                    .map(|id| id.0.to_string()),
+            },
+        )
+    }
+
     /// The series a request counts toward: its stage's, and for canary
     /// requests also the canary's own, whose `Stage` is `{stage}/Canary`.
     fn metric_keys(
@@ -453,7 +545,10 @@ mod tests {
     };
     use crate::router::{BasePath, build};
     use crate::state::{InMemoryLimits, StateBackend};
+    use crate::telemetry::{GatewayMetrics, PrometheusRegistry, span_tests};
     use crate::vpc_link::VpcLinks;
+    use opentelemetry::metrics::MeterProvider as _;
+    use opentelemetry_sdk::metrics::SdkMeterProvider;
     use std::num::NonZeroU32;
 
     const ACCESS_GROUP: &str = "/aws/apigw/access";
@@ -530,7 +625,25 @@ mod tests {
         stage: StageSettings,
         settings: Settings,
     ) -> (axum::Router, Arc<Observability>) {
-        let observability = Observability::start(aws.sdk_config(), settings);
+        serve_with(
+            aws,
+            doc,
+            kind,
+            stage,
+            settings,
+            Instrumentation::metrics_only(),
+        )
+    }
+
+    fn serve_with(
+        aws: &MockAws,
+        doc: &Value,
+        kind: ApiKind,
+        stage: StageSettings,
+        settings: Settings,
+        instrumentation: Instrumentation,
+    ) -> (axum::Router, Arc<Observability>) {
+        let observability = Observability::start(aws.sdk_config(), settings, instrumentation);
         let model = ApiModel::import(doc, kind, stage, &IntegrationOverrides::default()).unwrap();
         let clients = Arc::new(AwsClients::new(
             aws.sdk_config(),
@@ -765,6 +878,8 @@ mod tests {
             metrics: None,
             tracing: None,
             routes: BTreeMap::new(),
+            instrumentation: Instrumentation::metrics_only(),
+            labels: ApiStage::new("abc", Some("prod")),
         };
         let metrics = Metrics {
             aggregator: Arc::new(MetricsAggregator::new(MetricsNamespace::default())),
@@ -773,6 +888,8 @@ mod tests {
         let settings = RouteSettings {
             execution_logging: None,
             detailed: Some((None, "/x".to_owned())),
+            method: None,
+            template: "/x".to_owned(),
         };
         let method_of = |method: &str| {
             inner
@@ -1040,5 +1157,126 @@ mod tests {
         traced_get(&router, &[("x-amzn-trace-id", &incoming)]).await;
         observability.close().await;
         assert_eq!(messages(&aws, ACCESS_GROUP), [ROOT]);
+    }
+    fn instrumented(
+        tracer: Option<RequestTracer>,
+    ) -> (Instrumentation, PrometheusRegistry, SdkMeterProvider) {
+        let registry = PrometheusRegistry::new();
+        let provider = registry.meter_provider_builder().unwrap().build();
+        let instrumentation = Instrumentation {
+            metrics: GatewayMetrics::new(&provider.meter("apigw")),
+            tracer,
+        };
+        (instrumentation, registry, provider)
+    }
+
+    #[tokio::test]
+    async fn prometheus_counts_requests_by_route_template_whatever_the_stage_settings() {
+        let aws = MockAws::start().await;
+        let (instrumentation, registry, _provider) = instrumented(None);
+        let (router, observability) = serve_with(
+            &aws,
+            &doc(),
+            ApiKind::Rest,
+            StageSettings::default(),
+            settings(Delivery::Off, Delivery::Off, false),
+            instrumentation,
+        );
+        get(&router, "/pets").await;
+        get(&router, "/pets").await;
+        get(&router, "/boom").await;
+        get(&router, "/missing/7").await;
+        observability.close().await;
+        let text = registry.render();
+        for series in [
+            r#"apigw_requests_total{api_id="abc",method="GET",route="/pets",stage="prod",status_class="2xx"} 2"#,
+            r#"apigw_requests_total{api_id="abc",method="GET",route="/boom",stage="prod",status_class="5xx"} 1"#,
+            r#"apigw_requests_total{api_id="abc",method="GET",route="(none)",stage="prod",status_class="4xx"} 1"#,
+            r#"apigw_integration_duration_seconds_count{api_id="abc",method="GET",route="/pets",stage="prod"} 2"#,
+            r#"apigw_request_duration_seconds_count{api_id="abc",method="GET",route="(none)",stage="prod"} 1"#,
+        ] {
+            assert!(text.contains(series), "{series}\n{text}");
+        }
+        assert!(
+            !text.contains("/missing/7"),
+            "raw paths never become labels"
+        );
+        assert!(aws.calls().is_empty(), "Prometheus needs no AWS calls");
+    }
+
+    #[tokio::test]
+    async fn spans_form_a_server_span_with_an_integration_child_that_backends_continue() {
+        let aws = MockAws::start().await;
+        let addr = upstream().await;
+        let (tracer, exporter, _tracer_provider) = span_tests::in_memory();
+        let (instrumentation, _registry, _provider) = instrumented(Some(tracer));
+        let (router, observability) = serve_with(
+            &aws,
+            &proxy_doc(addr),
+            ApiKind::Rest,
+            tracing_stage(),
+            settings(Delivery::Off, Delivery::Off, false),
+            instrumentation,
+        );
+        let (status, seen) = traced_get(
+            &router,
+            &[(
+                "traceparent",
+                "00-4efaaf4d1e8720b39541901950019ee5-00f067aa0ba902b7-01",
+            )],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        observability.close().await;
+
+        let spans = exporter.get_finished_spans().unwrap();
+        let server = spans.iter().find(|s| s.name == "GET /echo").unwrap();
+        let integration = spans
+            .iter()
+            .find(|s| s.name == "integration HTTP_PROXY")
+            .unwrap();
+        assert_eq!(spans.len(), 2, "{spans:?}");
+        assert_eq!(server.span_kind, opentelemetry::trace::SpanKind::Server);
+        assert_eq!(server.parent_span_id.to_string(), "00f067aa0ba902b7");
+        assert_eq!(integration.parent_span_id, server.span_context.span_id());
+        assert_eq!(
+            integration.span_context.trace_id(),
+            server.span_context.trace_id()
+        );
+        let attribute = |span, key| span_tests::attribute(span, key);
+        assert_eq!(attribute(server, "http.route").as_deref(), Some("/echo"));
+        assert_eq!(
+            attribute(server, "http.response.status_code").as_deref(),
+            Some("200")
+        );
+        assert_eq!(attribute(server, "apigw.api_id").as_deref(), Some("abc"));
+        assert_eq!(attribute(server, "apigw.stage").as_deref(), Some("prod"));
+        assert_eq!(
+            attribute(integration, "apigw.integration.type").as_deref(),
+            Some("HTTP_PROXY")
+        );
+        assert_eq!(
+            attribute(integration, "apigw.integration.target"),
+            Some(format!("http://{addr}/"))
+        );
+        assert_eq!(
+            attribute(integration, "http.response.status_code").as_deref(),
+            Some("200")
+        );
+        assert_eq!(
+            seen["traceparent"],
+            format!(
+                "00-4efaaf4d1e8720b39541901950019ee5-{}-01",
+                integration.span_context.span_id()
+            ),
+            "the backend's parent is the integration span"
+        );
+        assert!(
+            seen["x-amzn-trace-id"]
+                .as_str()
+                .unwrap()
+                .starts_with("Root=1-4efaaf4d-1e8720b39541901950019ee5;"),
+            "X-Ray tracing continues alongside"
+        );
     }
 }

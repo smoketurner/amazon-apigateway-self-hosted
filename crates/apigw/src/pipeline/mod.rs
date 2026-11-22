@@ -34,6 +34,7 @@ use crate::payload::PayloadSettings;
 use crate::rest_path::RestPath;
 use crate::route::Route;
 use crate::state::Admission;
+use crate::telemetry::SpanTarget;
 use crate::usage::{KeyValue, RouteApiKey, UsageOutcome};
 
 /// One route's handling of one request.
@@ -131,8 +132,25 @@ impl<'a> Pipeline<'a> {
             return self.encode(ctx, hit).await;
         }
         let started = Instant::now();
+        let span = ctx.otel.as_ref().map(|server| {
+            server.integration(&SpanTarget {
+                kind: self.route.integration.kind(),
+                target: self.route.integration.target(),
+            })
+        });
+        ctx.otel_integration.clone_from(&span);
         let result = self.integrate(ctx).await;
         let timing = IntegrationTiming(started.elapsed());
+        ctx.otel_integration = None;
+        if let Some(span) = span {
+            if let Some(status) = ctx.integration.status {
+                span.set("http.response.status_code", i64::from(status));
+            }
+            if let Err(ref error) = result {
+                span.fail(format!("{error:?}"));
+            }
+            span.end();
+        }
         let succeeded = result.is_ok();
         let mut response = match result {
             Ok(response) => response,

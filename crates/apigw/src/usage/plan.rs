@@ -11,6 +11,7 @@ use std::num::NonZeroU32;
 use super::{KeyId, PlanId};
 use crate::state::quota::{QuotaDecision, QuotaLimit};
 use crate::state::{Admission, BucketLimits, StateBackend, StateKey};
+use crate::telemetry::ApiStage;
 
 /// The key of a usage plan's per-method throttle that applies to every method.
 const ALL_METHODS: &str = "*/*";
@@ -43,6 +44,11 @@ pub(crate) struct UsageChecker {
 }
 
 impl UsageChecker {
+    /// The stage, as metrics label it.
+    pub(crate) fn labels(&self) -> ApiStage {
+        ApiStage::new(&self.api_id, Some(&self.stage))
+    }
+
     /// `replicas` is how many gateways count separately: 1 with a shared state
     /// backend, otherwise the number of replicas, each taking its share of every
     /// limit.

@@ -42,12 +42,14 @@ COPY . .
 # Declared after the cook layer so changes do not bust the cache.
 ARG SOURCE_DATE_EPOCH=0
 ARG GENERATE_SBOM=false
+# Reported by the apigw_build_info metric.
+ARG APIGW_GIT_COMMIT=""
 
 # A fixed mtime on each crate root built into the binary keeps the build inputs
 # identical from one run to the next.
 RUN touch -d "@${SOURCE_DATE_EPOCH}" crates/apigw/src/main.rs crates/apigw-regex/src/lib.rs crates/apigw-vtl/src/lib.rs
 
-RUN cargo build --release --locked --target "${TARGET}" --package apigw
+RUN APIGW_GIT_COMMIT="${APIGW_GIT_COMMIT}" cargo build --release --locked --target "${TARGET}" --package apigw
 
 RUN if [ "${GENERATE_SBOM}" = "true" ]; then \
       cargo cyclonedx --manifest-path crates/apigw/Cargo.toml --target "${TARGET}" --format json; \

@@ -15,6 +15,10 @@ variable "GENERATE_SBOM" {
   default = "false"
 }
 
+variable "APIGW_GIT_COMMIT" {
+  default = ""
+}
+
 group "default" {
   targets = ["ci"]
 }
@@ -32,5 +36,6 @@ target "ci" {
     TARGET            = TARGET
     SOURCE_DATE_EPOCH = SOURCE_DATE_EPOCH
     GENERATE_SBOM     = GENERATE_SBOM
+    APIGW_GIT_COMMIT  = APIGW_GIT_COMMIT
   }
 }

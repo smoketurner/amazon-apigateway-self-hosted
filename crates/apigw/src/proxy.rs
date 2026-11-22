@@ -248,7 +248,9 @@ impl HttpProxy {
         if let Some(PrivateRouting::HostHeader(ref host)) = self.private {
             headers.insert(header::HOST, host.clone());
         }
-        if let Some(trace) = ctx.trace
+        if let Some(ref span) = ctx.otel_integration {
+            span.inject(headers);
+        } else if let Some(trace) = ctx.trace
             && let Ok(value) = HeaderValue::try_from(trace.traceparent())
         {
             headers.insert(HeaderName::from_static("traceparent"), value);

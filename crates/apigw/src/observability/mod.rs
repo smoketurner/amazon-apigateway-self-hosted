@@ -29,6 +29,7 @@ pub(crate) use observer::{IntegrationTiming, StageObserver};
 pub(crate) use trace::{Trace, TraceId};
 
 use crate::canary::Release;
+use crate::telemetry::{GatewayMetrics, RequestTracer};
 use destination::Destination;
 use metrics::MetricsAggregator;
 use queue::{CloudWatchShipper, FirehoseShipper, LogQueue, Shipper, Worker, XRayShipper};
@@ -78,10 +79,30 @@ pub(crate) struct Settings {
     pub(crate) stream: StreamName,
 }
 
+/// The process's OpenTelemetry instruments, which every stage records into.
+#[derive(Debug, Clone)]
+pub(crate) struct Instrumentation {
+    pub(crate) metrics: GatewayMetrics,
+    /// Starts request spans, when spans are exported.
+    pub(crate) tracer: Option<RequestTracer>,
+}
+
+impl Instrumentation {
+    /// Metrics into the process-wide instruments and no spans.
+    #[cfg(test)]
+    pub(crate) fn metrics_only() -> Self {
+        Self {
+            metrics: GatewayMetrics::global().clone(),
+            tracer: None,
+        }
+    }
+}
+
 /// Delivery queues and workers shared by every loaded stage.
 pub(crate) struct Observability {
     sdk_config: aws_config::SdkConfig,
     settings: Settings,
+    instrumentation: Instrumentation,
     queues: Mutex<HashMap<Destination, LogQueue>>,
     workers: Mutex<JoinSet<()>>,
     aggregator: Option<Arc<MetricsAggregator>>,
@@ -94,7 +115,11 @@ pub(crate) struct Observability {
 impl Observability {
     /// Starts delivery. Must be called inside a Tokio runtime: workers and the
     /// metrics publisher run as tasks.
-    pub(crate) fn start(sdk_config: aws_config::SdkConfig, settings: Settings) -> Arc<Self> {
+    pub(crate) fn start(
+        sdk_config: aws_config::SdkConfig,
+        settings: Settings,
+        instrumentation: Instrumentation,
+    ) -> Arc<Self> {
         let aggregator = settings
             .metrics
             .as_ref()
@@ -103,6 +128,7 @@ impl Observability {
         let observability = Arc::new(Self {
             sdk_config,
             settings,
+            instrumentation,
             sampler,
             queues: Mutex::new(HashMap::new()),
             workers: Mutex::new(JoinSet::new()),
@@ -119,6 +145,12 @@ impl Observability {
     /// to deliver from.
     #[cfg(test)]
     pub(crate) fn off() -> Arc<Self> {
+        Self::off_with(Instrumentation::metrics_only())
+    }
+
+    /// As [`Self::off`], recording metrics and spans into `instrumentation`.
+    #[cfg(test)]
+    pub(crate) fn off_with(instrumentation: Instrumentation) -> Arc<Self> {
         Arc::new(Self {
             sdk_config: aws_config::SdkConfig::builder()
                 .behavior_version(aws_config::BehaviorVersion::latest())
@@ -136,6 +168,7 @@ impl Observability {
                     uuid::Uuid::nil(),
                 ),
             },
+            instrumentation,
             queues: Mutex::new(HashMap::new()),
             workers: Mutex::new(JoinSet::new()),
             sampler: Arc::new(Sampler::new(0)),
@@ -163,6 +196,10 @@ impl Observability {
             .aggregator_task
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(task);
+    }
+
+    pub(crate) fn instrumentation(&self) -> &Instrumentation {
+        &self.instrumentation
     }
 
     /// The aggregator requests record metrics into, when metrics are on.
