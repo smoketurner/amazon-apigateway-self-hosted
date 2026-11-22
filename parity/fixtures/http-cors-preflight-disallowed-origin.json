@@ -8,7 +8,6 @@
       "apigw-requestid": "[masked]",
       "content-type": "application/json",
       "date": "[masked]"
-    },
-    "body": "{\"headers\": {\"accept\": \"*/*\", \"access-control-request-method\": \"POST\", \"content-length\": \"0\", \"host\": \"skx1sib1w1.execute-api.us-east-1.amazonaws.com\", \"origin\": \"https://not-allowed.example\", \"user-agent\": \"apigw-parity\", \"x-amzn-trace-id\": \"Root=1-6b0320f3-6e7c8b6a71a1ba4241d11a3a\", \"x-forwarded-for\": \"<ip-1>\", \"x-forwarded-port\": \"443\", \"x-forwarded-proto\": \"https\"}, \"isBase64Encoded\": false, \"pathParameters\": {\"proxy\": \"x\"}, \"rawPath\": \"/ref/lambda-v2/x\", \"rawQueryString\": \"\", \"requestContext\": {\"accountId\": \"[account-id]\", \"apiId\": \"skx1sib1w1\", \"domainName\": \"skx1sib1w1.execute-api.us-east-1.amazonaws.com\", \"domainPrefix\": \"skx1sib1w1\", \"http\": {\"method\": \"OPTIONS\", \"path\": \"/ref/lambda-v2/x\", \"protocol\": \"HTTP/1.1\", \"sourceIp\": \"<ip-1>\", \"userAgent\": \"apigw-parity\"}, \"requestId\": \"HQIWEgUEoAMEYaA=\", \"routeKey\": \"ANY /lambda-v2/{proxy+}\", \"stage\": \"ref\", \"time\": \"22/Nov/2026:17:05:55 +0000\", \"timeEpoch\": 1795367155119}, \"routeKey\": \"ANY /lambda-v2/{proxy+}\", \"stageVariables\": {\"echo_host\": \"vhj7j5563m4uhc4u47wpg6umhi0svzio.lambda-url.us-east-1.on.aws\", \"echo_secret\": \"[redacted]\", \"unresolvable_host\": \"apigw-parity.invalid\"}, \"version\": \"2.0\"}"
+    }
   }
 }

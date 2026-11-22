@@ -30,6 +30,7 @@ paths:
         payloadFormatVersion: "1.0"
   # Request parameter mapping on a Lambda proxy integration, for whether API
   # Gateway applies it to the event
+  # (A remove: mapping needs a value, which it ignores: the import drops an empty one.)
   /lambda-mapped/{id}:
     get:
       x-amazon-apigateway-integration:
@@ -41,7 +42,8 @@ paths:
         requestParameters:
           "append:header.x-mapped": "$request.path.id"
           "overwrite:querystring.fixed": "literal"
-          "remove:header.x-remove-me": ""
+          "remove:header.x-remove-me": "ignored"
+          "remove:querystring.drop": "ignored"
   /http-proxy/{proxy+}:
     x-amazon-apigateway-any-method:
       x-amazon-apigateway-integration:
@@ -66,7 +68,7 @@ paths:
           "append:querystring.appended": "$context.stage"
           "append:header.x-appended": "$context.stage"
           "overwrite:header.x-echo-secret": "$stageVariables.echo_secret"
-          "remove:header.x-remove-me": ""
+          "remove:header.x-remove-me": "ignored"
         responseParameters:
           "200":
             "append:header.x-reference-response": "mapped"

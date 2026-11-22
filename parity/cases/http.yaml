@@ -235,6 +235,24 @@ cases:
     path: /lambda-mapped/42
     query: {q: "1"}
     headers: {x-remove-me: gone}
+    compare:
+      body: json
+
+  # Whether remove: takes a header out of an HTTP_PROXY request
+  - name: http-parameter-mapping-remove
+    api: http
+    path: /mapped/42
+    headers: {x-remove-me: gone}
+    unrecorded: true
+    compare:
+      body: ignore
+      echo: {headers: [x-remove-me, x-appended]}
+
+  # Whether remove: takes a query parameter out of a Lambda proxy event
+  - name: http-lambda-v2-request-mapping-remove-query
+    api: http
+    path: /lambda-mapped/42
+    query: {drop: "1", q: "1"}
     unrecorded: true
     compare:
       body: json
