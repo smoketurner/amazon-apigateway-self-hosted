@@ -5,7 +5,7 @@ data "aws_region" "current" {}
 # What apigw itself may do, whatever it runs on.
 data "aws_iam_policy_document" "gateway" {
   statement {
-    sid       = "ReadApiDefinition"
+    sid       = "${local.sid_prefix}ReadApiDefinition"
     actions   = ["apigateway:GET"]
     resources = local.api_resources
   }
@@ -14,7 +14,7 @@ data "aws_iam_policy_document" "gateway" {
     for_each = length(var.lambda_function_arns) > 0 ? [1] : []
 
     content {
-      sid       = "InvokeFunctions"
+      sid       = "${local.sid_prefix}InvokeFunctions"
       actions   = ["lambda:InvokeFunction"]
       resources = local.invocable_function_arns
     }
@@ -25,7 +25,7 @@ data "aws_iam_policy_document" "gateway" {
     for_each = length(var.log_group_arns) > 0 ? [1] : []
 
     content {
-      sid       = "WriteLogs"
+      sid       = "${local.sid_prefix}WriteLogs"
       actions   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
       resources = concat(var.log_group_arns, [for arn in var.log_group_arns : "${arn}:*"])
     }
@@ -35,7 +35,7 @@ data "aws_iam_policy_document" "gateway" {
     for_each = length(var.assumable_role_arns) > 0 ? [1] : []
 
     content {
-      sid       = "AssumeIntegrationRoles"
+      sid       = "${local.sid_prefix}AssumeIntegrationRoles"
       actions   = ["sts:AssumeRole"]
       resources = var.assumable_role_arns
     }
