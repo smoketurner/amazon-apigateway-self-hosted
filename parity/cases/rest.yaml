@@ -735,3 +735,13 @@ cases:
     known_gap: "#23"
     compare:
       headers: [content-type]
+
+  - name: rest-vtl-undefined
+    api: rest
+    method: POST
+    path: /vtl/undefined
+    headers: {content-type: application/json}
+    body: '{"name":"n","store":{"books":[{"price":1},{"price":2.5}],"bike":{"price":3}}}'
+    unrecorded: true
+    compare:
+      headers: [content-type]
