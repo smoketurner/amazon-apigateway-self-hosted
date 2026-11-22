@@ -256,6 +256,8 @@ async fn sqs_path_requests_are_signed_and_carry_the_template_body() {
     assert_eq!(seen.method, "POST");
     assert_eq!(seen.path, "/123456789012/orders");
     assert_eq!(seen.query, None);
+    // Asked for JSON, as API Gateway asks (SNS answers Publish in JSON then).
+    assert_eq!(seen.header("accept"), Some("application/json"));
     assert_eq!(
         String::from_utf8(seen.body.clone()).unwrap(),
         "Action=SendMessage&MessageBody=%7B%22a%22%3A1%7D"

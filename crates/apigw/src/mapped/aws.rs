@@ -83,6 +83,11 @@ impl AwsBackend {
         {
             headers.insert(header::CONTENT_TYPE, content_type);
         }
+        // Unless mapped, the service is asked for JSON: behind a deployed REST
+        // API, SNS answers Publish in JSON, not its default XML.
+        if !headers.contains_key(header::ACCEPT) {
+            headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+        }
         // The service sees the request's trace, as it does behind API Gateway
         // (Step Functions reports it back as `traceHeader`).
         if !headers.contains_key(TRACE_HEADER)
