@@ -105,13 +105,7 @@ impl DomainState {
         let Some(api) = self.apis.get(&routed.target) else {
             return Resolution::Unavailable(routed.target);
         };
-        let loaded = Arc::clone(&api.borrow());
-        // Measured: a domain with a multi-level mapping does not serve its HTTP
-        // API mappings; API Gateway answers them as unmapped.
-        if loaded.kind == ApiKind::Http && self.routing.mappings.has_multi_level() {
-            return Resolution::NoMatch;
-        }
-        Resolution::Matched(loaded, routed.path)
+        Resolution::Matched(Arc::clone(&api.borrow()), routed.path)
     }
 }
 
@@ -702,10 +696,10 @@ mod tests {
         shutdown.cancel();
     }
 
-    /// Measured: a domain with a multi-level mapping does not serve its HTTP
-    /// API mappings, and answers them like an unmapped path.
+    /// Measured: a domain with a multi-level REST mapping still serves its HTTP
+    /// API mappings.
     #[tokio::test]
-    async fn a_domain_with_a_multi_level_mapping_does_not_serve_http_apis() {
+    async fn a_domain_with_a_multi_level_mapping_serves_http_apis_too() {
         let aws = MockAws::start().await;
         let (rest_up, http_up) = (upstream("rest").await, upstream("http").await);
         rest(&aws, "r1", rest_up);
@@ -725,7 +719,7 @@ mod tests {
         );
         assert_eq!(
             get(&registry, DOMAIN, "/http/items", &[]).await,
-            (403, r#"{"message":"Forbidden"}"#.to_owned())
+            (200, "http:/items".to_owned())
         );
         shutdown.cancel();
     }
@@ -746,7 +740,10 @@ mod tests {
             get(&registry, DOMAIN, "/ping", &[]).await,
             (200, "Healthy Connection".to_owned())
         );
-        assert_eq!(get(&registry, DOMAIN, "/sping", &[]).await.0, 200);
+        assert_eq!(
+            get(&registry, DOMAIN, "/sping", &[]).await,
+            (200, "healthy".to_owned())
+        );
         let (status, body) = get(&registry, DOMAIN, "/customers", &[]).await;
         assert_eq!((status, body.as_str()), (403, r#"{"message":"Forbidden"}"#));
         assert_eq!(

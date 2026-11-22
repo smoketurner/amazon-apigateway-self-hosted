@@ -530,8 +530,22 @@ impl CustomDomain {
     }
 }
 
-/// Paths API Gateway reserves on every custom domain for its own health checks.
-const RESERVED_HEALTH_PATHS: [&str; 2] = ["/ping", "/sping"];
+/// API Gateway's answers to the health check paths it reserves on every custom
+/// domain (measured): `/ping` has no `Content-Type`, `/sping` the literal `null`.
+fn reserved_health_check(path: &str) -> Option<Response> {
+    match path {
+        "/ping" => Some(Response::new(Body::from("Healthy Connection"))),
+        "/sping" => {
+            let mut response = Response::new(Body::from("healthy"));
+            response.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("null"),
+            );
+            Some(response)
+        }
+        _ => None,
+    }
+}
 
 /// Serves requests to custom domains: the `Host` header picks the domain, the
 /// domain's API mappings or routing rules pick the API stage, and the matched
@@ -541,9 +555,8 @@ pub(crate) fn domain_dispatcher(domains: DomainRegistry) -> Router {
         let domains = domains.clone();
         async move {
             let path = request.uri().path().to_owned();
-            // Measured: `200 Healthy Connection`, with no Content-Type.
-            if RESERVED_HEALTH_PATHS.contains(&path.as_str()) {
-                return Response::new(Body::from("Healthy Connection"));
+            if let Some(response) = reserved_health_check(&path) {
+                return response;
             }
             let host = request
                 .headers()

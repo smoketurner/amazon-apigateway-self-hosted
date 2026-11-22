@@ -164,11 +164,6 @@ impl ApiMappings {
         self.0.iter()
     }
 
-    /// Whether any mapping key has more than one level (`v1/orders`).
-    pub(crate) fn has_multi_level(&self) -> bool {
-        self.0.iter().any(|m| m.key.is_multi_level())
-    }
-
     /// The mapping that serves `path`, and the path left after removing it.
     ///
     /// With only single-level mappings a request matches the mapping named by
