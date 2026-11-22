@@ -22,7 +22,6 @@ locals {
 
   http_resources = flatten([
     for id in var.http_api_ids : [
-      "${local.apigateway_arn_prefix}/apis/${id}",
       "${local.apigateway_arn_prefix}/apis/${id}/exports/*",
       "${local.apigateway_arn_prefix}/apis/${id}/stages/${var.stage_name}",
     ]

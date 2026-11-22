@@ -224,7 +224,7 @@ with:
 | Secret | `PARITY_COGNITO_PASSWORD` | `cognito_test_password` |
 
 The role can only read the reference APIs' stage and export (`apigateway:GET` on
-`/restapis/<id>/stages/<stage>`, `.../exports/*`, `/apis/<id>`, `/apis/<id>/exports/*`, and
+`/restapis/<id>/stages/<stage>`, `.../exports/*`, `/apis/<id>/exports/*`, and
 `/apis/<id>/stages/<stage>`). It cannot invoke or modify anything.
 
 ## Destroy

@@ -74,9 +74,6 @@ jobs:
           aws apigatewayv2 export-api --api-id "$(jq -r .http.api_id "$WORK_DIR/outputs.json")" \
             --stage-name "$stage" --specification OAS30 --output-type JSON \
             "$WORK_DIR/exports/http.openapi.json"
-          # ExportApi leaves out the CORS configuration; apigw reads it with GetApi.
-          aws apigatewayv2 get-api --api-id "$(jq -r .http.api_id "$WORK_DIR/outputs.json")" \
-            > "$WORK_DIR/exports/http.api.json"
       - name: Record
         env:
           PARITY_API_KEY: ${{ secrets.PARITY_API_KEY }}

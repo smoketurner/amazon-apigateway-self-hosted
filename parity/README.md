@@ -80,9 +80,7 @@ apigw-parity record --outputs parity/outputs.json --export-dir <downloads> \
 `--parameters '{"extensions":"apigateway,authorizers"}'`; the shorthand form splits the value on
 its comma and is rejected) or `aws apigatewayv2 export-api` (HTTP), and
 optionally `<api>.stage.json` from `get-stage`; without a stage file the stage variables come
-from the Terraform outputs. For the HTTP API, `http.api.json` from `aws apigatewayv2 get-api`
-supplies the CORS configuration, which `export-api` leaves out; `record` adds it to the export
-as `x-amazon-apigateway-cors`, as `apigw` does when it reads a live API. `record` makes no AWS API calls: it only sends the case requests
+from the Terraform outputs. `record` makes no AWS API calls: it only sends the case requests
 to the APIs' public URLs.
 
 Add `--baseline parity --drift-report drift.md` to compare the recording with the committed
