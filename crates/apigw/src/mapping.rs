@@ -16,6 +16,7 @@ use axum::response::Response;
 use serde_json::Value;
 
 use crate::pipeline::RequestContext;
+use crate::pipeline::context::QueryString;
 use crate::proxy::{QueryBuilder, UrlEncoder};
 
 /// API Gateway reads at most this much of a body to evaluate a JSON path.
@@ -482,6 +483,36 @@ impl RequestMapping {
         }
     }
 
+    /// The request's headers and query string with the mappings applied, as a
+    /// deployed HTTP API puts them in a Lambda proxy event (measured for added
+    /// headers and overwritten query parameters). The path is not mapped. `None`
+    /// without mappings.
+    pub(crate) fn event_request(&self, ctx: &RequestContext) -> Option<(HeaderMap, QueryString)> {
+        if self.0.is_empty() {
+            return None;
+        }
+        let scope = Scope {
+            request: ctx,
+            response: None,
+        };
+        let mut headers = ctx.headers.clone();
+        let mut url = reqwest::Url::parse("http://event.invalid/").ok()?;
+        url.set_query(ctx.query.raw());
+        for op in &self.0 {
+            let value = op.value.resolve(&scope);
+            match op.target {
+                RequestTarget::Header(ref name) => {
+                    Self::apply_header(op.action, name, value, &mut headers);
+                }
+                RequestTarget::Query(ref name) => {
+                    Self::apply_query(op.action, name, value, &mut url);
+                }
+                RequestTarget::Path => {}
+            }
+        }
+        Some((headers, QueryString::new(url.query())))
+    }
+
     fn apply_header(
         action: Action,
         name: &HeaderName,
@@ -823,6 +854,27 @@ mod tests {
             ("overwrite:header.x-fine", "v"),
         ]));
         assert_eq!(mapping.0.len(), 1);
+    }
+
+    /// Measured against a deployed HTTP API: a Lambda proxy event gets mapped
+    /// headers and query parameters.
+    #[test]
+    fn lambda_events_take_mapped_headers_and_query_parameters() {
+        let ctx = context();
+        let mapping = RequestMapping::compile(&params(&[
+            ("append:header.x-mapped", "$request.querystring.keep"),
+            ("overwrite:header.x-old", "new-value"),
+            ("remove:header.x-multi", ""),
+            ("overwrite:querystring.fixed", "literal"),
+            ("remove:querystring.drop", ""),
+            ("overwrite:path", "/elsewhere"),
+        ]));
+        let (headers, query) = mapping.event_request(&ctx).unwrap();
+        assert_eq!(headers["x-mapped"], "1");
+        assert_eq!(headers["x-old"], "new-value");
+        assert!(headers.get("x-multi").is_none());
+        assert_eq!(query.raw(), Some("keep=1&multi=x&multi=y&fixed=literal"));
+        assert!(RequestMapping::default().event_request(&ctx).is_none());
     }
 
     #[test]

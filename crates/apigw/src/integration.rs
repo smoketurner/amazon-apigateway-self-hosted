@@ -229,6 +229,10 @@ impl Integration {
                     payload,
                     timeout,
                     transfer,
+                    request_mapping: match kind {
+                        ApiKind::Http => RequestMapping::compile(&spec.request_parameters),
+                        ApiKind::Rest => RequestMapping::default(),
+                    },
                     response_mapping: ResponseMapping::compile(&spec.response_parameters),
                 }))
             }
@@ -463,6 +467,8 @@ pub(crate) struct LambdaProxy {
     pub(crate) timeout: Duration,
     /// `Stream` invokes with `InvokeWithResponseStream` and streams the output.
     pub(crate) transfer: ResponseTransferMode,
+    /// HTTP API `requestParameters`, applied to the event's headers and query.
+    pub(crate) request_mapping: RequestMapping,
     /// HTTP API `responseParameters`, by the function's response status code.
     pub(crate) response_mapping: ResponseMapping,
 }

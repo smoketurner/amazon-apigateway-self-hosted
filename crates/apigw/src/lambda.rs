@@ -23,6 +23,7 @@ use crate::integration::{LambdaProxy, StageVariables};
 use crate::lambda_response::{PreludeError, ProxyResponse, StreamBody, StreamPrelude};
 use crate::model::{ApiKind, PayloadVersion, Protection, ResponseTransferMode};
 use crate::pipeline::RequestContext;
+use crate::pipeline::context::QueryString;
 use crate::route::Route;
 
 /// Lambda's payload limit for synchronous invocations, which applies to the
@@ -42,8 +43,10 @@ impl LambdaProxy {
         } else {
             IamAuthorization::NotUsed
         };
+        let mapped = self.request_mapping.event_request(ctx);
         let event = ProxyEvent::new(ctx, stage_variables)
             .with_account(self.function.account().unwrap_or_default())
+            .with_mapped_request(mapped.as_ref())
             .with_header_table(iam)
             .render(self.payload)
             .to_string()
@@ -463,6 +466,9 @@ pub(crate) struct ProxyEvent<'a> {
     /// REST proxy events carry the client's headers as API Gateway's header
     /// table lets them through; `None` sends them all, as authorizer events do.
     header_table: Option<IamAuthorization>,
+    /// Headers and query string after HTTP API request parameter mapping, in
+    /// place of the request's own.
+    mapped: Option<&'a (HeaderMap, QueryString)>,
 }
 
 impl<'a> ProxyEvent<'a> {
@@ -472,7 +478,26 @@ impl<'a> ProxyEvent<'a> {
             stage_variables,
             account_id: "",
             header_table: None,
+            mapped: None,
         }
+    }
+
+    /// Uses the headers and query string that request parameter mapping produced.
+    pub(crate) fn with_mapped_request(
+        mut self,
+        mapped: Option<&'a (HeaderMap, QueryString)>,
+    ) -> Self {
+        self.mapped = mapped;
+        self
+    }
+
+    fn request_headers(&self) -> &HeaderMap {
+        self.mapped
+            .map_or(&self.ctx.headers, |(headers, _)| headers)
+    }
+
+    fn request_query(&self) -> &QueryString {
+        self.mapped.map_or(&self.ctx.query, |(_, query)| query)
     }
 
     /// Applies API Gateway's REST header table to the event's headers.
@@ -539,9 +564,9 @@ impl<'a> ProxyEvent<'a> {
         let spelling = EventSpelling::of(self.ctx.api.kind, version);
         let allowed = match self.header_table {
             Some(iam) if spelling == EventSpelling::Rest => {
-                Cow::Owned(Flavor::Lambda.request_headers(&self.ctx.headers, iam))
+                Cow::Owned(Flavor::Lambda.request_headers(self.request_headers(), iam))
             }
-            Some(_) | None => Cow::Borrowed(&self.ctx.headers),
+            Some(_) | None => Cow::Borrowed(self.request_headers()),
         };
         let mut headers = MultiValues::default();
         for (name, value) in allowed.iter() {
@@ -596,7 +621,7 @@ impl<'a> ProxyEvent<'a> {
 
     fn query(&self) -> MultiValues {
         let mut query = MultiValues::default();
-        for (key, value) in self.ctx.query.pairs() {
+        for (key, value) in self.request_query().pairs() {
             query.push(key, value);
         }
         query
@@ -713,7 +738,7 @@ impl<'a> ProxyEvent<'a> {
             "version": "2.0",
             "routeKey": ctx.route_key.as_str(),
             "rawPath": ctx.full_path,
-            "rawQueryString": ctx.query.raw().unwrap_or_default(),
+            "rawQueryString": self.request_query().raw().unwrap_or_default(),
             "headers": headers.joined(),
             "requestContext": {
                 "accountId": self.account_id,
@@ -791,7 +816,7 @@ mod tests {
     use crate::client_cert::tests::certificate;
     use crate::header_case::HeaderCase;
     use crate::integration::Integration;
-    use crate::mapping::ResponseMapping;
+    use crate::mapping::{RequestMapping, ResponseMapping};
     use crate::model::{MethodMatch, Protections, RouteKey, RoutePath};
     use crate::payload::PayloadSettings;
     use crate::pipeline::context::tests::request;
@@ -1183,6 +1208,7 @@ mod tests {
             payload: PayloadVersion::V1,
             timeout: Duration::from_secs(5),
             transfer,
+            request_mapping: RequestMapping::default(),
             response_mapping: ResponseMapping::default(),
         }
     }
