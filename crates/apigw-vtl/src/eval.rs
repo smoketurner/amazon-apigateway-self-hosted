@@ -3,13 +3,18 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::ast::{BinaryOp, Block, Expr, Foreach, If, Node, Reference, Set, Step};
+use crate::ast::{BinaryOp, Block, Define, Expr, Foreach, If, Node, Reference, Set, Step};
 use crate::error::RenderError;
-use crate::value::{List, LoopInfo, Map, Value};
-use crate::{Limits, TemplateInput};
+use crate::ops::int_value;
+use crate::value::{BlockRef, List, LoopInfo, MAX_VALUE_DEPTH, Map, Value};
+use crate::{Limits, NullReferences, TemplateInput};
 
 /// How many iterations a `#foreach` runs, as in API Gateway.
 pub(crate) const MAX_LOOP_ITERATIONS: usize = 1_000;
+
+/// How many times a `#define` block may be rendering inside itself, as Velocity's
+/// `directive.define.max.depth`; deeper, its reference renders as `null`.
+const MAX_DEFINE_DEPTH: usize = 2;
 
 /// What a block asks its caller to do next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +31,10 @@ pub(crate) struct Interpreter<'a> {
     steps: u64,
     limits: Limits,
     depth: usize,
+    null_references: NullReferences,
     current_loop: Option<Arc<LoopInfo>>,
+    /// How many times each `#define` block is rendering right now, by its address.
+    rendering_blocks: HashMap<usize, usize>,
     pub(crate) body_json: Option<Result<Value, RenderError>>,
     pub(crate) regex_cache: Vec<(String, Arc<apigw_regex::JavaRegex>)>,
 }
@@ -37,6 +45,7 @@ impl<'a> Interpreter<'a> {
         context: Map,
         stage_variables: Map,
         limits: Limits,
+        null_references: NullReferences,
     ) -> Self {
         let mut vars: HashMap<Arc<str>, Value> = HashMap::new();
         vars.insert("input".into(), Value::Input);
@@ -50,7 +59,9 @@ impl<'a> Interpreter<'a> {
             steps: 0,
             limits,
             depth: 0,
+            null_references,
             current_loop: None,
+            rendering_blocks: HashMap::new(),
             body_json: None,
             regex_cache: Vec::new(),
         }
@@ -58,7 +69,49 @@ impl<'a> Interpreter<'a> {
 
     pub(crate) fn render(mut self, template: &Block) -> Result<String, RenderError> {
         self.render_block(template)?;
+        if let Some(context) = self.vars.get("context").cloned() {
+            self.resolve_blocks(&context, 0)?;
+        }
         Ok(self.out)
+    }
+
+    /// Replaces the `#define` blocks stored in `$context` with their text, which is what the
+    /// gateway reads back: Java renders a block when its `toString` is called.
+    fn resolve_blocks(&mut self, value: &Value, depth: usize) -> Result<(), RenderError> {
+        if depth > MAX_VALUE_DEPTH {
+            return Ok(());
+        }
+        let next = depth.saturating_add(1);
+        match value {
+            Value::Map(map) => {
+                for (key, item) in map.entries() {
+                    if let Value::Block(block) = &item {
+                        let text = self.block_to_string(block)?;
+                        map.insert_value(key, text.map_or(Value::Null, Value::from));
+                    } else {
+                        self.resolve_blocks(&item, next)?;
+                    }
+                }
+            }
+            Value::List(list) => {
+                for (index, item) in list.snapshot().into_iter().enumerate() {
+                    if let Value::Block(block) = &item {
+                        let text = self
+                            .block_to_string(block)?
+                            .map_or(Value::Null, Value::from);
+                        list.with(|items| {
+                            if let Some(slot) = items.get_mut(index) {
+                                *slot = text;
+                            }
+                        });
+                    } else {
+                        self.resolve_blocks(&item, next)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     pub(crate) fn charge(&mut self, steps: u64) -> Result<(), RenderError> {
@@ -122,16 +175,17 @@ impl<'a> Interpreter<'a> {
                     self.push_str(text)?;
                     Flow::Continue
                 }
-                Node::Reference(reference) => {
-                    self.render_reference(reference)?;
-                    Flow::Continue
-                }
+                Node::Reference(reference) => self.render_reference(reference)?,
                 Node::Set(set) => {
                     self.execute_set(set)?;
                     Flow::Continue
                 }
                 Node::If(directive) => self.render_if(directive)?,
                 Node::Foreach(directive) => self.render_foreach(directive)?,
+                Node::Define(define) => {
+                    self.execute_define(define);
+                    Flow::Continue
+                }
                 Node::Break => Flow::Break,
                 Node::Stop => Flow::Stop,
             };
@@ -178,8 +232,8 @@ impl<'a> Interpreter<'a> {
                 }
             }
             let info = Arc::new(LoopInfo {
-                index: i64::try_from(index).unwrap_or(i64::MAX),
-                count: i64::try_from(index.saturating_add(1)).unwrap_or(i64::MAX),
+                index: i32::try_from(index).unwrap_or(i32::MAX),
+                count: i32::try_from(index.saturating_add(1)).unwrap_or(i32::MAX),
                 has_next: index.saturating_add(1) < original_len,
                 parent: outer_loop.clone(),
             });
@@ -211,6 +265,15 @@ impl<'a> Interpreter<'a> {
         Ok(flow)
     }
 
+    fn execute_define(&mut self, define: &Define) {
+        if let Some(name) = &define.name {
+            self.vars.insert(
+                Arc::clone(name),
+                Value::Block(BlockRef(Arc::clone(&define.body))),
+            );
+        }
+    }
+
     fn execute_set(&mut self, set: &Set) -> Result<(), RenderError> {
         let value = self.value(&set.value)?;
         if value.is_null() {
@@ -230,13 +293,13 @@ impl<'a> Interpreter<'a> {
             }
             (Value::Map(map), Step::Index(index)) => {
                 let key = self.value(index)?;
-                if let Some(key) = Self::map_key(&key)? {
-                    map.insert(key, value);
-                }
+                self.check_acyclic(&container, &key)?;
+                map.insert_value(key, value);
             }
             (Value::List(list), Step::Index(index)) => {
                 if let Value::Int(position) = self.value(index)? {
                     let len = list.len();
+                    let position = i64::from(position);
                     let resolved =
                         resolve_list_index(position, len).ok_or(RenderError::IndexOutOfBounds {
                             index: position,
@@ -256,31 +319,93 @@ impl<'a> Interpreter<'a> {
 
     // ----- references -----
 
-    fn render_reference(&mut self, reference: &Reference) -> Result<(), RenderError> {
+    fn render_reference(&mut self, reference: &Reference) -> Result<Flow, RenderError> {
         let value = self.resolve(reference)?;
         let backslashes = reference.backslashes;
-        let defined = !value.is_null();
         let odd = !backslashes.is_multiple_of(2);
+        // Velocity renders a block before it writes any escaping backslashes.
+        if let (Value::Block(block), false) = (&value, odd) {
+            match self.render_define_block(block)? {
+                Some(flow) => return Ok(flow),
+                None => return self.render_null_reference(reference),
+            }
+        }
+        let defined = !value.is_null();
         match (defined, odd) {
             (true, false) => {
                 self.push_backslashes(backslashes.div_euclid(2))?;
-                self.push_value(&value)
+                self.push_value(&value)?;
             }
             (true, true) => {
                 self.push_backslashes(backslashes.div_euclid(2))?;
-                self.push_str(&reference.source)
+                self.push_str(&reference.source)?;
             }
-            (false, false) => {
-                self.push_backslashes(backslashes)?;
-                if reference.quiet {
-                    Ok(())
-                } else {
-                    self.push_str(&reference.source)
-                }
-            }
+            (false, false) => return self.render_null_reference(reference),
             (false, true) => {
                 self.push_backslashes(backslashes.saturating_add(1).div_euclid(2))?;
-                self.push_str(&reference.source)
+                self.push_str(&reference.source)?;
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// A reference without an odd number of backslashes whose value is `null`.
+    fn render_null_reference(&mut self, reference: &Reference) -> Result<Flow, RenderError> {
+        let backslashes = reference.backslashes;
+        match self.null_references {
+            NullReferences::Empty => self.push_backslashes(backslashes.div_euclid(2))?,
+            NullReferences::Literal => {
+                self.push_backslashes(backslashes)?;
+                if !reference.quiet {
+                    self.push_str(&reference.source)?;
+                }
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// Renders a `#define` block into the output. `None` when the block is already rendering
+    /// as deeply as Velocity allows, where its reference is `null`. A `#break` ends the block;
+    /// a `#stop` stops the whole render.
+    fn render_define_block(&mut self, block: &BlockRef) -> Result<Option<Flow>, RenderError> {
+        let address = block.address();
+        let active = self.rendering_blocks.get(&address).copied().unwrap_or(0);
+        if active >= MAX_DEFINE_DEPTH {
+            return Ok(None);
+        }
+        self.rendering_blocks
+            .insert(address, active.saturating_add(1));
+        let result = self.render_block(&block.0);
+        self.rendering_blocks.insert(address, active);
+        Ok(Some(match result? {
+            Flow::Stop => Flow::Stop,
+            Flow::Continue | Flow::Break => Flow::Continue,
+        }))
+    }
+
+    /// A `#define` block's `toString`: its rendered text, or `None` when it is rendering too
+    /// deeply.
+    pub(crate) fn block_to_string(
+        &mut self,
+        block: &BlockRef,
+    ) -> Result<Option<String>, RenderError> {
+        let outer = std::mem::take(&mut self.out);
+        let rendered = self.render_define_block(block);
+        let text = std::mem::replace(&mut self.out, outer);
+        Ok(rendered?.map(|_| text))
+    }
+
+    /// A value's Java `toString`, rendering any `#define` blocks it holds. `None` for a block
+    /// whose `toString` is `null`.
+    pub(crate) fn java_string(&mut self, value: &Value) -> Result<Option<String>, RenderError> {
+        match value {
+            Value::Str(text) => Ok(Some(text.to_string())),
+            Value::Block(block) => self.block_to_string(block),
+            other => {
+                self.charge(print_cost(other, 0))?;
+                let mut out = String::new();
+                other.write_java(&mut out, 0, &mut |block| self.block_to_string(block))?;
+                Ok(Some(out))
             }
         }
     }
@@ -289,7 +414,9 @@ impl<'a> Interpreter<'a> {
         match value {
             Value::Str(text) => self.push_str(text),
             other => {
-                let text = other.to_java_string()?;
+                let text = self
+                    .java_string(other)?
+                    .unwrap_or_else(|| "null".to_owned());
                 self.push_str(&text)
             }
         }
@@ -335,7 +462,7 @@ impl<'a> Interpreter<'a> {
         match target {
             Value::Map(map) => map.get(name).unwrap_or(Value::Null),
             Value::Entry(entry) => match name {
-                "key" => Value::Str(Arc::clone(&entry.key)),
+                "key" => entry.key.clone(),
                 "value" => entry.value.clone(),
                 _ => Value::Null,
             },
@@ -358,10 +485,14 @@ impl<'a> Interpreter<'a> {
             Value::Null
             | Value::Bool(_)
             | Value::Int(_)
+            | Value::Long(_)
+            | Value::BigInt(_)
             | Value::Double(_)
+            | Value::BigDecimal(_)
             | Value::Str(_)
             | Value::List(_)
-            | Value::Util => Value::Null,
+            | Value::Util
+            | Value::Block(_) => Value::Null,
         }
     }
 
@@ -369,40 +500,34 @@ impl<'a> Interpreter<'a> {
         match (target, index) {
             (Value::List(list), Value::Int(position)) if list.is_indexed() => {
                 let len = list.len();
+                let position = i64::from(*position);
                 let resolved =
-                    resolve_list_index(*position, len).ok_or(RenderError::IndexOutOfBounds {
-                        index: *position,
+                    resolve_list_index(position, len).ok_or(RenderError::IndexOutOfBounds {
+                        index: position,
                         len,
                     })?;
                 Ok(list.get(resolved).unwrap_or(Value::Null))
             }
-            (Value::Map(map), key) => Ok(Self::map_key(key)?
-                .and_then(|key| map.get(&key))
-                .unwrap_or(Value::Null)),
+            (Value::Map(map), key) => Ok(map.get_value(key).unwrap_or(Value::Null)),
             (
                 Value::Str(_)
                 | Value::Int(_)
+                | Value::Long(_)
+                | Value::BigInt(_)
                 | Value::Double(_)
+                | Value::BigDecimal(_)
                 | Value::Bool(_)
                 | Value::Entry(_)
                 | Value::Input
                 | Value::Util
-                | Value::Loop(_),
+                | Value::Loop(_)
+                | Value::Block(_),
                 Value::Int(position),
             ) if *position < 0 => Err(RenderError::IndexOutOfBounds {
-                index: *position,
+                index: i64::from(*position),
                 len: 0,
             }),
             _ => Ok(Value::Null),
-        }
-    }
-
-    /// The map key a value stands for: Java would box it, here every key is a string.
-    pub(crate) fn map_key(key: &Value) -> Result<Option<Arc<str>>, RenderError> {
-        match key {
-            Value::Null => Ok(None),
-            Value::Str(text) => Ok(Some(Arc::clone(text))),
-            other => Ok(Some(other.to_java_string()?.into())),
         }
     }
 
@@ -422,6 +547,7 @@ impl<'a> Interpreter<'a> {
             Expr::Literal(value) => Ok(value.clone()),
             Expr::Interpolated(block) => self.interpolate(block),
             Expr::Reference(reference) => self.resolve(reference),
+            Expr::Sourced(inner, _) => self.value(inner),
             Expr::List(items) => {
                 let mut values = Vec::with_capacity(items.len());
                 for item in items {
@@ -434,9 +560,7 @@ impl<'a> Interpreter<'a> {
                 for (key, value) in entries {
                     let key = self.value(key)?;
                     let value = self.value(value)?;
-                    if let Some(key) = Self::map_key(&key)? {
-                        map.insert(key, value);
-                    }
+                    map.insert_value(key, value);
                 }
                 Ok(Value::Map(map))
             }
@@ -454,11 +578,11 @@ impl<'a> Interpreter<'a> {
                 | BinaryOp::Gt
                 | BinaryOp::Ge => {
                     let (l, r) = (self.value(left)?, self.value(right)?);
-                    Ok(Value::Bool(Self::compare(*op, &l, &r)))
+                    Ok(Value::Bool(self.compare(*op, &l, &r)?))
                 }
                 BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
                     let (l, r) = (self.value(left)?, self.value(right)?);
-                    Self::arithmetic(*op, &l, &r, left, right)
+                    self.arithmetic(*op, &l, &r, left, right)
                 }
             },
         }
@@ -472,16 +596,17 @@ impl<'a> Interpreter<'a> {
         Ok(Value::from(rendered))
     }
 
+    /// `[from..to]`: Velocity takes each end's `intValue`.
     fn range(&mut self, from: &Value, to: &Value) -> Result<Value, RenderError> {
-        let (Value::Int(from), Value::Int(to)) = (from, to) else {
+        let (Some(from), Some(to)) = (int_value(from), int_value(to)) else {
             return Ok(Value::Null);
         };
-        let length = from.abs_diff(*to).saturating_add(1);
+        let length = u64::from(from.abs_diff(to)).saturating_add(1);
         self.charge(length)?;
         let values: Vec<Value> = if from <= to {
-            (*from..=*to).map(Value::Int).collect()
+            (from..=to).map(Value::Int).collect()
         } else {
-            (*to..=*from).rev().map(Value::Int).collect()
+            (to..=from).rev().map(Value::Int).collect()
         };
         Ok(Value::List(List::from_values(values)))
     }
@@ -505,9 +630,12 @@ impl<'a> Interpreter<'a> {
             | Expr::List(_)
             | Expr::Map(_)
             | Expr::Range(..) => Ok(false),
+            Expr::Sourced(inner, _) => self.truthy(inner),
             Expr::Reference(reference) => Ok(match self.resolve(reference)? {
                 Value::Null => false,
                 Value::Bool(value) => value,
+                // `directive.if.tostring.nullcheck`: an object whose `toString` is null is false.
+                Value::Block(block) => self.block_to_string(&block)?.is_some(),
                 _ => true,
             }),
             Expr::Not(inner) => Ok(!self.truthy(inner)?),
@@ -521,13 +649,49 @@ impl<'a> Interpreter<'a> {
                 | BinaryOp::Gt
                 | BinaryOp::Ge => {
                     let (l, r) = (self.value(left)?, self.value(right)?);
-                    Ok(Self::compare(*op, &l, &r))
+                    self.compare(*op, &l, &r)
                 }
                 BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
                     Ok(false)
                 }
             },
         }
+    }
+}
+
+/// The steps formatting a value costs: converting a `BigInteger` or `BigDecimal` to decimal takes
+/// time that grows with the square of its size.
+fn print_cost(value: &Value, depth: usize) -> u64 {
+    if depth > MAX_VALUE_DEPTH {
+        return 0;
+    }
+    let next = depth.saturating_add(1);
+    let squared =
+        |limbs: usize| u64::try_from(limbs.saturating_mul(limbs) >> 4).unwrap_or(u64::MAX);
+    match value {
+        Value::BigInt(n) => squared(n.limbs()),
+        Value::BigDecimal(d) => squared(d.limbs()),
+        Value::List(list) => list
+            .snapshot()
+            .iter()
+            .fold(0, |cost, item| cost.saturating_add(print_cost(item, next))),
+        Value::Map(map) => map.entries().iter().fold(0, |cost, (key, item)| {
+            cost.saturating_add(print_cost(key, next))
+                .saturating_add(print_cost(item, next))
+        }),
+        Value::Entry(entry) => {
+            print_cost(&entry.key, next).saturating_add(print_cost(&entry.value, next))
+        }
+        Value::Null
+        | Value::Bool(_)
+        | Value::Int(_)
+        | Value::Long(_)
+        | Value::Double(_)
+        | Value::Str(_)
+        | Value::Input
+        | Value::Util
+        | Value::Loop(_)
+        | Value::Block(_) => 0,
     }
 }
 

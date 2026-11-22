@@ -1,0 +1,83 @@
+{"name":"paren-end-newline","output":"$s.x(X","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"paren-end-space","error":"ParseErrorException"}
+{"name":"paren-end-colon","error":"ParseErrorException"}
+{"name":"paren-end-tab","error":"ParseErrorException"}
+{"name":"paren-end-crlf","output":"$s.x(X","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"paren-end-braced","output":"$s.x(X","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"paren-end-dot-name","output":"$s.x(.foo","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"paren-end-dot","error":"ParseErrorException"}
+{"name":"paren-end-reference","output":"$s.x($s.length()X","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"paren-end-reference-dot","error":"ParseErrorException"}
+{"name":"paren-end-rparen","error":"ParseErrorException"}
+{"name":"paren-end-lparen","error":"ParseErrorException"}
+{"name":"paren-end-bracket","error":"ParseErrorException"}
+{"name":"paren-end-brace","error":"ParseErrorException"}
+{"name":"paren-end-bang","error":"ParseErrorException"}
+{"name":"paren-end-hash-number","output":"$s.x(#5x","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"paren-end-word","error":"ParseErrorException"}
+{"name":"paren-end-word2","error":"ParseErrorException"}
+{"name":"paren-end-comment","error":"ParseErrorException"}
+{"name":"paren-end-comment-word","output":"$s.x(##x","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"paren-end-block-comment","output":"$s.x(x","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"paren-end-textblock","output":"$s.x(a b","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"paren-end-string","error":"ParseErrorException"}
+{"name":"paren-end-strings","output":"$s.x('q'abc\"w\"","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"paren-end-escaped-reference","output":"$s.x(\\\\$s","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"paren-end-backslash","error":"ParseErrorException"}
+{"name":"paren-end-numbers","error":"ParseErrorException"}
+{"name":"paren-end-number-range","error":"ParseErrorException"}
+{"name":"paren-end-number-forms","output":"$s.x(-3.5e2","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"paren-end-identifiers","output":"$s.x(abc12_x-y","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"paren-end-identifier-chain","output":"$s.x(s","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"paren-end-identifier-index","error":"ParseErrorException"}
+{"name":"paren-end-identifier-dot","error":"ParseErrorException"}
+{"name":"paren-end-boolean","error":"ParseErrorException"}
+{"name":"paren-end-two-lines","error":"ParseErrorException"}
+{"name":"paren-else","output":"X","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"paren-break","error":"ParseErrorException"}
+{"name":"paren-stop","error":"ParseErrorException"}
+{"name":"paren-set","error":"ParseErrorException"}
+{"name":"paren-set-newline","output":"$s.x(x","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"paren-if","output":"$s.x(a","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"paren-if-space","error":"ParseErrorException"}
+{"name":"paren-foreach","output":"$s.x(a","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"paren-foreach-space","error":"ParseErrorException"}
+{"name":"paren-comment","output":"$s.x(b","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"paren-dot","output":"$s.x(.y","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"paren-dot-space","output":"$s.x(.y z","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"paren-nested-paren","error":"ParseErrorException"}
+{"name":"paren-method-args","error":"ParseErrorException"}
+{"name":"paren-formal","output":"$s.x(${s}.x","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"set-after-property-paren","output":"1(x","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"set-after-property-paren-space","error":"ParseErrorException"}
+{"name":"set-after-property-identifier","error":"ParseErrorException"}
+{"name":"set-after-property-chain","output":"$m.ax","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"set-after-property-true","error":"ParseErrorException"}
+{"name":"set-after-property-bracket","error":"ParseErrorException"}
+{"name":"set-after-property-backslash","output":"$m.a\\\\$s","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"set-after-property-brace","error":"ParseErrorException"}
+{"name":"set-after-property-rbrace","output":"1}x(y z","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"set-after-property-if","output":"$m.a(a b","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"set-after-property-newline","error":"ParseErrorException"}
+{"name":"set-after-reference-dot","error":"ParseErrorException"}
+{"name":"set-after-index-property","error":"ParseErrorException"}
+{"name":"comment-after-property","error":"ParseErrorException"}
+{"name":"textblock-after-property","error":"ParseErrorException"}
+{"name":"property-space-paren","output":"1 x(y z","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"reference-after-property","error":"ParseErrorException"}
+{"name":"reference-after-property-if","output":"1$s(x y","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"reference-after-property-method","error":"ParseErrorException"}
+{"name":"reference-after-property-call","error":"ParseErrorException"}
+{"name":"method-then-identifier","error":"ParseErrorException"}
+{"name":"method-then-identifier-space","output":"$s.length()abc def(a b","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"method-then-identifier-call","error":"ParseErrorException"}
+{"name":"reference-space-identifier","output":"$s abc.def(a b","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"property-reference-call","error":"ParseErrorException"}
+{"name":"property-formal-paren","error":"ParseErrorException"}
+{"name":"property-comment-reference","error":"ParseErrorException"}
+{"name":"null-math-literal","output":"$u * $vx $v x","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"null-math-literals","output":"$ux1 * $uxx$u * $v","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"null-math-spacing","output":"  $u   *   $v  x(($u * $v))x","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"null-math-chain","output":"$u.a * $v.b('q')x$u * 'a'x","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"null-math-boolean","output":"falsextruextruex","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"null-math-zero","output":" 0 x1 / 0x","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}

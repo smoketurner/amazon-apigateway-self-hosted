@@ -595,7 +595,6 @@ cases:
     path: /vtl/macro
     headers: {content-type: application/json}
     body: '{"name":"n","store":{"books":[{"price":1},{"price":2.5}],"bike":{"price":3}}}'
-    known_gap: "#23"
     compare:
       headers: [content-type]
 
@@ -605,7 +604,6 @@ cases:
     path: /vtl/macro-scope
     headers: {content-type: application/json}
     body: '{"name":"n","store":{"books":[{"price":1},{"price":2.5}],"bike":{"price":3}}}'
-    known_gap: "#23"
     compare:
       headers: [content-type]
 
@@ -615,7 +613,6 @@ cases:
     path: /vtl/define
     headers: {content-type: application/json}
     body: '{"name":"n","store":{"books":[{"price":1},{"price":2.5}],"bike":{"price":3}}}'
-    known_gap: "#23"
     compare:
       headers: [content-type]
 
@@ -625,7 +622,6 @@ cases:
     path: /vtl/evaluate
     headers: {content-type: application/json}
     body: '{"name":"n","store":{"books":[{"price":1},{"price":2.5}],"bike":{"price":3}}}'
-    known_gap: "#23"
     compare:
       headers: [content-type]
 
@@ -653,7 +649,6 @@ cases:
     path: /vtl/bigint
     headers: {content-type: application/json}
     body: '{"name":"n","store":{"books":[{"price":1},{"price":2.5}],"bike":{"price":3}}}'
-    known_gap: "#23"
     compare:
       headers: [content-type]
 
@@ -672,7 +667,6 @@ cases:
     path: /vtl/map-keys
     headers: {content-type: application/json}
     body: '{"name":"n","store":{"books":[{"price":1},{"price":2.5}],"bike":{"price":3}}}'
-    known_gap: "#23"
     compare:
       headers: [content-type]
 
@@ -682,7 +676,6 @@ cases:
     path: /vtl/deep-scan-functions
     headers: {content-type: application/json}
     body: '{"name":"n","store":{"books":[{"price":1},{"price":2.5}],"bike":{"price":3}}}'
-    known_gap: "#23"
     compare:
       headers: [content-type]
 
@@ -732,6 +725,5 @@ cases:
     path: /vtl/input
     headers: {content-type: application/json}
     body: '{"name":"n","store":{"books":[{"price":1},{"price":2.5}],"bike":{"price":3}}}'
-    known_gap: "#23"
     compare:
       headers: [content-type]

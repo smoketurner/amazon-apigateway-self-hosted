@@ -21,6 +21,8 @@ pub(crate) enum Node {
     If(If),
     /// `#foreach`.
     Foreach(Foreach),
+    /// `#define`.
+    Define(Define),
     /// `#break`.
     Break,
     /// `#stop`.
@@ -76,6 +78,15 @@ pub(crate) struct Foreach {
     pub(crate) body: Block,
 }
 
+/// `#define($name)body#end`: binds the variable to the block, which renders each time the
+/// variable is used.
+#[derive(Debug, Clone)]
+pub(crate) struct Define {
+    /// The variable, or `None` when the argument names none a template can reach.
+    pub(crate) name: Option<Arc<str>>,
+    pub(crate) body: Arc<Block>,
+}
+
 /// Binary operators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BinaryOp {
@@ -113,4 +124,8 @@ pub(crate) enum Expr {
     Not(Box<Self>),
     /// `a op b`
     Binary(BinaryOp, Box<Self>, Box<Self>),
+    /// An expression and the text Velocity appends for it when it is `null` in a string
+    /// concatenation: the source inside its parentheses, or for an arithmetic node without
+    /// them, its right operand with the space around it.
+    Sourced(Box<Self>, Arc<str>),
 }

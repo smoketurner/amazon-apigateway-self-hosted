@@ -1,15 +1,21 @@
 //! The Java-like value model that templates compute with.
 //!
-//! API Gateway renders templates over Java objects: `String`, `Integer`/`Long`, `Double`,
-//! `Boolean`, `LinkedHashMap`, `ArrayList`, and `null`. [`Value`] models those with the Java
-//! behaviors templates can observe: `toString` formatting, reference semantics for collections
-//! (a list or map assigned to two variables is one object), and insertion-ordered maps.
+//! API Gateway renders templates over Java objects: `String`, `Integer`, `Long`, `BigInteger`,
+//! `Double`, `BigDecimal`, `Boolean`, `LinkedHashMap`, `ArrayList`, and `null`. [`Value`] models
+//! those with the Java behaviors templates can observe: `toString` formatting, `equals`, reference
+//! semantics for collections (a list or map assigned to two variables is one object), and
+//! insertion-ordered maps whose keys can be any value.
 
 use std::collections::HashSet;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use indexmap::IndexMap;
+use indexmap::{Equivalent, IndexMap};
+
+use crate::ast;
+use crate::json;
+use crate::number::{BigDecimal, BigInt};
 
 /// How deeply nested values may be when formatting or comparing them. A template can build a
 /// collection that contains itself, which Java rejects with a stack overflow.
@@ -161,12 +167,105 @@ impl From<Vec<Value>> for List {
     }
 }
 
-/// A Java `Map` with string keys, reference semantics, and insertion order.
-///
-/// Java templates can use any object as a key; keys here are strings, so a non-string key is
-/// converted with Java's `toString`.
+/// A map key: any value, compared with Java's `equals` and hashed consistently with it.
 #[derive(Clone)]
-pub struct Map(Shared<IndexMap<Arc<str>, Value>>);
+pub(crate) struct Key(pub(crate) Value);
+
+/// Tags that keep keys of different Java classes apart when hashing.
+mod tag {
+    pub(super) const NULL: u8 = 0;
+    pub(super) const BOOL: u8 = 1;
+    pub(super) const INT: u8 = 2;
+    pub(super) const LONG: u8 = 3;
+    pub(super) const BIG_INT: u8 = 4;
+    pub(super) const BIG_DECIMAL: u8 = 5;
+    pub(super) const DOUBLE: u8 = 6;
+    pub(super) const STR: u8 = 7;
+    pub(super) const LIST: u8 = 8;
+    pub(super) const MAP: u8 = 9;
+    pub(super) const ENTRY: u8 = 10;
+    pub(super) const OBJECT: u8 = 11;
+}
+
+impl Hash for Key {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match &self.0 {
+            Value::Null => state.write_u8(tag::NULL),
+            Value::Bool(value) => {
+                state.write_u8(tag::BOOL);
+                value.hash(state);
+            }
+            Value::Int(value) => {
+                state.write_u8(tag::INT);
+                value.hash(state);
+            }
+            Value::Long(value) => {
+                state.write_u8(tag::LONG);
+                value.hash(state);
+            }
+            Value::BigInt(value) => {
+                state.write_u8(tag::BIG_INT);
+                value.hash(state);
+            }
+            Value::BigDecimal(value) => {
+                state.write_u8(tag::BIG_DECIMAL);
+                value.hash(state);
+            }
+            Value::Double(value) => {
+                state.write_u8(tag::DOUBLE);
+                java_double_bits(*value).hash(state);
+            }
+            Value::Str(text) => StrKey(text).hash(state),
+            // Collections compare by content, which can change after insertion, so they all
+            // share one hash per kind and are told apart by `equals`.
+            Value::List(_) => state.write_u8(tag::LIST),
+            Value::Map(_) => state.write_u8(tag::MAP),
+            Value::Entry(_) => state.write_u8(tag::ENTRY),
+            Value::Input | Value::Util | Value::Loop(_) | Value::Block(_) => {
+                state.write_u8(tag::OBJECT);
+            }
+        }
+    }
+}
+
+impl PartialEq for Key {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.java_equals(&other.0)
+    }
+}
+
+impl Eq for Key {}
+
+/// A string key to look up without allocating a [`Key`].
+struct StrKey<'a>(&'a str);
+
+impl Hash for StrKey<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u8(tag::STR);
+        self.0.hash(state);
+    }
+}
+
+impl Equivalent<Key> for StrKey<'_> {
+    fn equivalent(&self, key: &Key) -> bool {
+        matches!(&key.0, Value::Str(text) if **text == *self.0)
+    }
+}
+
+/// `Double.doubleToLongBits`, which `Double.equals` and `hashCode` use: every NaN is one value
+/// and `-0.0` differs from `0.0`.
+fn java_double_bits(value: f64) -> u64 {
+    if value.is_nan() {
+        0x7ff8_0000_0000_0000
+    } else {
+        value.to_bits()
+    }
+}
+
+/// A Java `Map` with reference semantics and insertion order (a `LinkedHashMap`). Keys can be
+/// any value and are compared with `equals`, so the key `1` differs from the key `'1'`.
+#[derive(Clone)]
+pub struct Map(Shared<IndexMap<Key, Value>>);
 
 impl Map {
     /// Creates an empty map.
@@ -187,43 +286,79 @@ impl Map {
         self.0.lock().is_empty()
     }
 
-    /// The value stored under `key`.
+    /// The value stored under the string key `key`.
     #[must_use]
     pub fn get(&self, key: &str) -> Option<Value> {
-        self.0.lock().get(key).cloned()
+        self.0.lock().get(&StrKey(key)).cloned()
+    }
+
+    /// The value stored under `key`.
+    #[must_use]
+    pub fn get_value(&self, key: &Value) -> Option<Value> {
+        match key {
+            Value::Str(text) => self.get(text),
+            other => self.0.lock().get(&Key(other.clone())).cloned(),
+        }
+    }
+
+    /// Whether the string key `key` is present, even with a null value.
+    #[must_use]
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.0.lock().contains_key(&StrKey(key))
     }
 
     /// Whether `key` is present, even with a null value.
     #[must_use]
-    pub fn contains_key(&self, key: &str) -> bool {
-        self.0.lock().contains_key(key)
+    pub fn contains_value_key(&self, key: &Value) -> bool {
+        match key {
+            Value::Str(text) => self.contains_key(text),
+            other => self.0.lock().contains_key(&Key(other.clone())),
+        }
     }
 
-    /// Stores `value` under `key`, returning the previous value. An existing key keeps its
-    /// position, like `LinkedHashMap`.
+    /// Stores `value` under the string key `key`, returning the previous value. An existing key
+    /// keeps its position, like `LinkedHashMap`.
     pub fn insert(&self, key: impl Into<Arc<str>>, value: Value) -> Option<Value> {
-        self.0.lock().insert(key.into(), value)
+        self.insert_value(Value::Str(key.into()), value)
+    }
+
+    /// Stores `value` under `key`, returning the previous value.
+    #[expect(
+        clippy::must_use_candidate,
+        reason = "storing is the point; the previous value is optional"
+    )]
+    pub fn insert_value(&self, key: Value, value: Value) -> Option<Value> {
+        self.0.lock().insert(Key(key), value)
+    }
+
+    /// Removes the string key `key`, returning its value.
+    #[must_use]
+    pub fn remove(&self, key: &str) -> Option<Value> {
+        self.0.lock().shift_remove(&StrKey(key))
     }
 
     /// Removes `key`, returning its value.
     #[must_use]
-    pub fn remove(&self, key: &str) -> Option<Value> {
-        self.0.lock().shift_remove(key)
+    pub fn remove_value(&self, key: &Value) -> Option<Value> {
+        match key {
+            Value::Str(text) => self.remove(text),
+            other => self.0.lock().shift_remove(&Key(other.clone())),
+        }
     }
 
     /// A copy of the entries in insertion order.
     #[must_use]
-    pub fn entries(&self) -> Vec<(Arc<str>, Value)> {
+    pub fn entries(&self) -> Vec<(Value, Value)> {
         self.0
             .lock()
             .iter()
-            .map(|(key, value)| (Arc::clone(key), value.clone()))
+            .map(|(key, value)| (key.0.clone(), value.clone()))
             .collect()
     }
 
-    /// Runs `f` with exclusive access to the entries.
-    pub fn with<R>(&self, f: impl FnOnce(&mut IndexMap<Arc<str>, Value>) -> R) -> R {
-        f(&mut self.0.lock())
+    /// Removes every entry.
+    pub fn clear(&self) {
+        self.0.lock().clear();
     }
 
     /// Whether both handles refer to the same map.
@@ -263,7 +398,7 @@ impl<K: Into<Arc<str>>> FromIterator<(K, Value)> for Map {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MapEntry {
     /// The entry's key.
-    pub key: Arc<str>,
+    pub key: Value,
     /// The entry's value.
     pub value: Value,
 }
@@ -271,8 +406,8 @@ pub struct MapEntry {
 /// The `$foreach` variable of one loop iteration.
 #[derive(Debug, Clone)]
 pub struct LoopInfo {
-    pub(crate) index: i64,
-    pub(crate) count: i64,
+    pub(crate) index: i32,
+    pub(crate) count: i32,
     pub(crate) has_next: bool,
     pub(crate) parent: Option<Arc<Self>>,
 }
@@ -287,6 +422,23 @@ impl LoopInfo {
     }
 }
 
+/// The value a `#define` gives its reference: a block rendered each time it is used.
+#[derive(Clone)]
+pub struct BlockRef(pub(crate) Arc<ast::Block>);
+
+impl BlockRef {
+    /// The address of the block, which identifies one `#define` evaluation.
+    pub(crate) fn address(&self) -> usize {
+        Arc::as_ptr(&self.0).addr()
+    }
+}
+
+impl fmt::Debug for BlockRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Block(..)")
+    }
+}
+
 /// A value a template can compute with.
 #[derive(Clone)]
 pub enum Value {
@@ -294,10 +446,16 @@ pub enum Value {
     Null,
     /// A `Boolean`.
     Bool(bool),
-    /// An `Integer` or `Long`.
-    Int(i64),
+    /// An `Integer`.
+    Int(i32),
+    /// A `Long`.
+    Long(i64),
+    /// A `BigInteger`.
+    BigInt(Arc<BigInt>),
     /// A `Double`.
     Double(f64),
+    /// A `BigDecimal`.
+    BigDecimal(Arc<BigDecimal>),
     /// A `String`.
     Str(Arc<str>),
     /// A `List`.
@@ -312,6 +470,8 @@ pub enum Value {
     Util,
     /// The `$foreach` object.
     Loop(Arc<LoopInfo>),
+    /// A `#define` block, which renders when used.
+    Block(BlockRef),
 }
 
 impl fmt::Debug for Value {
@@ -320,7 +480,10 @@ impl fmt::Debug for Value {
             Self::Null => f.write_str("Null"),
             Self::Bool(value) => write!(f, "Bool({value})"),
             Self::Int(value) => write!(f, "Int({value})"),
+            Self::Long(value) => write!(f, "Long({value})"),
+            Self::BigInt(value) => value.fmt(f),
             Self::Double(value) => write!(f, "Double({value})"),
+            Self::BigDecimal(value) => value.fmt(f),
             Self::Str(value) => write!(f, "Str({value:?})"),
             Self::List(list) => list.fmt(f),
             Self::Map(map) => map.fmt(f),
@@ -328,15 +491,34 @@ impl fmt::Debug for Value {
             Self::Input => f.write_str("Input"),
             Self::Util => f.write_str("Util"),
             Self::Loop(_) => f.write_str("Loop"),
+            Self::Block(block) => block.fmt(f),
         }
     }
 }
+
+/// How a `#define` block turns into text while formatting a value that holds one.
+pub(crate) type BlockText<'a, E> = dyn FnMut(&BlockRef) -> Result<Option<String>, E> + 'a;
 
 impl Value {
     /// A string value.
     #[must_use]
     pub fn string(text: impl Into<Arc<str>>) -> Self {
         Self::Str(text.into())
+    }
+
+    /// An integer with the narrowest Java type that holds it: `Integer`, else `Long`, as
+    /// Velocity's literals and JSON numbers are typed.
+    #[must_use]
+    pub fn integer(value: i64) -> Self {
+        i32::try_from(value).map_or(Self::Long(value), Self::Int)
+    }
+
+    /// An integer of any size: `Integer`, `Long`, or `BigInteger`.
+    #[must_use]
+    pub fn big_integer(value: BigInt) -> Self {
+        value
+            .to_i64()
+            .map_or_else(|| Self::BigInt(Arc::new(value)), Self::integer)
     }
 
     /// Whether the value is `null`.
@@ -353,13 +535,17 @@ impl Value {
             Self::Null
             | Self::Bool(_)
             | Self::Int(_)
+            | Self::Long(_)
+            | Self::BigInt(_)
             | Self::Double(_)
+            | Self::BigDecimal(_)
             | Self::List(_)
             | Self::Map(_)
             | Self::Entry(_)
             | Self::Input
             | Self::Util
-            | Self::Loop(_) => None,
+            | Self::Loop(_)
+            | Self::Block(_) => None,
         }
     }
 
@@ -369,8 +555,11 @@ impl Value {
         match self {
             Self::Null => "null",
             Self::Bool(_) => "java.lang.Boolean",
-            Self::Int(_) => "java.lang.Long",
+            Self::Int(_) => "java.lang.Integer",
+            Self::Long(_) => "java.lang.Long",
+            Self::BigInt(_) => "java.math.BigInteger",
             Self::Double(_) => "java.lang.Double",
+            Self::BigDecimal(_) => "java.math.BigDecimal",
             Self::Str(_) => "java.lang.String",
             Self::List(_) => "java.util.ArrayList",
             Self::Map(_) => "java.util.LinkedHashMap",
@@ -378,30 +567,41 @@ impl Value {
             Self::Input => "com.amazonaws.apigateway.Input",
             Self::Util => "com.amazonaws.apigateway.Util",
             Self::Loop(_) => "org.apache.velocity.runtime.directive.ForeachScope",
+            Self::Block(_) => "org.apache.velocity.runtime.directive.Block$Reference",
         }
     }
 
     /// Formats the value like Java's `toString`: `{k=v}` for maps, `[a, b]` for lists, and
-    /// `1.0E10` for large doubles.
+    /// `1.0E10` for large doubles. A `#define` block, which needs a render to produce its
+    /// text, formats as nothing here.
     ///
     /// # Errors
     ///
     /// Fails when the value contains itself or nests deeper than 64 levels.
     pub fn to_java_string(&self) -> Result<String, DepthExceeded> {
         let mut out = String::new();
-        self.write_java(&mut out, 0)?;
+        self.write_java(&mut out, 0, &mut |_| Ok(Some(String::new())))?;
         Ok(out)
     }
 
-    pub(crate) fn write_java(&self, out: &mut String, depth: usize) -> Result<(), DepthExceeded> {
+    pub(crate) fn write_java<E: From<DepthExceeded>>(
+        &self,
+        out: &mut String,
+        depth: usize,
+        block: &mut BlockText<'_, E>,
+    ) -> Result<(), E> {
         if depth > MAX_VALUE_DEPTH {
-            return Err(DepthExceeded);
+            return Err(DepthExceeded.into());
         }
+        let next = depth.saturating_add(1);
         match self {
             Self::Null => out.push_str("null"),
             Self::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
             Self::Int(value) => out.push_str(&value.to_string()),
+            Self::Long(value) => out.push_str(&value.to_string()),
+            Self::BigInt(value) => out.push_str(&value.to_string()),
             Self::Double(value) => out.push_str(&JavaDouble(*value).to_string()),
+            Self::BigDecimal(value) => out.push_str(&value.to_string()),
             Self::Str(text) => out.push_str(text),
             Self::List(list) => {
                 out.push('[');
@@ -409,7 +609,7 @@ impl Value {
                     if index > 0 {
                         out.push_str(", ");
                     }
-                    item.write_java(out, depth.saturating_add(1))?;
+                    item.write_java(out, next, block)?;
                 }
                 out.push(']');
             }
@@ -419,24 +619,29 @@ impl Value {
                     if index > 0 {
                         out.push_str(", ");
                     }
-                    out.push_str(key);
+                    key.write_java(out, next, block)?;
                     out.push('=');
-                    value.write_java(out, depth.saturating_add(1))?;
+                    value.write_java(out, next, block)?;
                 }
                 out.push('}');
             }
             Self::Entry(entry) => {
-                out.push_str(&entry.key);
+                entry.key.write_java(out, next, block)?;
                 out.push('=');
-                entry.value.write_java(out, depth.saturating_add(1))?;
+                entry.value.write_java(out, next, block)?;
             }
+            Self::Block(reference) => match block(reference)? {
+                Some(text) => out.push_str(&text),
+                None => out.push_str("null"),
+            },
             Self::Input | Self::Util | Self::Loop(_) => out.push_str(self.java_class()),
         }
         Ok(())
     }
 
-    /// Java's `Object.equals`: collections compare by content and an `Integer` never equals a
-    /// `Double`.
+    /// Java's `Object.equals`: collections compare by content, numbers only equal numbers of the
+    /// same class (an `Integer` never equals a `Long` or a `Double`), and doubles compare like
+    /// `Double.equals`.
     #[must_use]
     pub fn java_equals(&self, other: &Self) -> bool {
         self.equals_at(other, 0)
@@ -446,22 +651,23 @@ impl Value {
         if depth > MAX_VALUE_DEPTH {
             return false;
         }
+        let next = depth.saturating_add(1);
         match (self, other) {
             (Self::Null, Self::Null) | (Self::Input, Self::Input) | (Self::Util, Self::Util) => {
                 true
             }
             (Self::Bool(a), Self::Bool(b)) => a == b,
-            (Self::Int(a), Self::Int(b)) => a.cmp(b).is_eq(),
-            (Self::Double(a), Self::Double(b)) => doubles_equal(*a, *b),
+            (Self::Int(a), Self::Int(b)) => a == b,
+            (Self::Long(a), Self::Long(b)) => a == b,
+            (Self::BigInt(a), Self::BigInt(b)) => a == b,
+            (Self::BigDecimal(a), Self::BigDecimal(b)) => a == b,
+            (Self::Double(a), Self::Double(b)) => java_double_bits(*a) == java_double_bits(*b),
             (Self::Str(a), Self::Str(b)) => **a == **b,
             (Self::List(a), Self::List(b)) => {
                 a.same_as(b) || {
                     let (left, right) = (a.snapshot(), b.snapshot());
                     left.len() == right.len()
-                        && left
-                            .iter()
-                            .zip(&right)
-                            .all(|(x, y)| x.equals_at(y, depth.saturating_add(1)))
+                        && left.iter().zip(&right).all(|(x, y)| x.equals_at(y, next))
                 }
             }
             (Self::Map(a), Self::Map(b)) => {
@@ -471,36 +677,37 @@ impl Value {
                         && left.iter().all(|(key, value)| {
                             right
                                 .iter()
-                                .find(|(other_key, _)| other_key == key)
-                                .is_some_and(|(_, other)| {
-                                    value.equals_at(other, depth.saturating_add(1))
-                                })
+                                .find(|(other_key, _)| key.equals_at(other_key, next))
+                                .is_some_and(|(_, other)| value.equals_at(other, next))
                         })
                 }
             }
             (Self::Entry(a), Self::Entry(b)) => {
-                a.key == b.key && a.value.equals_at(&b.value, depth.saturating_add(1))
+                a.key.equals_at(&b.key, next) && a.value.equals_at(&b.value, next)
             }
             (Self::Loop(a), Self::Loop(b)) => Arc::ptr_eq(a, b),
+            (Self::Block(a), Self::Block(b)) => Arc::ptr_eq(&a.0, &b.0),
             (
                 Self::Null
                 | Self::Bool(_)
                 | Self::Int(_)
+                | Self::Long(_)
+                | Self::BigInt(_)
                 | Self::Double(_)
+                | Self::BigDecimal(_)
                 | Self::Str(_)
                 | Self::List(_)
                 | Self::Map(_)
                 | Self::Entry(_)
                 | Self::Input
                 | Self::Util
-                | Self::Loop(_),
+                | Self::Loop(_)
+                | Self::Block(_),
                 _,
             ) => false,
         }
     }
-}
 
-impl Value {
     /// Whether `target` is this value or is reachable from it through lists and maps.
     ///
     /// Templates check this before storing a collection inside another, because a collection
@@ -528,7 +735,12 @@ impl Value {
             }
             match &value {
                 Self::List(list) => stack.extend(list.snapshot()),
-                Self::Map(map) => stack.extend(map.entries().into_iter().map(|(_, v)| v)),
+                Self::Map(map) => {
+                    for (key, value) in map.entries() {
+                        stack.push(key);
+                        stack.push(value);
+                    }
+                }
                 _ => {}
             }
         }
@@ -555,9 +767,16 @@ impl From<bool> for Value {
     }
 }
 
-impl From<i64> for Value {
-    fn from(value: i64) -> Self {
+impl From<i32> for Value {
+    fn from(value: i32) -> Self {
         Self::Int(value)
+    }
+}
+
+impl From<i64> for Value {
+    /// An `Integer` when the value fits, else a `Long`.
+    fn from(value: i64) -> Self {
+        Self::integer(value)
     }
 }
 
@@ -604,15 +823,20 @@ impl From<Option<Self>> for Value {
 }
 
 impl From<&serde_json::Value> for Value {
-    /// Converts parsed JSON the way Jayway's JSON provider does: object order is preserved,
-    /// integers become `Int`, and other numbers become `Double`.
+    /// Converts parsed JSON: object order is preserved, integers become `Integer`, `Long`, or
+    /// `BigInteger` by size, and other numbers become `Double`.
     fn from(json: &serde_json::Value) -> Self {
         match json {
             serde_json::Value::Null => Self::Null,
             serde_json::Value::Bool(value) => Self::Bool(*value),
             serde_json::Value::Number(number) => number
                 .as_i64()
-                .map(Self::Int)
+                .map(Self::integer)
+                .or_else(|| {
+                    number
+                        .as_u64()
+                        .map(|value| Self::big_integer(BigInt::from_u64(value)))
+                })
                 .or_else(|| number.as_f64().map(Self::Double))
                 .unwrap_or(Self::Null),
             serde_json::Value::String(text) => Self::Str(text.as_str().into()),
@@ -630,14 +854,15 @@ impl From<&serde_json::Value> for Value {
 }
 
 impl Value {
-    /// Parses a JSON document into a value.
+    /// Parses a JSON document into a value, typing numbers as Jayway's json-smart provider
+    /// does: integers as `Integer`, `Long`, or `BigInteger` by size, and other numbers as
+    /// `Double`, or as `BigDecimal` when written with more than 18 characters.
     ///
     /// # Errors
     ///
-    /// Returns the parser's error for malformed JSON.
-    pub fn from_json(text: &str) -> Result<Self, serde_json::Error> {
-        let json: serde_json::Value = serde_json::from_str(text)?;
-        Ok(Self::from(&json))
+    /// Returns a description of the problem for malformed JSON.
+    pub fn from_json(text: &str) -> Result<Self, String> {
+        json::parse_document(text)
     }
 
     /// Serializes the value as compact JSON, with string escaping limited to what JSON
@@ -675,14 +900,19 @@ impl Value {
                     if index > 0 {
                         out.push(',');
                     }
-                    write_json_string(out, key);
+                    write_json_string(out, &key.to_java_string()?);
                     out.push(':');
                     value.write_json(out, depth.saturating_add(1))?;
                 }
                 out.push('}');
             }
-            Self::Bool(_) | Self::Int(_) | Self::Double(_) => self.write_java(out, depth)?,
-            Self::Entry(_) | Self::Input | Self::Util | Self::Loop(_) => {
+            Self::Bool(_)
+            | Self::Int(_)
+            | Self::Long(_)
+            | Self::BigInt(_)
+            | Self::Double(_)
+            | Self::BigDecimal(_) => out.push_str(&self.to_java_string()?),
+            Self::Entry(_) | Self::Input | Self::Util | Self::Loop(_) | Self::Block(_) => {
                 write_json_string(out, &self.to_java_string()?);
             }
         }
@@ -706,12 +936,6 @@ fn write_json_string(out: &mut String, text: &str) {
         }
     }
     out.push('"');
-}
-
-/// Java compares doubles exactly, as `==` and `Double.equals` do.
-#[expect(clippy::float_cmp, reason = "Java compares doubles exactly")]
-pub(crate) fn doubles_equal(a: f64, b: f64) -> bool {
-    a == b
 }
 
 /// Appends formatted text; `String` formatting cannot fail.
@@ -809,7 +1033,41 @@ mod tests {
         let map = Map::new();
         map.insert("a", Value::Int(1));
         map.insert("b", Value::from(vec![Value::from("x"), Value::Null]));
-        assert_eq!(Value::Map(map).to_string(), "{a=1, b=[x, null]}");
+        map.insert_value(Value::Int(2), Value::Bool(true));
+        assert_eq!(Value::Map(map).to_string(), "{a=1, b=[x, null], 2=true}");
+    }
+
+    #[test]
+    fn map_keys_compare_like_java() {
+        let map = Map::new();
+        map.insert_value(Value::Int(1), Value::from("int"));
+        map.insert("1", Value::from("string"));
+        map.insert_value(Value::Long(1), Value::from("long"));
+        map.insert_value(Value::Double(f64::NAN), Value::from("nan"));
+        map.insert_value(Value::Null, Value::from("null"));
+        assert_eq!(map.len(), 5);
+        assert_eq!(
+            map.get("1").map(|v| v.to_string()),
+            Some("string".to_owned())
+        );
+        assert_eq!(
+            map.get_value(&Value::Int(1)).map(|v| v.to_string()),
+            Some("int".to_owned())
+        );
+        assert_eq!(
+            map.get_value(&Value::Double(f64::NAN))
+                .map(|v| v.to_string()),
+            Some("nan".to_owned())
+        );
+        assert!(map.contains_value_key(&Value::Null));
+        assert!(!map.contains_value_key(&Value::Double(1.0)));
+        let list_key = Value::from(vec![Value::Int(1)]);
+        map.insert_value(list_key, Value::from("list"));
+        assert!(map.contains_value_key(&Value::from(vec![Value::Int(1)])));
+        assert_eq!(
+            map.remove_value(&Value::Long(1)).map(|v| v.to_string()),
+            Some("long".to_owned())
+        );
     }
 
     #[test]
@@ -822,7 +1080,10 @@ mod tests {
     #[test]
     fn equality_follows_java_equals() {
         assert!(Value::Int(1).java_equals(&Value::Int(1)));
+        assert!(!Value::Int(1).java_equals(&Value::Long(1)));
         assert!(!Value::Int(1).java_equals(&Value::Double(1.0)));
+        assert!(Value::Double(f64::NAN).java_equals(&Value::Double(f64::NAN)));
+        assert!(!Value::Double(0.0).java_equals(&Value::Double(-0.0)));
         assert!(Value::from(vec![Value::Int(1)]).java_equals(&Value::from(vec![Value::Int(1)])));
     }
 

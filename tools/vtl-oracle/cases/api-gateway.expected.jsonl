@@ -1,0 +1,8 @@
+{"name":"aws-macro","output":"#greet('a') #greet($input.path('$.body.name'))","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"aws-define","output":"x=1x=2","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"aws-evaluate","output":"#evaluate($t) #evaluate('$input.path(\"$.body.name\")')","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"aws-bigint","output":"922337203685477580885070591730234615847396907784232501249 greater","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"aws-int-overflow","output":"21474836484294967294","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"aws-map-keys","output":"{1=int, 1=string, true=bool} int string 3","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"aws-deep-scan-functions","output":"[null,null,null] \"\" \"\"","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"aws-input","output":"{\"name\":\"n\",\"store\":{\"books\":[{\"price\":1},{\"price\":2.5}],\"bike\":{\"price\":3}}} n \"\" [] ","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}

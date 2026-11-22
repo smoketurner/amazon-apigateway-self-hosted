@@ -1,0 +1,52 @@
+{"name":"scan-fn-0","output":"19.95","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-1","output":"8.95","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-2","output":"50.879999999999995","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-3","output":"12.719999999999999","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-4","output":"4.485298206362655","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-5","output":"0","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-6","output":"3","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-7","output":"10","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-8","output":"0","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-9","output":"[store, expensive]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-10","error":"MethodInvocationException"}
+{"name":"scan-fn-11","error":"MethodInvocationException"}
+{"name":"scan-fn-12","error":"MethodInvocationException"}
+{"name":"scan-fn-13","output":"Nigel ReesEvelyn WaughHerman Melville","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-14","output":"{store={book=[{category=reference, author=Nigel Rees, price=8.95}, {category=fiction, author=Evelyn Waugh, price=12.99, isbn=0-553}, {category=fiction, author=Herman Melville, price=8.99}], bicycle={color=red, price=19.95}}, expensive=10}","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-15","error":"MethodInvocationException"}
+{"name":"scan-fn-16","output":"0","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-17","output":"2","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-18","error":"MethodInvocationException"}
+{"name":"scan-fn-19","error":"MethodInvocationException"}
+{"name":"scan-fn-20","error":"MethodInvocationException"}
+{"name":"scan-fn-21","output":"[null, null, null, null]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-22","output":"8.95","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-23","output":"12.99","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-24","error":"MethodInvocationException"}
+{"name":"scan-fn-25","output":"7","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-26","output":"[store, expensive]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-27","output":"50.879999999999995","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-28","output":"referencefictionfiction","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-29","output":"[{\"category\":\"reference\",\"author\":\"Nigel Rees\",\"price\":8.95},{\"category\":\"fiction\",\"author\":\"Evelyn Waugh\",\"price\":12.99,\"isbn\":\"0-553\"},{\"category\":\"fiction\",\"author\":\"Herman Melville\",\"price\":8.99}]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-30","output":"3","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-31","output":"2","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-32","output":"8.9512.998.9919.95","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-33","output":"10.31","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-array-0","output":"{a=1}","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-array-1","output":"{b=[3, 4]}","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-array-2","output":"{a=2}","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-array-3","output":"0","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-array-4","output":"[{a=1}, {a=2}, {b=[3, 4]}, [1, 2]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-array-5","output":"2.0","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-array-6","output":"2","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-array-7","output":"{a=1}","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-array-8","output":"$input.path('$..a.keys()')","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-concat-argument","output":"Nigel ReesEvelyn WaughHerman Melville","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-bracket-root","error":"MethodInvocationException"}
+{"name":"scan-fn-filter","output":"[Nigel Rees, Evelyn Waugh, Herman Melville]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-json","output":"0 3 19.95","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-json-failures","output":"[\"\"] [\"\"] [[null,null,null,null]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"scan-fn-json-sum","output":"3.0","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"last-of-one","output":"[\"\"] [8] 8","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"path-missing-forms","output":"[] [] [] [[]] [\"\"]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"json-function-failure","output":"[\"\"] [[{\"id\":1,\"name\":\"a\"},{\"id\":2,\"name\":\"b\"}]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}

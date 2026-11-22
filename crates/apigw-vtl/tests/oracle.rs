@@ -14,24 +14,7 @@ use serde::Deserialize;
 
 /// Cases whose output differs from Velocity for a reason that cannot be fixed, with the reason.
 /// Each entry must still differ, or the test fails so that the list stays honest.
-const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
-    (
-        "random.1.463",
-        "Velocity lexes the text after `$ref.prop(#end` in its method-argument state and fails; we read it as plain text",
-    ),
-    (
-        "random.1.493",
-        "`#set($s = (null * x) + y)` appends the null math node's source text in Velocity; we append only a null reference's text",
-    ),
-    (
-        "random.1.511",
-        "Velocity fails on `(\\ = 'b')` after a property reference and a `#set`; its lexer state is not reproduced",
-    ),
-    (
-        "random.1.544",
-        "Velocity fails on a `$b#if(..)` sequence after a property reference followed by `.name(`; its lexer state is not reproduced",
-    ),
-];
+const KNOWN_DIVERGENCES: &[(&str, &str)] = &[];
 
 /// One template with the request fields it overrides; the rest come from `defaults.json`.
 #[derive(Debug, Deserialize)]
@@ -65,8 +48,23 @@ struct Defaults {
 struct Expected {
     name: String,
     output: Option<String>,
-    context: Option<serde_json::Value>,
     error: Option<String>,
+    /// `$context` after rendering as compact JSON, read with this crate's own JSON reader so
+    /// that numbers beyond 64 bits keep their digits.
+    #[serde(skip)]
+    context: String,
+}
+
+impl Expected {
+    fn parse(line: &str) -> Self {
+        let mut entry: Self = serde_json::from_str(line).expect("expected line parses");
+        if let Ok(Value::Map(fields)) = Value::from_json(line) {
+            entry.context = fields
+                .get("context")
+                .map_or_default(|context| context.to_json().unwrap_or_default());
+        }
+        entry
+    }
 }
 
 fn cases_dir() -> PathBuf {
@@ -139,11 +137,8 @@ fn compare(case: &Case, defaults: &Defaults, expected: &Expected) -> Result<(), 
                     "output differs\n  velocity: {want:?}\n  ours:     {output:?}"
                 ));
             }
-            let want_context = expected
-                .context
-                .as_ref()
-                .map_or_default(|json| Value::from(json).to_json().unwrap_or_default());
-            if context != want_context {
+            let want_context = &expected.context;
+            if context != *want_context {
                 return Err(format!(
                     "context differs\n  velocity: {want_context}\n  ours:     {context}"
                 ));
@@ -185,7 +180,7 @@ fn matches_apache_velocity() {
         );
         let expected: BTreeMap<String, Expected> = expected_text
             .lines()
-            .map(|line| serde_json::from_str::<Expected>(line).expect("expected line parses"))
+            .map(Expected::parse)
             .map(|entry| (entry.name.clone(), entry))
             .collect();
         for case in &cases {
