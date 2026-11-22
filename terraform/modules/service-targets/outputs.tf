@@ -42,3 +42,28 @@ output "event_log_group" {
   description = "Log group that captures events sent to the bus."
   value       = aws_cloudwatch_log_group.events_catch_all.name
 }
+
+output "topic_arn" {
+  description = "ARN of the SNS target topic."
+  value       = aws_sns_topic.target.arn
+}
+
+output "stream_name" {
+  description = "Name of the Kinesis target stream."
+  value       = aws_kinesis_stream.target.name
+}
+
+output "stream_arn" {
+  description = "ARN of the Kinesis target stream."
+  value       = aws_kinesis_stream.target.arn
+}
+
+output "bucket_name" {
+  description = "Name of the S3 target bucket."
+  value       = aws_s3_bucket.target.bucket
+}
+
+output "bucket_arn" {
+  description = "ARN of the S3 target bucket."
+  value       = aws_s3_bucket.target.arn
+}

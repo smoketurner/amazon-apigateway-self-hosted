@@ -54,3 +54,47 @@ resource "aws_cloudwatch_event_target" "catch_all_logs" {
 
   depends_on = [aws_cloudwatch_log_resource_policy.events_logs]
 }
+
+resource "aws_sns_topic" "target" {
+  name = "${var.name_prefix}-target"
+}
+
+# One provisioned shard: the cheapest stream that takes a PutRecord.
+resource "aws_kinesis_stream" "target" {
+  name             = "${var.name_prefix}-target"
+  shard_count      = 1
+  retention_period = 24
+
+  stream_mode_details {
+    stream_mode = "PROVISIONED"
+  }
+}
+
+resource "aws_s3_bucket" "target" {
+  bucket        = local.bucket_name
+  force_destroy = true
+}
+
+resource "aws_s3_bucket_public_access_block" "target" {
+  bucket = aws_s3_bucket.target.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "target" {
+  bucket = aws_s3_bucket.target.id
+
+  rule {
+    id     = "expire-parity-objects"
+    status = "Enabled"
+
+    filter {}
+
+    expiration {
+      days = 1
+    }
+  }
+}

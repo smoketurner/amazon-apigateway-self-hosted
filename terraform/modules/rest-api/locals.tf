@@ -18,6 +18,9 @@ locals {
     table_name                = var.table_name
     state_machine_arn         = var.state_machine_arn
     event_bus_name            = var.event_bus_name
+    topic_arn                 = var.topic_arn
+    stream_name               = var.stream_name
+    bucket_name               = var.bucket_name
     cors_origin               = var.cors_allowed_origin
     enable_vpc_link           = var.vpc_link != null
     vpc_link_id               = try(var.vpc_link.id, "")

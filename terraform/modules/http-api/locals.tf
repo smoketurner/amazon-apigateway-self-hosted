@@ -8,6 +8,10 @@ locals {
     invoke_role_arn           = var.invoke_role_arn
     cognito_issuer            = var.cognito_issuer
     cognito_client_id         = var.cognito_client_id
+    queue_url                 = var.queue_url
+    event_bus_name            = var.event_bus_name
+    state_machine_arn         = var.state_machine_arn
+    stream_name               = var.stream_name
   }))
 
   access_log_format = jsonencode({

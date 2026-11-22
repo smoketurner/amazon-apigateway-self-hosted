@@ -39,6 +39,26 @@ variable "cognito_client_id" {
   type        = string
 }
 
+variable "queue_url" {
+  description = "SQS queue the SQS-SendMessage subtype route sends to."
+  type        = string
+}
+
+variable "event_bus_name" {
+  description = "Event bus the EventBridge-PutEvents subtype route publishes to."
+  type        = string
+}
+
+variable "state_machine_arn" {
+  description = "State machine the StepFunctions-StartSyncExecution subtype route starts."
+  type        = string
+}
+
+variable "stream_name" {
+  description = "Kinesis stream the Kinesis-PutRecord subtype route puts records on."
+  type        = string
+}
+
 variable "cors_allowed_origin" {
   description = "Origin allowed by the CORS configuration."
   type        = string

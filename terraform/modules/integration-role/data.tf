@@ -52,4 +52,25 @@ data "aws_iam_policy_document" "invoke" {
     actions   = ["events:PutEvents"]
     resources = [var.event_bus_arn]
   }
+
+  statement {
+    actions   = ["sns:Publish"]
+    resources = [var.topic_arn]
+  }
+
+  statement {
+    actions   = ["kinesis:PutRecord"]
+    resources = [var.stream_arn]
+  }
+
+  statement {
+    actions   = ["s3:PutObject", "s3:GetObject"]
+    resources = ["${var.bucket_arn}/*"]
+  }
+
+  # Without ListBucket, S3 answers a missing object with 403 instead of 404.
+  statement {
+    actions   = ["s3:ListBucket"]
+    resources = [var.bucket_arn]
+  }
 }

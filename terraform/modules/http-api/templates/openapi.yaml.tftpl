@@ -77,6 +77,70 @@ paths:
         uri: "https://$${stageVariables.unresolvable_host}/unresolvable"
         payloadFormatVersion: "1.0"
         timeoutInMillis: 5000
+  # Integrations that answer after their timeout, for the HTTP API's 503
+  /timeout:
+    get:
+      x-amazon-apigateway-integration:
+        type: http_proxy
+        httpMethod: GET
+        uri: "https://$${stageVariables.echo_host}/timeout"
+        payloadFormatVersion: "1.0"
+        timeoutInMillis: 50
+        requestParameters:
+          "overwrite:header.x-echo-secret": "$stageVariables.echo_secret"
+  /lambda-timeout:
+    get:
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        payloadFormatVersion: "2.0"
+        timeoutInMillis: 50
+  # Integration subtypes, answering with the service's own response
+  /subtype/sqs:
+    post:
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        integrationSubtype: SQS-SendMessage
+        credentials: "${invoke_role_arn}"
+        payloadFormatVersion: "1.0"
+        requestParameters:
+          QueueUrl: "${queue_url}"
+          MessageBody: "$request.body"
+  /subtype/eventbridge:
+    post:
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        integrationSubtype: EventBridge-PutEvents
+        credentials: "${invoke_role_arn}"
+        payloadFormatVersion: "1.0"
+        requestParameters:
+          Source: "apigw.reference"
+          DetailType: "parity"
+          Detail: "$request.body"
+          EventBusName: "${event_bus_name}"
+  /subtype/stepfunctions:
+    post:
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        integrationSubtype: StepFunctions-StartSyncExecution
+        credentials: "${invoke_role_arn}"
+        payloadFormatVersion: "1.0"
+        requestParameters:
+          StateMachineArn: "${state_machine_arn}"
+          Input: "$request.body"
+  /subtype/kinesis:
+    post:
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        integrationSubtype: Kinesis-PutRecord
+        credentials: "${invoke_role_arn}"
+        payloadFormatVersion: "1.0"
+        requestParameters:
+          StreamName: "${stream_name}"
+          Data: "$request.body"
+          PartitionKey: "parity"
   /throttled:
     get:
       x-amazon-apigateway-integration:

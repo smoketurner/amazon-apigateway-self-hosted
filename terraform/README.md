@@ -47,7 +47,7 @@ the environment pins exact versions and configures the provider and backend.
 | HTTP API (`<prefix>-http`) | `HTTP_PROXY`, `AWS_PROXY` 1.0 and 2.0, the `$default` route, parameter mapping (path, query, header, response), CORS, JWT authorizer (with and without scopes), Lambda authorizers (simple response and IAM policy), route throttling, optional access logs |
 | Backends | Python echo Lambda (returns the event it received); the same echo behind a Lambda function URL that requires a shared-secret `x-echo-secret` header, used as the HTTP backend through the `echo_host` and `echo_secret` stage variables; a deterministic authorizer Lambda |
 | Identity | Cognito user pool, app client (`USER_PASSWORD_AUTH`), and a test user |
-| Service targets | SQS queue, DynamoDB table, Step Functions EXPRESS state machine, EventBridge bus (events are also written to a log group) |
+| Service targets | SQS queue, DynamoDB table, Step Functions EXPRESS state machine, EventBridge bus (events are also written to a log group), SNS topic, one-shard Kinesis stream (about $11 a month), and an S3 bucket whose objects expire after a day. REST `AWS` integrations and HTTP API integration subtypes call them; `make parity-live` compares them with `apigw` on ECS |
 | CI | GitHub OIDC provider (unless you pass an existing one) and a read-only role for the parity workflow |
 
 Gateway responses are customized only for `BAD_REQUEST_BODY`, `BAD_REQUEST_PARAMETERS`,

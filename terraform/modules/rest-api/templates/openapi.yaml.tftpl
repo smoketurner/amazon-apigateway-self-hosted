@@ -309,6 +309,28 @@ paths:
         uri: "https://$${stageVariables.unset_host}/unset-host"
         passthroughBehavior: when_no_match
         timeoutInMillis: 5000
+  # Integrations that answer after their timeout, for API Gateway's 504
+  /timeout:
+    get:
+      responses: {}
+      x-amazon-apigateway-integration:
+        type: http_proxy
+        httpMethod: GET
+        uri: "https://$${stageVariables.echo_host}/timeout"
+        passthroughBehavior: when_no_match
+        timeoutInMillis: 50
+        requestParameters:
+          integration.request.header.x-echo-secret: "stageVariables.echo_secret"
+  /lambda-timeout:
+    get:
+      responses: {}
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_match
+        timeoutInMillis: 50
   /lambda-nonproxy:
     post:
       responses:
@@ -434,6 +456,89 @@ paths:
         responses:
           default:
             statusCode: "200"
+  # SNS, Kinesis, and S3, answering with the service's own response
+  /aws/sns:
+    post:
+      responses:
+        "200":
+          description: "Publish result"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "arn:${partition}:apigateway:${region}:sns:action/Publish"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: never
+        requestParameters:
+          integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
+        requestTemplates:
+          application/json: "TopicArn=$util.urlEncode('${topic_arn}')&Message=$util.urlEncode($input.body)"
+        responses:
+          default:
+            statusCode: "200"
+  /aws/kinesis:
+    post:
+      responses:
+        "200":
+          description: "PutRecord result"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "arn:${partition}:apigateway:${region}:kinesis:action/PutRecord"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: never
+        requestTemplates:
+          application/json: |-
+            {"StreamName":"${stream_name}","Data":"$util.base64Encode($input.body)","PartitionKey":"parity"}
+        responses:
+          default:
+            statusCode: "200"
+  /aws/s3/{key}:
+    put:
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "PutObject result"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: PUT
+        uri: "arn:${partition}:apigateway:${region}:s3:path/${bucket_name}/{object}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_match
+        requestParameters:
+          integration.request.path.object: "method.request.path.key"
+        responses:
+          default:
+            statusCode: "200"
+    get:
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "the object"
+        "404":
+          description: "no such object"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: GET
+        uri: "arn:${partition}:apigateway:${region}:s3:path/${bucket_name}/{object}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_match
+        requestParameters:
+          integration.request.path.object: "method.request.path.key"
+        responses:
+          default:
+            statusCode: "200"
+          "404":
+            statusCode: "404"
   /validated/{id}:
     post:
       x-amazon-apigateway-request-validator: all
