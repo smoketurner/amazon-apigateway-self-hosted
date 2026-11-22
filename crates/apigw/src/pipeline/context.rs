@@ -17,6 +17,7 @@ use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use crate::canary::Release;
+use crate::domain::ViaCustomDomain;
 use crate::gateway::{ApiContext, RequestId};
 use crate::header_case::HeaderCase;
 use crate::http_routes::decoded_path;
@@ -281,6 +282,8 @@ pub(crate) struct RequestContext {
     pub(crate) full_path: String,
     /// The path exactly as the client sent it, stage prefix and escapes included.
     pub(crate) sent_path: String,
+    /// Whether the request reached the API through a custom domain.
+    pub(crate) via_custom_domain: bool,
     pub(crate) query: QueryString,
     pub(crate) headers: HeaderMap,
     /// The client's spelling of header names, known for HTTP/1 requests.
@@ -438,6 +441,7 @@ impl RequestContext {
             path,
             full_path,
             sent_path,
+            via_custom_domain: extensions.get::<ViaCustomDomain>().is_some(),
             query: QueryString::for_api(api.kind, uri.query()),
             headers,
             header_case,
@@ -598,7 +602,7 @@ impl RequestContext {
         if let Some(cert) = self.identity.client_cert()
             && let Some(Value::Object(identity)) = context.get_mut("identity")
         {
-            identity.insert("clientCert".to_owned(), cert.to_json());
+            identity.insert("clientCert".to_owned(), cert.to_json(self.api.kind));
         }
         if let (Value::Object(fields), Some(release)) = (&mut context, self.api.release) {
             fields.insert("isCanaryRequest".to_owned(), json!(release.is_canary()));
@@ -664,6 +668,7 @@ pub(crate) mod tests {
             path: "/pets/7".to_owned(),
             full_path: "/prod/pets/7".to_owned(),
             sent_path: "/prod/pets/7".to_owned(),
+            via_custom_domain: false,
             query: QueryString::new(Some("q=1&q=2")),
             headers,
             header_case: HeaderCase::default(),

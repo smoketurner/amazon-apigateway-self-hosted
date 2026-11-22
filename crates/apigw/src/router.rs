@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::Router;
+use axum::body::Body;
 use axum::extract::{OriginalUri, Request};
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -19,7 +20,7 @@ use crate::authz::{Authorizers, ResourcePolicies};
 use crate::aws::{AwsClients, RoleArn, RoleStatus};
 use crate::cache::CacheSettings;
 use crate::canary::{CanaryRelease, CanarySummary};
-use crate::domain::{DomainName, DomainRegistry, DomainSummary, Resolution};
+use crate::domain::{DomainName, DomainRegistry, DomainSummary, Resolution, ViaCustomDomain};
 use crate::gateway::{ApiContext, Enforcement, GatewayError, RequestId};
 use crate::http_routes::{HttpRoutes, PathPattern, decoded_path};
 use crate::identity::ClientIdentity;
@@ -509,6 +510,17 @@ impl CustomDomain {
             .into_response()
     }
 
+    /// API Gateway's answer to a request the domain does not serve (measured):
+    /// `403 {"message":"Forbidden"}` named `ForbiddenException`.
+    fn forbidden() -> Response {
+        let mut response = Self::error(StatusCode::FORBIDDEN, "Forbidden");
+        response.headers_mut().insert(
+            HeaderName::from_static("x-amzn-errortype"),
+            HeaderValue::from_static("ForbiddenException"),
+        );
+        response
+    }
+
     /// Replaces the path of `request`, keeping its query string.
     fn rewrite_path(request: &mut Request, path: &str) -> Result<(), axum::http::uri::InvalidUri> {
         let target = match request.uri().query() {
@@ -535,8 +547,9 @@ pub(crate) fn domain_dispatcher(domains: DomainRegistry) -> Router {
         let domains = domains.clone();
         async move {
             let path = request.uri().path().to_owned();
+            // Measured: `200 Healthy Connection`, with no Content-Type.
             if RESERVED_HEALTH_PATHS.contains(&path.as_str()) {
-                return (StatusCode::OK, "healthy").into_response();
+                return Response::new(Body::from("Healthy Connection"));
             }
             let host = request
                 .headers()
@@ -550,7 +563,7 @@ pub(crate) fn domain_dispatcher(domains: DomainRegistry) -> Router {
                 })
                 .map_or_default(DomainName::host_of);
             let Some(state) = domains.find(&host) else {
-                return CustomDomain::error(StatusCode::FORBIDDEN, "Forbidden");
+                return CustomDomain::forbidden();
             };
             if state.requires_client_certificate()
                 && !request
@@ -564,10 +577,11 @@ pub(crate) fn domain_dispatcher(domains: DomainRegistry) -> Router {
                     host,
                     "refused a request to a mutual TLS domain without a verified client certificate"
                 );
-                return CustomDomain::error(StatusCode::FORBIDDEN, "Forbidden");
+                return CustomDomain::forbidden();
             }
             match state.resolve(&path, request.headers()) {
                 Resolution::Matched(loaded, routed_path) => {
+                    request.extensions_mut().insert(ViaCustomDomain);
                     if CustomDomain::rewrite_path(&mut request, &routed_path).is_err() {
                         return CustomDomain::error(StatusCode::BAD_REQUEST, "Bad Request");
                     }
@@ -577,7 +591,7 @@ pub(crate) fn domain_dispatcher(domains: DomainRegistry) -> Router {
                     tracing::warn!(%stage, host, "request for an API stage that has not loaded");
                     CustomDomain::error(StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable")
                 }
-                Resolution::NoMatch => CustomDomain::error(StatusCode::FORBIDDEN, "Forbidden"),
+                Resolution::NoMatch => CustomDomain::forbidden(),
             }
         }
     })

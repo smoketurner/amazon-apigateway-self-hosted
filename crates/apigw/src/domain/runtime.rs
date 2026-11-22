@@ -102,10 +102,16 @@ impl DomainState {
         let Some(routed) = self.routing.select(path, headers) else {
             return Resolution::NoMatch;
         };
-        match self.apis.get(&routed.target) {
-            Some(api) => Resolution::Matched(Arc::clone(&api.borrow()), routed.path),
-            None => Resolution::Unavailable(routed.target),
+        let Some(api) = self.apis.get(&routed.target) else {
+            return Resolution::Unavailable(routed.target);
+        };
+        let loaded = Arc::clone(&api.borrow());
+        // Measured: a domain with a multi-level mapping does not serve its HTTP
+        // API mappings; API Gateway answers them as unmapped.
+        if loaded.kind == ApiKind::Http && self.routing.mappings.has_multi_level() {
+            return Resolution::NoMatch;
         }
+        Resolution::Matched(loaded, routed.path)
     }
 }
 
@@ -675,7 +681,7 @@ mod tests {
             &aws,
             "API_MAPPING_ONLY",
             r#"[{"apiId":"r1","apiMappingKey":"(none)","stage":"prod"},
-                {"apiId":"h1","apiMappingKey":"v2/items","stage":"prod"}]"#,
+                {"apiId":"h1","apiMappingKey":"items","stage":"prod"}]"#,
             "[]",
         );
         let (registry, shutdown, _task) = serve(&aws, None).await;
@@ -684,14 +690,42 @@ mod tests {
             (200, "rest:/pets?x=1".to_owned())
         );
         assert_eq!(
-            get(&registry, DOMAIN, "/v2/items/42", &[]).await,
+            get(&registry, DOMAIN, "/items/42", &[]).await,
             (200, "http:/42".to_owned()),
-            "the multi-level mapping is stripped"
+            "the mapping key is stripped"
         );
         assert_eq!(
             get(&registry, "API.example.com:8443", "/pets", &[]).await.0,
             200,
             "the host is case insensitive and its port ignored"
+        );
+        shutdown.cancel();
+    }
+
+    /// Measured: a domain with a multi-level mapping does not serve its HTTP
+    /// API mappings, and answers them like an unmapped path.
+    #[tokio::test]
+    async fn a_domain_with_a_multi_level_mapping_does_not_serve_http_apis() {
+        let aws = MockAws::start().await;
+        let (rest_up, http_up) = (upstream("rest").await, upstream("http").await);
+        rest(&aws, "r1", rest_up);
+        http(&aws, "h1", http_up);
+        domain(
+            &aws,
+            "API_MAPPING_ONLY",
+            r#"[{"apiId":"r1","apiMappingKey":"v1/orders","stage":"prod"},
+                {"apiId":"h1","apiMappingKey":"http","stage":"prod"}]"#,
+            "[]",
+        );
+        let (registry, shutdown, _task) = serve(&aws, None).await;
+        assert_eq!(
+            get(&registry, DOMAIN, "/v1/orders/42", &[]).await,
+            (200, "rest:/42".to_owned()),
+            "the multi-level mapping is stripped"
+        );
+        assert_eq!(
+            get(&registry, DOMAIN, "/http/items", &[]).await,
+            (403, r#"{"message":"Forbidden"}"#.to_owned())
         );
         shutdown.cancel();
     }
@@ -710,7 +744,7 @@ mod tests {
         let (registry, shutdown, _task) = serve(&aws, None).await;
         assert_eq!(
             get(&registry, DOMAIN, "/ping", &[]).await,
-            (200, "healthy".to_owned())
+            (200, "Healthy Connection".to_owned())
         );
         assert_eq!(get(&registry, DOMAIN, "/sping", &[]).await.0, 200);
         let (status, body) = get(&registry, DOMAIN, "/customers", &[]).await;

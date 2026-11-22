@@ -623,8 +623,12 @@ impl<'a> ProxyEvent<'a> {
         if let Some(forwarded_for) = forwarded_for {
             push("x-forwarded-for", forwarded_for);
         }
-        push("x-forwarded-port", ctx.port().to_string());
-        push("x-forwarded-proto", "https".to_owned());
+        // Measured: a REST API's event for a mutual TLS request carries neither.
+        let mutual_tls = spelling == EventSpelling::Rest && ctx.identity.has_verified_certificate();
+        if !mutual_tls {
+            push("x-forwarded-port", ctx.port().to_string());
+            push("x-forwarded-proto", "https".to_owned());
+        }
         if let Some(trace) = ctx.started_trace_header() {
             push("x-amzn-trace-id", trace);
         }
@@ -669,7 +673,7 @@ impl<'a> ProxyEvent<'a> {
         if let (Value::Object(fields), Some(cert)) =
             (&mut identity, self.ctx.identity.client_cert())
         {
-            fields.insert("clientCert".to_owned(), cert.to_json());
+            fields.insert("clientCert".to_owned(), cert.to_json(self.ctx.api.kind));
         }
         identity
     }
@@ -682,8 +686,10 @@ impl<'a> ProxyEvent<'a> {
         let http_api = ctx.api.kind == ApiKind::Http;
         let mut event = json!({
             "resource": ctx.resource_path,
-            // An HTTP API reports the path as sent, stage and escapes included.
-            "path": if http_api { &ctx.sent_path } else { &ctx.path },
+            // An HTTP API reports the path as sent, stage and escapes included,
+            // and so does a REST API reached through a custom domain, mapping
+            // key included (measured).
+            "path": if http_api || ctx.via_custom_domain { &ctx.sent_path } else { &ctx.path },
             "httpMethod": ctx.method.as_str(),
             "headers": headers,
             "multiValueHeaders": multi_headers,
@@ -800,7 +806,7 @@ impl<'a> ProxyEvent<'a> {
                 if let Some(cert) = ctx.identity.client_cert() {
                     request_context.insert(
                         "authentication".to_owned(),
-                        json!({"clientCert": cert.to_json()}),
+                        json!({"clientCert": cert.to_json(ctx.api.kind)}),
                     );
                 }
             }
