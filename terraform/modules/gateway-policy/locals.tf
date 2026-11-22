@@ -16,8 +16,6 @@ locals {
     ] : [
     "${local.apigateway_arn}:/apis/${var.api_id}/stages/${var.stage_name}",
     "${local.apigateway_arn}:/apis/${var.api_id}/exports/OAS30",
-    # Optional for apigw: the CORS configuration, which the export leaves out.
-    "${local.apigateway_arn}:/apis/${var.api_id}",
   ]
 
   # Functions are invoked by ARN or by a qualified ARN (alias or version).
