@@ -2,20 +2,6 @@ openapi: "3.0.1"
 info:
   title: "${name}"
   version: "1.0"
-x-amazon-apigateway-cors:
-  allowOrigins:
-    - "${cors_origin}"
-  allowMethods:
-    - GET
-    - POST
-    - OPTIONS
-  allowHeaders:
-    - content-type
-    - x-auth
-  exposeHeaders:
-    - x-reference-exposed
-  maxAge: 300
-  allowCredentials: false
 paths:
   /$default:
     x-amazon-apigateway-any-method:

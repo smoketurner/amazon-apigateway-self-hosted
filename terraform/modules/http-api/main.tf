@@ -3,6 +3,17 @@ resource "aws_apigatewayv2_api" "this" {
   description   = "HTTP API covering the in-scope features, used as the parity reference."
   protocol_type = "HTTP"
   body          = jsonencode(local.openapi)
+
+  # The provider sets CORS from this block and ignores x-amazon-apigateway-cors
+  # in the body (hashicorp/terraform-provider-aws#33390).
+  cors_configuration {
+    allow_origins     = [var.cors_allowed_origin]
+    allow_methods     = ["GET", "POST", "OPTIONS"]
+    allow_headers     = ["content-type", "x-auth"]
+    expose_headers    = ["x-reference-exposed"]
+    max_age           = 300
+    allow_credentials = false
+  }
 }
 
 resource "aws_cloudwatch_log_group" "access" {
