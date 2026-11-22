@@ -123,8 +123,10 @@ reference APIs answered. A fixture written by hand from documentation would carr
 
 ## Not covered yet
 
-- AWS service integrations (SQS, DynamoDB, Step Functions, EventBridge) and HTTP API
-  integration subtypes, which replay has no stand-in for.
+- AWS service integrations and HTTP API integration subtypes, which replay has no stand-in
+  for. `make parity-live` instead sends the same requests to the reference APIs and to `apigw`
+  on ECS, which call the same resources, and compares status, content type, and body with
+  per-request IDs masked.
 - VPC links, which need the optional internal load balancer and a replay stand-in for it.
 - Custom domains and mutual TLS, which need a registered domain, a certificate, and a
   truststore the reference stack does not create.
