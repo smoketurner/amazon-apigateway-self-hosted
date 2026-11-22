@@ -56,7 +56,7 @@
     "info": {
       "description": "HTTP API covering the in-scope features, used as the parity reference.",
       "title": "apigw-ref-http",
-      "version": "1.0"
+      "version": "2026-11-22 18:52:45UTC"
     },
     "openapi": "3.0.1",
     "paths": {
@@ -357,6 +357,28 @@
           }
         ]
       },
+      "/subtype/appconfig": {
+        "post": {
+          "responses": {
+            "default": {
+              "description": "Default response for POST /subtype/appconfig"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "connectionType": "INTERNET",
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "integrationSubtype": "AppConfig-GetConfiguration",
+            "payloadFormatVersion": "1.0",
+            "requestParameters": {
+              "Application": "apigw-ref-target",
+              "ClientId": "parity",
+              "Configuration": "flags",
+              "Environment": "parity"
+            },
+            "type": "aws_proxy"
+          }
+        }
+      },
       "/subtype/eventbridge": {
         "post": {
           "responses": {
@@ -420,6 +442,66 @@
           }
         }
       },
+      "/subtype/sqs-delete": {
+        "post": {
+          "responses": {
+            "default": {
+              "description": "Default response for POST /subtype/sqs-delete"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "connectionType": "INTERNET",
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "integrationSubtype": "SQS-DeleteMessage",
+            "payloadFormatVersion": "1.0",
+            "requestParameters": {
+              "QueueUrl": "https://sqs.us-east-1.amazonaws.com/[account-id]/apigw-ref-empty",
+              "ReceiptHandle": "$request.querystring.handle"
+            },
+            "type": "aws_proxy"
+          }
+        }
+      },
+      "/subtype/sqs-purge": {
+        "post": {
+          "responses": {
+            "default": {
+              "description": "Default response for POST /subtype/sqs-purge"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "connectionType": "INTERNET",
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "integrationSubtype": "SQS-PurgeQueue",
+            "payloadFormatVersion": "1.0",
+            "requestParameters": {
+              "QueueUrl": "https://sqs.us-east-1.amazonaws.com/[account-id]/apigw-ref-empty"
+            },
+            "type": "aws_proxy"
+          }
+        }
+      },
+      "/subtype/sqs-receive": {
+        "post": {
+          "responses": {
+            "default": {
+              "description": "Default response for POST /subtype/sqs-receive"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "connectionType": "INTERNET",
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "integrationSubtype": "SQS-ReceiveMessage",
+            "payloadFormatVersion": "1.0",
+            "requestParameters": {
+              "MaxNumberOfMessages": "1",
+              "QueueUrl": "https://sqs.us-east-1.amazonaws.com/[account-id]/apigw-ref-empty",
+              "WaitTimeSeconds": "0"
+            },
+            "type": "aws_proxy"
+          }
+        }
+      },
       "/subtype/stepfunctions": {
         "post": {
           "responses": {
@@ -435,6 +517,46 @@
             "requestParameters": {
               "Input": "$request.body",
               "StateMachineArn": "arn:aws:states:us-east-1:[account-id]:stateMachine:apigw-ref-target"
+            },
+            "type": "aws_proxy"
+          }
+        }
+      },
+      "/subtype/stepfunctions-start": {
+        "post": {
+          "responses": {
+            "default": {
+              "description": "Default response for POST /subtype/stepfunctions-start"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "connectionType": "INTERNET",
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "integrationSubtype": "StepFunctions-StartExecution",
+            "payloadFormatVersion": "1.0",
+            "requestParameters": {
+              "Input": "$request.body",
+              "StateMachineArn": "arn:aws:states:us-east-1:[account-id]:stateMachine:apigw-ref-target"
+            },
+            "type": "aws_proxy"
+          }
+        }
+      },
+      "/subtype/stepfunctions-stop": {
+        "post": {
+          "responses": {
+            "default": {
+              "description": "Default response for POST /subtype/stepfunctions-stop"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "connectionType": "INTERNET",
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "integrationSubtype": "StepFunctions-StopExecution",
+            "payloadFormatVersion": "1.0",
+            "requestParameters": {
+              "Cause": "parity",
+              "ExecutionArn": "arn:aws:states:us-east-1:[account-id]:execution:apigw-ref-target:${request.querystring.execution}"
             },
             "type": "aws_proxy"
           }
@@ -480,12 +602,30 @@
     },
     "servers": [
       {
-        "url": "https://skx1sib1w1.execute-api.us-east-1.amazonaws.com/{basePath}",
+        "url": "https://api.parity.dev.playdate.today/http/{basePath}",
         "variables": {
           "basePath": {
             "default": "ref"
           }
         }
+      }
+    ],
+    "tags": [
+      {
+        "name": "Project",
+        "x-amazon-apigateway-tag-value": "apigw-ref"
+      },
+      {
+        "name": "Environment",
+        "x-amazon-apigateway-tag-value": "dev"
+      },
+      {
+        "name": "Purpose",
+        "x-amazon-apigateway-tag-value": "apigw-parity-reference"
+      },
+      {
+        "name": "ManagedBy",
+        "x-amazon-apigateway-tag-value": "terraform"
       }
     ],
     "x-amazon-apigateway-cors": {

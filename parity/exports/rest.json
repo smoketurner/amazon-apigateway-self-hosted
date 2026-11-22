@@ -466,7 +466,7 @@
             "cacheKeyParameters": [
               "method.request.querystring.key"
             ],
-            "cacheNamespace": "44dwdz",
+            "cacheNamespace": "vvvtfb",
             "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
             "httpMethod": "POST",
             "passthroughBehavior": "when_no_match",
@@ -1104,14 +1104,350 @@
           },
           "x-amazon-apigateway-request-validator": "all"
         }
+      },
+      "/vtl/bigint": {
+        "post": {
+          "responses": {
+            "200": {
+              "content": {},
+              "description": "200 response"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "httpMethod": "POST",
+            "passthroughBehavior": "when_no_templates",
+            "requestTemplates": {
+              "application/json": "{\"body\":$input.json('$')}"
+            },
+            "responses": {
+              "default": {
+                "responseTemplates": {
+                  "application/json": "#set($a = 9223372036854775807)#set($b = $a + 1)$b #set($c = $a * $a)$c #if($b > $a)greater#end"
+                },
+                "statusCode": "200"
+              }
+            },
+            "type": "aws",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations"
+          }
+        }
+      },
+      "/vtl/deep-scan-functions": {
+        "post": {
+          "responses": {
+            "200": {
+              "content": {},
+              "description": "200 response"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "httpMethod": "POST",
+            "passthroughBehavior": "when_no_templates",
+            "requestTemplates": {
+              "application/json": "{\"body\":$input.json('$')}"
+            },
+            "responses": {
+              "default": {
+                "responseTemplates": {
+                  "application/json": "$input.json('$.body..price.length()') $input.json('$.body..price.sum()') $input.json('$.body..price.max()')"
+                },
+                "statusCode": "200"
+              }
+            },
+            "type": "aws",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations"
+          }
+        }
+      },
+      "/vtl/define": {
+        "post": {
+          "responses": {
+            "200": {
+              "content": {},
+              "description": "200 response"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "httpMethod": "POST",
+            "passthroughBehavior": "when_no_templates",
+            "requestTemplates": {
+              "application/json": "{\"body\":$input.json('$')}"
+            },
+            "responses": {
+              "default": {
+                "responseTemplates": {
+                  "application/json": "#define($block)x=$x#end#set($x = 1)$block #set($x = 2)$block"
+                },
+                "statusCode": "200"
+              }
+            },
+            "type": "aws",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations"
+          }
+        }
+      },
+      "/vtl/evaluate": {
+        "post": {
+          "responses": {
+            "200": {
+              "content": {},
+              "description": "200 response"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "httpMethod": "POST",
+            "passthroughBehavior": "when_no_templates",
+            "requestTemplates": {
+              "application/json": "{\"body\":$input.json('$')}"
+            },
+            "responses": {
+              "default": {
+                "responseTemplates": {
+                  "application/json": "#set($t = '#set($y = 3)$y')#evaluate($t) #evaluate('$input.path(\"$.body.name\")')"
+                },
+                "statusCode": "200"
+              }
+            },
+            "type": "aws",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations"
+          }
+        }
+      },
+      "/vtl/include": {
+        "post": {
+          "responses": {
+            "200": {
+              "content": {},
+              "description": "200 response"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "httpMethod": "POST",
+            "passthroughBehavior": "when_no_templates",
+            "requestTemplates": {
+              "application/json": "{\"body\":$input.json('$')}"
+            },
+            "responses": {
+              "default": {
+                "responseTemplates": {
+                  "application/json": "before #include('other.vm') after"
+                },
+                "statusCode": "200"
+              }
+            },
+            "type": "aws",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations"
+          }
+        }
+      },
+      "/vtl/input": {
+        "post": {
+          "responses": {
+            "200": {
+              "content": {},
+              "description": "200 response"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "httpMethod": "POST",
+            "passthroughBehavior": "when_no_templates",
+            "requestTemplates": {
+              "application/json": "{\"body\":$input.json('$')}"
+            },
+            "responses": {
+              "default": {
+                "responseTemplates": {
+                  "application/json": "$input.json('$.body') $input.path('$.body.name') $input.json('$.body.absent') [$input.path('$.body.absent')] $input.params('missing')"
+                },
+                "statusCode": "200"
+              }
+            },
+            "type": "aws",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations"
+          }
+        }
+      },
+      "/vtl/int-overflow": {
+        "post": {
+          "responses": {
+            "200": {
+              "content": {},
+              "description": "200 response"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "httpMethod": "POST",
+            "passthroughBehavior": "when_no_templates",
+            "requestTemplates": {
+              "application/json": "{\"body\":$input.json('$')}"
+            },
+            "responses": {
+              "default": {
+                "responseTemplates": {
+                  "application/json": "#set($i = 2147483647)#set($j = $i + 1)$j #set($k = $i * 2)$k"
+                },
+                "statusCode": "200"
+              }
+            },
+            "type": "aws",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations"
+          }
+        }
+      },
+      "/vtl/macro": {
+        "post": {
+          "responses": {
+            "200": {
+              "content": {},
+              "description": "200 response"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "httpMethod": "POST",
+            "passthroughBehavior": "when_no_templates",
+            "requestTemplates": {
+              "application/json": "{\"body\":$input.json('$')}"
+            },
+            "responses": {
+              "default": {
+                "responseTemplates": {
+                  "application/json": "#macro(greet $who)hello $who#end#greet('a') #greet($input.path('$.body.name'))"
+                },
+                "statusCode": "200"
+              }
+            },
+            "type": "aws",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations"
+          }
+        }
+      },
+      "/vtl/macro-scope": {
+        "post": {
+          "responses": {
+            "200": {
+              "content": {},
+              "description": "200 response"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "httpMethod": "POST",
+            "passthroughBehavior": "when_no_templates",
+            "requestTemplates": {
+              "application/json": "{\"body\":$input.json('$')}"
+            },
+            "responses": {
+              "default": {
+                "responseTemplates": {
+                  "application/json": "#set($x = 'outer')#macro(m $x)in=$x #set($y = 'set-in-macro')#end#m('arg')x=$x y=$y"
+                },
+                "statusCode": "200"
+              }
+            },
+            "type": "aws",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations"
+          }
+        }
+      },
+      "/vtl/map-keys": {
+        "post": {
+          "responses": {
+            "200": {
+              "content": {},
+              "description": "200 response"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "httpMethod": "POST",
+            "passthroughBehavior": "when_no_templates",
+            "requestTemplates": {
+              "application/json": "{\"body\":$input.json('$')}"
+            },
+            "responses": {
+              "default": {
+                "responseTemplates": {
+                  "application/json": "#set($m = {1: 'int', '1': 'string', true: 'bool'})$m $m.get(1) $m.get('1') $m.size()"
+                },
+                "statusCode": "200"
+              }
+            },
+            "type": "aws",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations"
+          }
+        }
+      },
+      "/vtl/parse": {
+        "post": {
+          "responses": {
+            "200": {
+              "content": {},
+              "description": "200 response"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "httpMethod": "POST",
+            "passthroughBehavior": "when_no_templates",
+            "requestTemplates": {
+              "application/json": "{\"body\":$input.json('$')}"
+            },
+            "responses": {
+              "default": {
+                "responseTemplates": {
+                  "application/json": "before #parse('other.vm') after"
+                },
+                "statusCode": "200"
+              }
+            },
+            "type": "aws",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations"
+          }
+        }
+      },
+      "/vtl/util": {
+        "post": {
+          "responses": {
+            "200": {
+              "content": {},
+              "description": "200 response"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "httpMethod": "POST",
+            "passthroughBehavior": "when_no_templates",
+            "requestTemplates": {
+              "application/json": "{\"body\":$input.json('$')}"
+            },
+            "responses": {
+              "default": {
+                "responseTemplates": {
+                  "application/json": "$util.escapeJavaScript(\"a'b\\\"c\") $util.urlEncode('a b&c=d') $util.urlDecode('a%20b') $util.base64Encode('hi') $util.base64Decode('aGk=') $util.parseJson('{\"a\":[1,2]}').a.size()"
+                },
+                "statusCode": "200"
+              }
+            },
+            "type": "aws",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations"
+          }
+        }
       }
     },
     "servers": [
       {
-        "url": "https://19zs0ofmuj.execute-api.us-east-1.amazonaws.com/{basePath}",
+        "url": "https://api.parity.dev.playdate.today/{basePath}",
         "variables": {
           "basePath": {
-            "default": "ref"
+            "default": "v1/orders"
           }
         }
       }

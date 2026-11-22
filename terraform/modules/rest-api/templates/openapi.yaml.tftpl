@@ -532,7 +532,7 @@ paths:
             responseTemplates:
               application/json: |-
                 $input.json('$.body..price.length()') $input.json('$.body..price.sum()') $input.json('$.body..price.max()')
-  /vtl/util:
+  /vtl/util-escape:
     post:
       responses:
         "200":
@@ -551,7 +551,67 @@ paths:
             statusCode: "200"
             responseTemplates:
               application/json: |-
-                $util.escapeJavaScript("a'b\"c") $util.urlEncode('a b&c=d') $util.urlDecode('a%20b') $util.base64Encode('hi') $util.base64Decode('aGk=') $util.parseJson('{"a":[1,2]}').a.size()
+                $util.escapeJavaScript('a"b') $util.escapeJavaScript("it's") $util.escapeJavaScript($input.json('$.body'))
+  /vtl/util-url:
+    post:
+      responses:
+        "200":
+          description: "the rendered template"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_templates
+        requestTemplates:
+          application/json: |-
+            {"body":$input.json('$')}
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                $util.urlEncode('a b&c=d/é') $util.urlDecode('a%20b%2Fc+d')
+  /vtl/util-base64:
+    post:
+      responses:
+        "200":
+          description: "the rendered template"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_templates
+        requestTemplates:
+          application/json: |-
+            {"body":$input.json('$')}
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                $util.base64Encode('hi there') $util.base64Decode('aGkgdGhlcmU=')
+  /vtl/util-parse-json:
+    post:
+      responses:
+        "200":
+          description: "the rendered template"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_templates
+        requestTemplates:
+          application/json: |-
+            {"body":$input.json('$')}
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                #set($o = $util.parseJson('{"a":[1,2],"b":{"c":true}}'))$o.a.size() $o.b.c $o.a.get(0)
   /vtl/input:
     post:
       responses:

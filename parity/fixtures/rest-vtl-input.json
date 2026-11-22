@@ -1,0 +1,16 @@
+{
+  "name": "rest-vtl-input",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-requestid": "[masked]",
+      "x-amzn-trace-id": "[masked]"
+    },
+    "body": "{\"name\":\"n\",\"store\":{\"books\":[{\"price\":1},{\"price\":2.5}],\"bike\":{\"price\":3}}} n \"\" [] "
+  }
+}
