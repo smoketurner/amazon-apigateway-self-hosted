@@ -955,6 +955,28 @@ mod tests {
         assert_eq!(malformed.status(), StatusCode::BAD_GATEWAY);
     }
 
+    /// Measured against a deployed REST API, for an integration host that does not
+    /// resolve.
+    #[tokio::test]
+    async fn an_api_configuration_error_is_an_internal_server_error() {
+        let ctx = request(ApiKind::Rest);
+        let failure = GatewayError::ApiConfiguration.failure(ApiKind::Rest);
+        assert_eq!(
+            failure.response_type(),
+            Some(ResponseType::ApiConfigurationError)
+        );
+        let response = GatewayResponses::default().render(&failure, &ctx);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response.headers()["x-amzn-errortype"],
+            "InternalServerErrorException"
+        );
+        assert_eq!(
+            body(response).await,
+            r#"{"message": "Internal server error"}"#
+        );
+    }
+
     #[test]
     fn throttled_requests_carry_the_too_many_requests_error_type() {
         assert_eq!(

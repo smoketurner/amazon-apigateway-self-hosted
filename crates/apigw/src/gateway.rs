@@ -258,6 +258,16 @@ impl From<LimitExceeded> for GatewayError {
 }
 
 impl GatewayError {
+    /// The integration host's name did not resolve. A deployed REST API calls that an
+    /// API configuration error; what an HTTP API answers is not measured, so it keeps
+    /// treating the integration as unreachable.
+    pub(crate) const fn unresolvable_host(kind: ApiKind) -> Self {
+        match kind {
+            ApiKind::Rest => Self::ApiConfiguration,
+            ApiKind::Http => Self::IntegrationUnreachable,
+        }
+    }
+
     pub(crate) fn failure(self, kind: ApiKind) -> Failure {
         match (self, kind) {
             (Self::NoRoute, ApiKind::Rest) => {
@@ -301,7 +311,15 @@ impl GatewayError {
             (Self::IntegrationTimeout, ApiKind::Http) => {
                 Failure::new(ResponseType::IntegrationTimeout).with_message("Service Unavailable")
             }
-            (Self::ApiConfiguration, _) => Failure::new(ResponseType::ApiConfigurationError),
+            // Measured against a deployed REST API: a 500 named
+            // `InternalServerErrorException`, not `ApiConfigurationException`.
+            (Self::ApiConfiguration, ApiKind::Rest) => {
+                Failure::new(ResponseType::ApiConfigurationError)
+                    .with_error_type("InternalServerErrorException")
+            }
+            (Self::ApiConfiguration, ApiKind::Http) => {
+                Failure::new(ResponseType::ApiConfigurationError)
+            }
             (Self::UnprocessablePayload, _) => Failure::new(ResponseType::Default4xx)
                 .with_message("Could not process payload")
                 .while_executing(),

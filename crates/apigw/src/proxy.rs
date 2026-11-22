@@ -205,7 +205,9 @@ impl HttpProxy {
             );
         }
         ctx.integration.transfer_mode = Some(self.transfer);
-        let (client, url) = self.client_for(client, route, url, &mut headers).await?;
+        let (client, url) = self
+            .client_for(client, route, ctx.api.kind, url, &mut headers)
+            .await?;
         let started = Instant::now();
         let result = client
             .request(method, url)
@@ -219,6 +221,10 @@ impl HttpProxy {
             Err(err) if err.is_timeout() => {
                 tracing::warn!(route = %route.key, "integration timed out");
                 return Err(GatewayError::IntegrationTimeout);
+            }
+            Err(err) if is_dns_failure(&err) => {
+                tracing::warn!(route = %route.key, err = %err, "integration host could not be resolved");
+                return Err(GatewayError::unresolvable_host(ctx.api.kind));
             }
             Err(err) => {
                 tracing::warn!(route = %route.key, err = %err, "integration request failed");
@@ -268,6 +274,7 @@ impl HttpProxy {
         &self,
         shared: &reqwest::Client,
         route: &Route,
+        kind: ApiKind,
         url: reqwest::Url,
         headers: &mut HeaderMap,
     ) -> Result<(reqwest::Client, reqwest::Url), GatewayError> {
@@ -283,7 +290,7 @@ impl HttpProxy {
             }
             Err(err @ TlsClientError::Resolve { .. }) => {
                 tracing::warn!(route = %route.key, %err, "integration host could not be resolved");
-                Err(GatewayError::IntegrationUnreachable)
+                Err(GatewayError::unresolvable_host(kind))
             }
             Err(err) => {
                 tracing::error!(route = %route.key, %err, "invalid integration tlsConfig");
@@ -628,6 +635,19 @@ impl UrlEncoder<'_> {
             }
         }
     }
+}
+
+/// Whether the integration host's name did not resolve. hyper-util reports it as a
+/// connect error whose message is `dns error`; the type itself is private.
+fn is_dns_failure(err: &reqwest::Error) -> bool {
+    let mut source = std::error::Error::source(err);
+    while let Some(cause) = source {
+        if cause.to_string() == "dns error" {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
 }
 
 #[cfg(test)]
@@ -1451,6 +1471,19 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error, GatewayError::ApiConfiguration);
+        // A REST API calls a host that does not resolve a configuration error.
+        let error = send(
+            proxy("http://apigw-test.invalid/"),
+            "/x",
+            incoming(&[], None),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, GatewayError::ApiConfiguration);
+        assert_eq!(
+            GatewayError::unresolvable_host(ApiKind::Http),
+            GatewayError::IntegrationUnreachable
+        );
     }
 
     proptest! {
