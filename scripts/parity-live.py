@@ -82,7 +82,7 @@ def cases(run):
         (
             "subtype-stepfunctions-stop",
             "POST",
-            "/subtype/stepfunctions-stop?execution=arn:aws:states:us-east-1:000000000000:execution:absent:absent",
+            "/subtype/stepfunctions-stop?execution=absent",
             "{}",
         ),
         ("subtype-appconfig", "POST", "/subtype/appconfig", "{}"),

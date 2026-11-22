@@ -29,3 +29,9 @@ variable "assumable_role_arns" {
   type        = list(string)
   default     = []
 }
+
+variable "log_group_arns" {
+  description = "Log groups apigw writes the stage's access and execution logs to."
+  type        = list(string)
+  default     = []
+}

@@ -190,7 +190,7 @@ paths:
         credentials: "${invoke_role_arn}"
         payloadFormatVersion: "1.0"
         requestParameters:
-          ExecutionArn: "$request.querystring.execution"
+          ExecutionArn: "${execution_prefix}:$${request.querystring.execution}"
           Cause: "parity"
   /subtype/appconfig:
     post:

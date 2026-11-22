@@ -129,6 +129,7 @@ module "gateway_policy" {
   stage_name           = var.stage_name
   lambda_function_arns = local.lambda_function_arns
   assumable_role_arns  = [module.integration_role.role_arn]
+  log_group_arns       = module.rest_api.log_group_arns
 }
 
 # A public-subnet VPC for the ECS gateway, unless subnets are passed in.
@@ -170,6 +171,7 @@ module "gateway_policy_http" {
   stage_name           = var.stage_name
   lambda_function_arns = local.lambda_function_arns
   assumable_role_arns  = [module.integration_role.role_arn]
+  log_group_arns       = module.http_api.log_group_arns
 }
 
 # apigw as a Lambda function behind a function URL, mirroring the same API.

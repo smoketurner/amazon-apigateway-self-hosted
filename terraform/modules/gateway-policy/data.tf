@@ -20,6 +20,17 @@ data "aws_iam_policy_document" "gateway" {
     }
   }
 
+  # docs/deployment.md, "AWS permissions": access and execution logs.
+  dynamic "statement" {
+    for_each = length(var.log_group_arns) > 0 ? [1] : []
+
+    content {
+      sid       = "WriteLogs"
+      actions   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+      resources = concat(var.log_group_arns, [for arn in var.log_group_arns : "${arn}:*"])
+    }
+  }
+
   dynamic "statement" {
     for_each = length(var.assumable_role_arns) > 0 ? [1] : []
 

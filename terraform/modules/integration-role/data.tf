@@ -61,7 +61,7 @@ data "aws_iam_policy_document" "invoke" {
 
   statement {
     actions   = ["appconfig:GetConfiguration"]
-    resources = ["${var.appconfig_application_arn}/*"]
+    resources = [var.appconfig_application_arn, "${var.appconfig_application_arn}/*"]
   }
 
   statement {

@@ -11,6 +11,7 @@ locals {
     queue_url                 = var.queue_url
     event_bus_name            = var.event_bus_name
     state_machine_arn         = var.state_machine_arn
+    execution_prefix          = replace(var.state_machine_arn, ":stateMachine:", ":execution:")
     stream_name               = var.stream_name
     empty_queue_url           = var.empty_queue_url
     appconfig_application     = var.appconfig_application
