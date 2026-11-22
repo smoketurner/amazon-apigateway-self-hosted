@@ -19,6 +19,7 @@ import urllib.request
 MASKS = [
     (re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"), "<uuid>"),
     (re.compile(r"Root=1-[0-9a-f]{8}-[0-9a-f]{24}"), "Root=<trace>"),
+    (re.compile(r"\b\d\.\d+E\d+\b"), "<number>"),
     (re.compile(r"\b\d{10,}(\.\d+)?\b"), "<number>"),
     (re.compile(r"\d{4}-\d{2}-\d{2}T[\d:.]+Z?"), "<time>"),
     (re.compile(r"(<RequestId>)[^<]+"), r"\1<id>"),
