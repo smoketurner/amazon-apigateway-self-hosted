@@ -26,10 +26,15 @@ data "aws_iam_policy_document" "gateway_domain" {
     ])
   }
 
+  # apigw tells a REST from an HTTP API by GetRestApi on every mapped API,
+  # which answers not found for an HTTP API.
   statement {
-    sid       = "ReadMappedRestApi"
-    actions   = ["apigateway:GET"]
-    resources = ["arn:${local.partition}:apigateway:${local.region}::/restapis/${module.rest_api.api_id}"]
+    sid     = "ReadMappedApis"
+    actions = ["apigateway:GET"]
+    resources = [
+      for id in [module.rest_api.api_id, module.http_api.api_id] :
+      "arn:${local.partition}:apigateway:${local.region}::/restapis/${id}"
+    ]
   }
 
   statement {
