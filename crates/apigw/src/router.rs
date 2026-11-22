@@ -938,22 +938,29 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn http_api_cors_preflight_is_answered_without_the_integration() {
+    async fn http_api_cors_preflight_reaches_a_route_that_takes_options() {
         let (http, _) = router_with(&cors_doc(), ApiKind::Http, STRICT, "");
         let preflight = [
             ("origin", "https://app.example"),
             ("access-control-request-method", "GET"),
         ];
-        // A route with its own OPTIONS integration still gets the gateway's answer.
-        for path in ["/pets", "/opts", "/nowhere"] {
+        // Measured: a route that takes OPTIONS answers the preflight through its
+        // integration, and the gateway adds the preflight headers; with no such
+        // route, the gateway answers it.
+        for (path, status) in [
+            ("/opts", StatusCode::IM_A_TEAPOT),
+            ("/pets", StatusCode::NO_CONTENT),
+            ("/nowhere", StatusCode::NO_CONTENT),
+        ] {
             let reply = call_with(&http, Method::OPTIONS, path, &preflight).await;
-            assert_eq!(reply.status(), StatusCode::NO_CONTENT, "{path}");
+            assert_eq!(reply.status(), status, "{path}");
             assert_eq!(
                 reply.headers()["access-control-allow-origin"],
                 "https://app.example"
             );
-            assert_eq!(reply.headers()["access-control-allow-methods"], "GET, POST");
+            assert_eq!(reply.headers()["access-control-allow-methods"], "GET,POST");
             assert_eq!(reply.headers()["access-control-max-age"], "300");
+            assert!(reply.headers().get("vary").is_none());
         }
         let blocked = call_with(
             &http,

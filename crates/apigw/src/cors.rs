@@ -1,6 +1,6 @@
-//! HTTP API CORS: the gateway answers preflight requests itself and adds the
-//! configured headers to other responses, ignoring CORS headers from the
-//! backend. See
+//! HTTP API CORS: the configured headers are added to the response of a route,
+//! preflights included, in place of any CORS headers from the backend; the gateway
+//! answers a preflight itself only when no route matches it. See
 //! <https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-cors.html>.
 
 use axum::body::Body;
@@ -108,49 +108,57 @@ impl Cors {
         }
     }
 
-    fn vary_origin(response: &mut Response) {
-        response
-            .headers_mut()
-            .append(header::VARY, HeaderValue::from_static("Origin"));
+    /// Whether `requested` (an `Access-Control-Request-Method`) is an allowed method.
+    fn allows_method(&self, requested: &str) -> bool {
+        self.methods
+            .iter()
+            .any(|method| method == "*" || method.eq_ignore_ascii_case(requested))
     }
 
-    /// The gateway's answer to a preflight, given without calling the
-    /// integration. An origin the API does not allow gets no CORS headers, so
-    /// the browser blocks the request.
-    pub(crate) fn preflight(&self, ctx: &RequestContext) -> Response {
-        let mut response = Response::new(Body::empty());
-        *response.status_mut() = StatusCode::NO_CONTENT;
+    /// The headers a preflight gets when both its origin and its requested method are
+    /// allowed; otherwise none, so the browser blocks the request. Lists are joined
+    /// with `,` and no `Vary` is sent (measured against a deployed HTTP API).
+    fn add_preflight_headers(&self, ctx: &RequestContext, response: &mut Response) {
         let Some(allowed) = ctx
             .header_str("origin")
             .and_then(|o| self.allowed_origin(o))
         else {
-            return response;
+            return;
         };
-        if allowed != "*" {
-            Self::vary_origin(&mut response);
+        if !ctx
+            .header_str(REQUEST_METHOD)
+            .is_some_and(|method| self.allows_method(method))
+        {
+            return;
         }
-        Self::insert(&mut response, &ALLOW_ORIGIN, &allowed);
+        Self::insert(response, &ALLOW_ORIGIN, &allowed);
         if self.credentials {
-            Self::insert(&mut response, &ALLOW_CREDENTIALS, "true");
+            Self::insert(response, &ALLOW_CREDENTIALS, "true");
         }
         if !self.methods.is_empty() {
-            Self::insert(&mut response, &ALLOW_METHODS, &self.methods.join(", "));
+            Self::insert(response, &ALLOW_METHODS, &self.methods.join(","));
         }
         if !self.headers.is_empty() {
-            Self::insert(&mut response, &ALLOW_HEADERS, &self.headers.join(", "));
+            Self::insert(response, &ALLOW_HEADERS, &self.headers.join(","));
         }
         if let Some(seconds) = self.max_age {
-            Self::insert(&mut response, &MAX_AGE, &seconds.to_string());
+            Self::insert(response, &MAX_AGE, &seconds.to_string());
         }
+    }
+
+    /// The gateway's answer to a preflight that no route matches, given without
+    /// calling an integration.
+    pub(crate) fn preflight(&self, ctx: &RequestContext) -> Response {
+        let mut response = Response::new(Body::empty());
+        *response.status_mut() = StatusCode::NO_CONTENT;
+        self.add_preflight_headers(ctx, &mut response);
         response
     }
 
-    /// Replaces any CORS headers on `response` (the backend's are ignored)
-    /// with the configured ones when the request's origin is allowed.
+    /// Replaces any CORS headers on a route's `response` (the backend's are
+    /// ignored) with the configured ones. A deployed HTTP API sends a preflight that
+    /// matches a route to its integration and adds the preflight headers to the answer.
     pub(crate) fn decorate(&self, ctx: &RequestContext, response: &mut Response) {
-        if Self::is_preflight(ctx) {
-            return;
-        }
         let stale: Vec<HeaderName> = response
             .headers()
             .keys()
@@ -160,21 +168,22 @@ impl Cors {
         for name in stale {
             response.headers_mut().remove(name);
         }
+        if Self::is_preflight(ctx) {
+            self.add_preflight_headers(ctx, response);
+            return;
+        }
         let Some(origin) = ctx.header_str("origin") else {
             return;
         };
         let Some(allowed) = self.allowed_origin(origin) else {
             return;
         };
-        if allowed != "*" {
-            Self::vary_origin(response);
-        }
         Self::insert(response, &ALLOW_ORIGIN, &allowed);
         if self.credentials {
             Self::insert(response, &ALLOW_CREDENTIALS, "true");
         }
         if !self.expose_headers.is_empty() {
-            Self::insert(response, &EXPOSE_HEADERS, &self.expose_headers.join(", "));
+            Self::insert(response, &EXPOSE_HEADERS, &self.expose_headers.join(","));
         }
     }
 }
@@ -239,11 +248,47 @@ mod tests {
             headers["access-control-allow-origin"],
             "https://app.example"
         );
-        assert_eq!(headers["access-control-allow-methods"], "GET, POST");
+        assert_eq!(headers["access-control-allow-methods"], "GET,POST");
         assert_eq!(headers["access-control-allow-headers"], "authorization");
         assert_eq!(headers["access-control-max-age"], "300");
-        assert_eq!(headers["vary"], "Origin");
+        assert!(headers.get("vary").is_none());
         assert!(headers.get("access-control-allow-credentials").is_none());
+    }
+
+    #[test]
+    fn a_routed_preflight_gets_the_headers_on_the_integration_response() {
+        let cors = Cors::compile(&config(&["https://app.example"]));
+        let mut response = Response::new(Body::from("from the integration"));
+        response
+            .headers_mut()
+            .insert(EXPOSE_HEADERS, HeaderValue::from_static("x-backend"));
+        cors.decorate(
+            &from("https://app.example", Method::OPTIONS, true),
+            &mut response,
+        );
+        let headers = response.headers();
+        assert_eq!(
+            headers["access-control-allow-origin"],
+            "https://app.example"
+        );
+        assert_eq!(headers["access-control-allow-methods"], "GET,POST");
+        assert_eq!(headers["access-control-max-age"], "300");
+        assert!(headers.get("access-control-expose-headers").is_none());
+    }
+
+    #[test]
+    fn a_preflight_for_a_method_not_allowed_gets_no_cors_headers() {
+        let cors = Cors::compile(&config(&["https://app.example"]));
+        let mut ctx = from("https://app.example", Method::OPTIONS, true);
+        ctx.headers
+            .insert(REQUEST_METHOD, HeaderValue::from_static("DELETE"));
+        assert!(cors.preflight(&ctx).headers().is_empty());
+        let mut response = Response::new(Body::empty());
+        cors.decorate(&ctx, &mut response);
+        assert!(response.headers().is_empty());
+        ctx.headers
+            .insert(REQUEST_METHOD, HeaderValue::from_static("post"));
+        assert!(!cors.preflight(&ctx).headers().is_empty());
     }
 
     #[test]
@@ -252,7 +297,6 @@ mod tests {
         let ctx = from("https://x.example", Method::OPTIONS, true);
         let response = Cors::compile(&config).preflight(&ctx);
         assert_eq!(response.headers()["access-control-allow-origin"], "*");
-        assert!(response.headers().get("vary").is_none());
         config.allow_credentials = true;
         let response = Cors::compile(&config).preflight(&ctx);
         assert_eq!(

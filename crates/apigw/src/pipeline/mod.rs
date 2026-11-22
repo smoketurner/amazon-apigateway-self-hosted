@@ -21,7 +21,6 @@ pub(crate) use context::{ApiKeyIdentity, RequestContext};
 
 use crate::authz::{AuthRequest, Denial};
 use crate::cache::CacheOutcome;
-use crate::cors::Cors;
 use crate::digest::Sha256Digest;
 use crate::gateway::{ApiContext, AuthorizationMode, GatewayError, MAX_BODY_BYTES};
 use crate::gateway_response::Failure;
@@ -110,11 +109,6 @@ impl<'a> Pipeline<'a> {
         };
         if let Err(failure) = self.api_key(ctx, authorizer_key).await {
             return self.fail(ctx, &failure);
-        }
-        if let Some(ref cors) = self.api.cors
-            && Cors::is_preflight(ctx)
-        {
-            return cors.preflight(ctx);
         }
         match self.receive(body).await {
             Ok(body) => ctx.body = body,
