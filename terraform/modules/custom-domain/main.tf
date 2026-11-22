@@ -3,6 +3,14 @@ resource "aws_acm_certificate" "this" {
   subject_alternative_names = [local.mtls_domain]
   validation_method         = "DNS"
 
+  # ACM bills each exportable certificate it issues, renewals included.
+  dynamic "options" {
+    for_each = var.exportable_certificate ? [true] : []
+    content {
+      export = "ENABLED"
+    }
+  }
+
   lifecycle {
     create_before_destroy = true
   }

@@ -42,18 +42,20 @@ locals {
   apis = merge(
     {
       apigw = {
-        kind       = var.api_kind
-        id         = var.api_id
-        api_port   = local.api_port
-        admin_port = local.admin_port
+        kind               = var.api_kind
+        id                 = var.api_id
+        api_port           = local.api_port
+        admin_port         = local.admin_port
+        domain_cert_source = "files"
       }
     },
     {
       for name, api in var.additional_apis : "apigw-${name}" => {
-        kind       = api.kind
-        id         = api.id
-        api_port   = api.api_port
-        admin_port = api.admin_port
+        kind               = api.kind
+        id                 = api.id
+        api_port           = api.api_port
+        admin_port         = api.admin_port
+        domain_cert_source = api.domain_cert_source
       }
     },
   )
@@ -78,6 +80,7 @@ locals {
       environment = concat(
         api.kind == "domain" ? [
           { name = "APIGW_DOMAIN_NAMES", value = api.id },
+          { name = "APIGW_DOMAIN_CERT_SOURCE", value = api.domain_cert_source },
           ] : [
           { name = api.kind == "rest" ? "APIGW_REST_API_ID" : "APIGW_HTTP_API_ID", value = api.id },
           { name = "APIGW_STAGE", value = var.stage_name },

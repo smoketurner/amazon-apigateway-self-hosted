@@ -57,12 +57,19 @@ variable "additional_apis" {
     api_port            = number
     admin_port          = number
     gateway_policy_json = string
+    # For a domain kind: files (the task's certificate) or acm.
+    domain_cert_source = optional(string, "files")
   }))
   default = {}
 
   validation {
     condition     = alltrue([for api in values(var.additional_apis) : contains(["rest", "http", "domain"], api.kind)])
     error_message = "Each additional API's kind must be rest, http, or domain."
+  }
+
+  validation {
+    condition     = alltrue([for api in values(var.additional_apis) : contains(["files", "acm"], api.domain_cert_source)])
+    error_message = "Each additional API's domain_cert_source must be files or acm."
   }
 }
 

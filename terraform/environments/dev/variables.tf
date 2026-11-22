@@ -52,6 +52,12 @@ variable "custom_domain_zone" {
   default     = null
 }
 
+variable "custom_domain_export_certificate" {
+  description = "Request the custom domains' certificate as an ACM exportable certificate and have the ECS domain gateway serve it (--domain-cert-source acm) instead of the task's own. ACM bills each exportable certificate it issues; changing this replaces the certificate."
+  type        = bool
+  default     = false
+}
+
 variable "enable_vpc_link" {
   description = "Add a VPC-link route to the REST API, backed by an internal NLB. The NLB bills hourly."
   type        = bool

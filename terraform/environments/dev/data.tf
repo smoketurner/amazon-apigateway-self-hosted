@@ -37,6 +37,15 @@ data "aws_iam_policy_document" "gateway_domain" {
     ]
   }
 
+  dynamic "statement" {
+    for_each = var.custom_domain_export_certificate ? [true] : []
+    content {
+      sid       = "ExportDomainCertificate"
+      actions   = ["acm:DescribeCertificate", "acm:ExportCertificate"]
+      resources = [module.custom_domain[0].certificate_arn]
+    }
+  }
+
   statement {
     sid       = "ReadTruststore"
     actions   = ["s3:GetObject", "s3:GetObjectVersion"]
