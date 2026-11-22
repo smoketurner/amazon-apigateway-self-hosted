@@ -201,7 +201,8 @@ terraform apply                       # creates the repository and the role
 repo="$(terraform output -json lambda_gateway | jq -r .repository_url)"
 aws ecr get-login-password | docker login --username AWS --password-stdin "${repo%%/*}"
 docker build --platform linux/arm64 -t apigw:local ../../..
-docker build --platform linux/arm64 --build-arg APIGW_IMAGE=apigw:local \
+# Lambda refuses an image index; without provenance the push is a single manifest.
+docker build --provenance=false --platform linux/arm64 --build-arg APIGW_IMAGE=apigw:local \
   -t "$repo:dev" ../../modules/lambda-gateway/image
 docker push "$repo:dev"
 # terraform.tfvars: lambda_gateway_image_tag = "dev"
