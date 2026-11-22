@@ -243,6 +243,24 @@
           }
         ]
       },
+      "/lambda-timeout": {
+        "get": {
+          "responses": {
+            "default": {
+              "description": "Default response for GET /lambda-timeout"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "connectionType": "INTERNET",
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "httpMethod": "POST",
+            "payloadFormatVersion": "2.0",
+            "timeoutInMillis": 50,
+            "type": "aws_proxy",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations"
+          }
+        }
+      },
       "/lambda-v1/{proxy+}": {
         "parameters": [
           {
@@ -339,6 +357,89 @@
           }
         ]
       },
+      "/subtype/eventbridge": {
+        "post": {
+          "responses": {
+            "default": {
+              "description": "Default response for POST /subtype/eventbridge"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "connectionType": "INTERNET",
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "integrationSubtype": "EventBridge-PutEvents",
+            "payloadFormatVersion": "1.0",
+            "requestParameters": {
+              "Detail": "$request.body",
+              "DetailType": "parity",
+              "EventBusName": "apigw-ref-target",
+              "Source": "apigw.reference"
+            },
+            "type": "aws_proxy"
+          }
+        }
+      },
+      "/subtype/kinesis": {
+        "post": {
+          "responses": {
+            "default": {
+              "description": "Default response for POST /subtype/kinesis"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "connectionType": "INTERNET",
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "integrationSubtype": "Kinesis-PutRecord",
+            "payloadFormatVersion": "1.0",
+            "requestParameters": {
+              "Data": "$request.body",
+              "PartitionKey": "parity",
+              "StreamName": "apigw-ref-target"
+            },
+            "type": "aws_proxy"
+          }
+        }
+      },
+      "/subtype/sqs": {
+        "post": {
+          "responses": {
+            "default": {
+              "description": "Default response for POST /subtype/sqs"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "connectionType": "INTERNET",
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "integrationSubtype": "SQS-SendMessage",
+            "payloadFormatVersion": "1.0",
+            "requestParameters": {
+              "MessageBody": "$request.body",
+              "QueueUrl": "https://sqs.us-east-1.amazonaws.com/[account-id]/apigw-ref-target"
+            },
+            "type": "aws_proxy"
+          }
+        }
+      },
+      "/subtype/stepfunctions": {
+        "post": {
+          "responses": {
+            "default": {
+              "description": "Default response for POST /subtype/stepfunctions"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "connectionType": "INTERNET",
+            "credentials": "arn:aws:iam::[account-id]:role/apigw-ref-apigateway-invoke",
+            "integrationSubtype": "StepFunctions-StartSyncExecution",
+            "payloadFormatVersion": "1.0",
+            "requestParameters": {
+              "Input": "$request.body",
+              "StateMachineArn": "arn:aws:states:us-east-1:[account-id]:stateMachine:apigw-ref-target"
+            },
+            "type": "aws_proxy"
+          }
+        }
+      },
       "/throttled": {
         "get": {
           "responses": {
@@ -353,6 +454,26 @@
             "payloadFormatVersion": "2.0",
             "type": "aws_proxy",
             "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:[account-id]:function:apigw-ref-echo/invocations"
+          }
+        }
+      },
+      "/timeout": {
+        "get": {
+          "responses": {
+            "default": {
+              "description": "Default response for GET /timeout"
+            }
+          },
+          "x-amazon-apigateway-integration": {
+            "connectionType": "INTERNET",
+            "httpMethod": "GET",
+            "payloadFormatVersion": "1.0",
+            "requestParameters": {
+              "overwrite:header.x-echo-secret": "[redacted]"
+            },
+            "timeoutInMillis": 50,
+            "type": "http_proxy",
+            "uri": "https://${stageVariables.echo_host}/timeout"
           }
         }
       }

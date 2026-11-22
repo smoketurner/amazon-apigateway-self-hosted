@@ -267,7 +267,6 @@ cases:
     api: http
     path: /authz/lambda-simple
     headers: {x-auth: error}
-    unrecorded: true
     compare:
       headers: [content-type]
 
@@ -275,7 +274,6 @@ cases:
     api: http
     path: /timeout
     query: {echo_sleep_ms: "1000"}
-    unrecorded: true
     compare:
       headers: [content-type]
 
@@ -283,6 +281,5 @@ cases:
     api: http
     path: /lambda-timeout
     query: {echo_sleep_ms: "1000"}
-    unrecorded: true
     compare:
       headers: [content-type]

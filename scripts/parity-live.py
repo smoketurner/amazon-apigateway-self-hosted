@@ -22,6 +22,7 @@ MASKS = [
     (re.compile(r"\b\d{10,}(\.\d+)?\b"), "<number>"),
     (re.compile(r"\d{4}-\d{2}-\d{2}T[\d:.]+Z?"), "<time>"),
     (re.compile(r"(<RequestId>)[^<]+"), r"\1<id>"),
+    (re.compile(r"(<HostId>)[^<]+"), r"\1<id>"),
     (re.compile(r'("x-amz-request-id"|"RequestId")\s*:\s*"[^"]*"'), r'\1:"<id>"'),
 ]
 

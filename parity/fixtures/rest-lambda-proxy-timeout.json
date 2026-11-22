@@ -1,0 +1,17 @@
+{
+  "name": "rest-lambda-proxy-timeout",
+  "source": "recorded",
+  "api": "rest",
+  "response": {
+    "status": 504,
+    "headers": {
+      "content-type": "application/json",
+      "date": "[masked]",
+      "x-amz-apigw-id": "[masked]",
+      "x-amzn-errortype": "InternalServerErrorException",
+      "x-amzn-requestid": "[masked]",
+      "x-reference-gateway-response": "default-5xx"
+    },
+    "body": "{\"message\": \"Endpoint request timed out\",\"type\":\"INTEGRATION_TIMEOUT\"}"
+  }
+}
