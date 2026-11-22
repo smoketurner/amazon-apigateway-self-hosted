@@ -16,11 +16,13 @@ use crate::identity::{TrustedProxies, TrustedProxy};
 use crate::listener::{DomainCert, Edge, ProxyProtocol};
 use crate::model::ApiKind;
 use crate::observability::{
-    Delivery, LogGroup, MetricsNamespace, MetricsSettings, Settings, StreamName, TraceDelivery,
+    Delivery, LogGroup, MetricsDestination, MetricsNamespace, MetricsSettings, Settings,
+    StreamName, TraceDelivery,
 };
 use crate::router::BasePath;
 use crate::source::Source;
 use crate::state::ValkeyUrl;
+use crate::telemetry::{OtelSettings, SettingsError};
 use crate::vpc_link::{VpcLinkTarget, VpcLinks};
 
 const STAGE_VARIABLE_ENV_PREFIX: &str = "APIGW_STAGE_VARIABLE_";
@@ -30,6 +32,10 @@ const STAGE_VARIABLE_ENV_PREFIX: &str = "APIGW_STAGE_VARIABLE_";
 #[derive(Debug, Parser)]
 #[command(version, about)]
 #[command(group(ArgGroup::new("api").required(true).args(["rest_api_id", "http_api_id", "openapi_file", "domain_names"])))]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is an independent command-line switch"
+)]
 pub(crate) struct Config {
     /// REST API (v1) to mirror. Requires --stage.
     #[arg(long, env = "APIGW_REST_API_ID", requires = "stage")]
@@ -232,7 +238,7 @@ pub(crate) struct Config {
     )]
     pub(crate) allowed_hosts: Vec<String>,
 
-    /// Address for `/healthz` and `/routes`. Disabled when unset.
+    /// Address for `/healthz`, `/routes`, and `/metrics`. Disabled when unset.
     #[arg(long, env = "APIGW_ADMIN_LISTEN")]
     pub(crate) admin_listen: Option<SocketAddr>,
 
@@ -263,8 +269,14 @@ pub(crate) struct Config {
     #[arg(long, env = "APIGW_EXECUTION_LOGS", value_enum, default_value_t = Delivery::Aws)]
     pub(crate) execution_logs: Delivery,
 
+    /// Where API Gateway's CloudWatch metrics go, as embedded metric format
+    /// events: `aws` writes to `--metrics-log-group` (none when it is unset),
+    /// `stdout` writes one event per line to standard output, `off` writes none.
+    #[arg(long, env = "APIGW_METRICS", value_enum, default_value_t = Delivery::Aws)]
+    pub(crate) metrics: Delivery,
+
     /// CloudWatch Logs log group that receives metrics as embedded metric
-    /// format events. Metrics are not published when unset. The group must exist.
+    /// format events with `--metrics aws`. The group must exist.
     #[arg(long, env = "APIGW_METRICS_LOG_GROUP")]
     pub(crate) metrics_log_group: Option<String>,
 
@@ -274,14 +286,34 @@ pub(crate) struct Config {
 
     /// What stage tracing does: `aws` sends X-Ray segments for stages with
     /// tracing enabled and propagates `X-Amzn-Trace-Id` and `traceparent` to
-    /// integrations; `off` does neither.
+    /// integrations; `stdout` writes the segments to standard output instead;
+    /// `off` does neither.
     #[arg(long, env = "APIGW_TRACING", value_enum, default_value_t = TraceDelivery::Aws)]
     pub(crate) tracing: TraceDelivery,
 
     /// Percentage of requests X-Ray traces after the first request each second,
-    /// when the caller made no sampling decision (X-Ray's default rule is 5).
+    /// when the caller made no sampling decision and no X-Ray sampling rule
+    /// applies (X-Ray's default rule is 5).
     #[arg(long, env = "APIGW_XRAY_SAMPLING_PERCENT", default_value_t = 5, value_parser = clap::value_parser!(u8).range(..=100))]
     pub(crate) xray_sampling_percent: u8,
+
+    /// With `--tracing aws`, read the account's X-Ray sampling rules and
+    /// reservoir quotas (`GetSamplingRules`, `GetSamplingTargets`) instead of
+    /// applying only the default rule.
+    #[arg(long, env = "APIGW_XRAY_SAMPLING_RULES", default_value_t = true, action = clap::ArgAction::Set)]
+    pub(crate) xray_sampling_rules: bool,
+
+    /// X-Ray passive mode: on stages without tracing enabled, trace requests
+    /// whose caller sampled them (`Sampled=1`), and start no traces.
+    #[arg(long, env = "APIGW_XRAY_PASSIVE")]
+    pub(crate) xray_passive: bool,
+
+    /// Export metrics and request spans with OpenTelemetry, configured with the
+    /// standard `OTEL_*` environment variables (`OTEL_EXPORTER_OTLP_ENDPOINT`,
+    /// `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_TRACES_EXPORTER`, ...). Prometheus
+    /// metrics on the admin listener need no flag.
+    #[arg(long, env = "APIGW_OTEL")]
+    pub(crate) otel: bool,
 
     /// Log stream this process writes to in each CloudWatch Logs log group.
     /// Defaults to `{HOSTNAME}/{start time}/{random suffix}`, unique per process.
@@ -372,20 +404,44 @@ impl Config {
             access_logs: self.access_logs,
             execution_logs: self.execution_logs,
             metrics: self
-                .metrics_log_group
-                .as_deref()
-                .map(|group| MetricsSettings {
-                    group: LogGroup::new(group),
+                .metrics_destination()
+                .map(|destination| MetricsSettings {
+                    destination,
                     namespace: self.metrics_namespace.clone(),
                 }),
             tracing: self.tracing,
             sampling_percent: self.xray_sampling_percent,
+            sampling_rules: self.xray_sampling_rules,
+            passive: self.xray_passive,
             stream: StreamName::for_pod(
                 self.log_stream.as_deref(),
                 hostname,
                 jiff::Timestamp::now(),
                 uuid::Uuid::now_v7(),
             ),
+        }
+    }
+
+    /// What `--otel` and the `OTEL_*` variables in `env` ask for.
+    ///
+    /// # Errors
+    ///
+    /// When a variable names an exporter or protocol that is not supported.
+    pub(crate) fn otel(
+        &self,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<OtelSettings, SettingsError> {
+        OtelSettings::from_env(self.otel, env)
+    }
+
+    fn metrics_destination(&self) -> Option<MetricsDestination> {
+        match self.metrics {
+            Delivery::Aws => self
+                .metrics_log_group
+                .as_deref()
+                .map(|group| MetricsDestination::LogGroup(LogGroup::new(group))),
+            Delivery::Stdout => Some(MetricsDestination::Stdout),
+            Delivery::Off => None,
         }
     }
 
@@ -441,11 +497,67 @@ impl Config {
 #[expect(clippy::unwrap_used, reason = "tests assert on known-good fixtures")]
 mod tests {
     use super::*;
+    use crate::telemetry::TracesExporter;
 
     const TLS: [&str; 4] = ["--tls-cert", "c.pem", "--tls-key", "k.pem"];
 
     fn parse(args: &[&str]) -> Result<Config, clap::Error> {
         Config::try_parse_from(std::iter::once(&"apigw").chain(args).chain(TLS.iter()))
+    }
+
+    #[test]
+    fn embedded_metric_format_events_go_to_the_log_group_or_stdout() {
+        let destination = |args: &[&str]| {
+            let mut all = vec!["--openapi-file", "a.json"];
+            all.extend_from_slice(args);
+            parse(&all).unwrap().metrics_destination()
+        };
+        assert_eq!(destination(&[]), None, "no log group, no metrics");
+        assert_eq!(
+            destination(&["--metrics-log-group", "g"]),
+            Some(MetricsDestination::LogGroup(LogGroup::new("g")))
+        );
+        assert_eq!(
+            destination(&["--metrics", "stdout"]),
+            Some(MetricsDestination::Stdout)
+        );
+        assert_eq!(
+            destination(&["--metrics", "stdout", "--metrics-log-group", "g"]),
+            Some(MetricsDestination::Stdout)
+        );
+        assert_eq!(
+            destination(&["--metrics", "off", "--metrics-log-group", "g"]),
+            None
+        );
+        let tracing = parse(&["--openapi-file", "a.json", "--tracing", "stdout"]).unwrap();
+        assert_eq!(tracing.tracing, TraceDelivery::Stdout);
+    }
+
+    #[test]
+    fn sampling_rules_are_read_unless_turned_off_and_passive_mode_is_opt_in() {
+        let settings = |args: &[&str]| {
+            let mut all = vec!["--openapi-file", "a.json"];
+            all.extend_from_slice(args);
+            parse(&all).unwrap().observability(None)
+        };
+        let default = settings(&[]);
+        assert!(default.sampling_rules);
+        assert!(!default.passive);
+        let tuned = settings(&["--xray-sampling-rules", "false", "--xray-passive"]);
+        assert!(!tuned.sampling_rules);
+        assert!(tuned.passive);
+    }
+
+    #[test]
+    fn opentelemetry_export_is_opt_in() {
+        let env = |name: &str| (name == "OTEL_TRACES_EXPORTER").then(|| "console".to_owned());
+        let off = parse(&["--openapi-file", "a.json"]).unwrap();
+        assert!(!off.otel(env).unwrap().enabled);
+        let on = parse(&["--openapi-file", "a.json", "--otel"]).unwrap();
+        let settings = on.otel(env).unwrap();
+        assert!(settings.enabled);
+        assert_eq!(settings.traces, TracesExporter::Console);
+        assert!(on.otel(|_| Some("bogus".to_owned())).is_err());
     }
 
     #[test]

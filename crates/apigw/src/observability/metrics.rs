@@ -101,6 +101,8 @@ pub(crate) struct RequestMetrics {
     pub(crate) status: u16,
     pub(crate) latency_ms: u64,
     pub(crate) integration_latency_ms: Option<u64>,
+    /// Request and response bytes of known length.
+    pub(crate) data_processed: u64,
 }
 
 /// A uniform random sample of at most [`Reservoir::CAPACITY`] values
@@ -159,6 +161,7 @@ struct Series {
     integration_latency: Reservoir,
     /// Cache hits and misses; `None` until a request consults the cache.
     cache: Option<(u64, u64)>,
+    data_processed: u64,
 }
 
 impl Series {
@@ -170,6 +173,7 @@ impl Series {
             latency: Reservoir::new(),
             integration_latency: Reservoir::new(),
             cache: None,
+            data_processed: 0,
         }
     }
 
@@ -182,6 +186,7 @@ impl Series {
             });
         }
         self.count = self.count.saturating_add(1);
+        self.data_processed = self.data_processed.saturating_add(request.data_processed);
         match request.status {
             400..=499 => self.client_errors = self.client_errors.saturating_add(1),
             500..=599 => self.server_errors = self.server_errors.saturating_add(1),
@@ -280,6 +285,11 @@ impl MetricsAggregator {
                 json!(series.integration_latency.values),
             );
         }
+        // DataProcessed is an HTTP API metric; REST APIs do not publish it.
+        if key.kind == ApiKind::Http {
+            metrics.push(json!({"Name": "DataProcessed", "Unit": "Bytes"}));
+            body.insert("DataProcessed".to_owned(), json!(series.data_processed));
+        }
         if let Some((hits, misses)) = series.cache {
             metrics.push(json!({"Name": "CacheHitCount", "Unit": "Count"}));
             metrics.push(json!({"Name": "CacheMissCount", "Unit": "Count"}));
@@ -367,6 +377,7 @@ mod tests {
             status,
             latency_ms,
             integration_latency_ms: integration,
+            data_processed: 0,
         }
     }
 
@@ -497,6 +508,30 @@ mod tests {
             doc["_aws"]["CloudWatchMetrics"][0]["Dimensions"],
             json!([["ApiId", "Stage"]])
         );
+    }
+
+    #[test]
+    fn http_apis_publish_the_bytes_they_processed_and_rest_apis_do_not() {
+        let aggregator = MetricsAggregator::new(MetricsNamespace::default());
+        let sized = |bytes| RequestMetrics {
+            data_processed: bytes,
+            ..request(200, 1, None)
+        };
+        aggregator.record(&key(ApiKind::Http, None), sized(100));
+        aggregator.record(&key(ApiKind::Http, None), sized(23));
+        aggregator.record(&key(ApiKind::Rest, None), sized(50));
+        let docs = drained(&aggregator);
+        let http = docs.iter().find(|d| d.get("ApiId").is_some()).unwrap();
+        assert_eq!(http["DataProcessed"], 123);
+        let names: Vec<&Value> = http["_aws"]["CloudWatchMetrics"][0]["Metrics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["Name"] == "DataProcessed")
+            .collect();
+        assert_eq!(names, [&json!({"Name": "DataProcessed", "Unit": "Bytes"})]);
+        let rest = docs.iter().find(|d| d.get("ApiName").is_some()).unwrap();
+        assert!(rest.get("DataProcessed").is_none());
     }
 
     #[test]

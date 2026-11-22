@@ -28,6 +28,7 @@ use crate::model::{ApiKind, ApiModel, IntegrationOverrides, StageSettings};
 use crate::observability::StageObserver;
 use crate::router::{BasePath, RouteSummary, build};
 use crate::state::{InMemoryLimits, StateBackend};
+use crate::telemetry::{RequestSpan, ServerRequest, span_tests};
 use crate::usage::UsageStore;
 use crate::vpc_link::VpcLinks;
 
@@ -305,11 +306,26 @@ impl Harness {
         uri: &str,
         headers: &[(&str, &str)],
     ) -> (StatusCode, Value) {
+        self.send_traced(peer, None, method, uri, headers).await
+    }
+
+    /// As [`Self::send`], beneath the server span `span`.
+    async fn send_traced(
+        &self,
+        peer: Option<&str>,
+        span: Option<RequestSpan>,
+        method: Method,
+        uri: &str,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, Value) {
         let mut request = Request::builder().method(method).uri(uri);
         for (name, value) in headers {
             request = request.header(*name, *value);
         }
         let mut request = request.body(Body::empty()).unwrap();
+        if let Some(span) = span {
+            request.extensions_mut().insert(span);
+        }
         if let Some(peer) = peer {
             let peer: SocketAddr = format!("{peer}:5000").parse().unwrap();
             let identity = TrustedProxies::none().identify(peer, request.headers_mut());
@@ -396,6 +412,65 @@ async fn an_allowing_token_authorizer_reaches_the_backend_with_its_context() {
         json!({"principalId": "user-1", "tenant": "acme", "n": "5", "flag": "true"}),
         "REST context values reach the backend as strings"
     );
+}
+
+#[tokio::test]
+async fn the_authorizer_runs_in_a_span_beneath_the_request() {
+    let h = rest_token(json!({})).await;
+    let (tracer, exporter, _provider) = span_tests::in_memory();
+    let h = &h;
+    let traced = |token: &'static str| {
+        let tracer = tracer.clone();
+        async move {
+            let span = tracer.server(
+                &HeaderMap::new(),
+                &ServerRequest {
+                    method: &Method::GET,
+                    route: Some("/pets/{id}"),
+                    path: "/pets/7",
+                    host: None,
+                    user_agent: None,
+                    client_address: None,
+                    api_id: "abc",
+                    stage: "prod",
+                    request_id: None,
+                },
+            );
+            let (status, _) = h
+                .send_traced(
+                    None,
+                    Some(span.clone()),
+                    Method::GET,
+                    "/pets/7",
+                    &[("authorization", token)],
+                )
+                .await;
+            span.finish(status.as_u16(), None);
+            status
+        }
+    };
+    assert_eq!(traced("context").await, StatusCode::OK);
+    assert_eq!(traced("deny").await, StatusCode::FORBIDDEN);
+    let spans = exporter.get_finished_spans().unwrap();
+    let authorizers: Vec<_> = spans
+        .iter()
+        .filter(|s| s.name == "authorizer auth")
+        .collect();
+    assert_eq!(authorizers.len(), 2, "{spans:?}");
+    let decision = |i: usize| span_tests::attribute(authorizers[i], "apigw.authorizer.decision");
+    assert_eq!(decision(0).as_deref(), Some("allow"));
+    assert_eq!(decision(1).as_deref(), Some("deny"));
+    assert_eq!(
+        span_tests::attribute(authorizers[0], "apigw.authorizer.type").as_deref(),
+        Some("lambda")
+    );
+    let integrations = spans
+        .iter()
+        .filter(|s| s.name == "integration AWS_PROXY")
+        .count();
+    assert_eq!(integrations, 1, "a denied request reaches no integration");
+    let server = spans.iter().find(|s| s.name == "GET /pets/{id}").unwrap();
+    assert_eq!(authorizers[0].parent_span_id, server.span_context.span_id());
 }
 
 #[tokio::test]

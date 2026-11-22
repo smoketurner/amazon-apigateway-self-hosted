@@ -104,8 +104,18 @@ whatever the stage's `cacheDataEncrypted` says
 
 ## Observability
 
-Everything below is configured on the API Gateway stage, as on API Gateway itself, and applies
-without a redeploy of this container when the stage changes.
+The stage's own settings (access logs, metrics, execution logs, X-Ray tracing) work as on API
+Gateway and apply without a redeploy of this container when the stage changes. The gateway
+also serves Prometheus metrics, and with `--otel` exports metrics and request spans with
+OpenTelemetry; neither depends on the stage.
+
+| Output | AWS destination | Standard output | Kubernetes / OpenTelemetry |
+|---|---|---|---|
+| Access logs | the stage's log group or Firehose stream (`--access-logs aws`) | `--access-logs stdout` | collect stdout |
+| Execution logs | `API-Gateway-Execution-Logs_{apiId}/{stage}` (`--execution-logs aws`) | `--execution-logs stdout` | collect stdout |
+| API Gateway metrics | embedded metric format events in `--metrics-log-group` | `--metrics stdout` (EMF lines) | `/metrics` (Prometheus), OTLP with `--otel` |
+| Gateway health metrics | | | `/metrics` (Prometheus), OTLP with `--otel` |
+| Traces | X-Ray segments (`--tracing aws`) | `--tracing stdout` (X-Ray segment JSON), `OTEL_TRACES_EXPORTER=console` (OpenTelemetry JSON) | OTLP spans with `--otel` |
 
 **Access logs.** The stage's access log format is a template of `$context.*` variables
 (`$context.requestId`, `$context.identity.sourceIp`, `$context.status`,
@@ -123,34 +133,125 @@ destination rejects is written to standard output too.
 `{HOSTNAME}/{start time}/{8 hex characters}`, so pods never share a stream and streams sort by
 start time. `--log-stream` sets a fixed name.
 
-**Metrics.** CloudWatch Logs extracts the metrics from embedded metric format events, so they
-are published to the log group in `--metrics-log-group` under `--metrics-namespace`. REST
+**CloudWatch metrics.** API Gateway's metrics are written as embedded metric format events
+under `--metrics-namespace`: to the log group in `--metrics-log-group`, where CloudWatch Logs
+extracts them, or with `--metrics stdout` one JSON object per line on standard output, for the
+CloudWatch agent, Container Insights, or Fluent Bit to forward to CloudWatch Logs. REST
 APIs publish `Count`, `4XXError`, `5XXError`, `Latency`, and `IntegrationLatency` with
 dimensions `ApiName, Stage`; with `metricsEnabled` on a method (or `*/*`) they also publish
 `ApiName, Method, Resource, Stage`. HTTP APIs publish `Count`, `4xx`, `5xx`, `Latency`,
-`IntegrationLatency` with `ApiId, Stage`, and with detailed metrics `ApiId, Method, Resource,
-Stage`. One event per series is written each minute, so the statistics differ from
-`AWS/ApiGateway`: use `Sum` for `Count` and the error metrics (`Average` and `SampleCount` do
-not mean what they do there), and treat `Latency`/`IntegrationLatency` percentiles and maxima as
-estimates, because each minute publishes at most 100 sampled values.
+`IntegrationLatency`, and `DataProcessed` (request and response bytes of known length; bodies
+streamed without a `Content-Length` are not counted) with `ApiId, Stage`, and with detailed
+metrics `ApiId, Method, Resource, Stage`. One event per series is written each minute, so the
+statistics differ from `AWS/ApiGateway`: use `Sum` for `Count`, the error metrics, and
+`DataProcessed` (`Average` and `SampleCount` do not mean what they do there), and treat
+`Latency`/`IntegrationLatency` percentiles and maxima as estimates, because each minute
+publishes at most 100 sampled values.
 
 **Execution logs.** REST stages with `loggingLevel` `ERROR` or `INFO` write a request trace to
-`API-Gateway-Execution-Logs_{apiId}/{stage}` (created if missing). `dataTraceEnabled` adds the
-query string and request headers (`Authorization`, `X-Api-Key`, and `Cookie` values are
-redacted). Request and response bodies are not logged, and events are cut at 1 KB as in API
-Gateway. HTTP APIs have no execution logs.
+`API-Gateway-Execution-Logs_{apiId}/{stage}` (created if missing) in API Gateway's wording:
+the usage plan check (or that the method needs no API key, with the key masked to its last 6
+characters), the start of execution, the method and resource, `Sending request to` the
+endpoint, the integration's status and latency, `Successfully completed execution` or the
+failure, and the method's status. `dataTraceEnabled` adds the method request path parameters,
+query string, headers, and body; the endpoint request URI, headers, and body; the endpoint
+response headers and body; and the method response body and headers. `Authorization`,
+`Proxy-Authorization`, `X-Api-Key`, and `Cookie` values are redacted. Events are cut at 1 KB as
+in API Gateway, and a body that does not fit ends in `[TRUNCATED]`. Bodies of responses
+streamed to the client, and method response bodies larger than 1 MiB or of unknown length, are
+not logged; authorizer steps are not logged. HTTP APIs have no execution logs.
 
 **X-Ray.** REST stages with tracing enabled send one segment per sampled request (named
-`{API name}/{stage}`, origin `AWS::ApiGateway::Stage`, with the request, the response status, and
-`error`/`throttle`/`fault` flags) with `PutTraceSegments`. The trace comes from the caller's
-`X-Amzn-Trace-Id` or W3C `traceparent` when present, including its sampling decision, and is
-otherwise started here and sampled by X-Ray's default rule (the first request each second, then
-`--xray-sampling-percent`); X-Ray's sampling rules are not fetched. Integrations receive
-`X-Amzn-Trace-Id: Root=...;Parent={this gateway's segment};Sampled=...` (HTTP backends and
-Lambda, per call) and, for HTTP backends, `traceparent`. The segment has no subsegment for the
-integration call, and API Gateway's passive mode (segments only when a caller traced) is not
-reproduced. A stage without tracing leaves trace headers untouched.
+`{API name}/{stage}`, origin `AWS::ApiGateway::Stage`, with the request, the response status,
+and `error`/`throttle`/`fault` flags) with `PutTraceSegments`, or write it to standard output
+with `--tracing stdout`. A request that reached a backend has a subsegment for the
+integration call: `remote`, named after the host, for HTTP backends (with the method, URL, and
+status), and `aws` for Lambda (`Lambda`, with the function and region) and other AWS services
+(named after the service). The trace comes from the caller's `X-Amzn-Trace-Id` or W3C
+`traceparent` when present, including its sampling decision. Otherwise the request is sampled
+by the account's X-Ray sampling rules, read with `GetSamplingRules` every five minutes from the
+first traced stage, with the reservoir quotas `GetSamplingTargets` assigns every ten seconds
+(rules match on the service name, `AWS::ApiGateway::Stage`, host, method, URL path, and the
+stage ARN; rules with attributes never match). Until the rules are read, when they cannot be,
+and with `--xray-sampling-rules false`, X-Ray's default rule applies: the first request each
+second, then `--xray-sampling-percent`. Integrations receive
+`X-Amzn-Trace-Id: Root=...;Parent={the integration subsegment};Sampled=...` (HTTP backends and
+Lambda, per call) and, for HTTP backends, `traceparent`. With `--xray-passive`, stages without
+tracing enabled record a segment for requests whose caller sampled them (`Sampled=1`, or a
+sampled `traceparent`) and start no traces of their own, as API Gateway's passive mode does;
+other requests' trace headers are left untouched, as on any stage without tracing.
 
 **Delivery.** Each destination has a bounded queue (10,000 events). When it is full the newest
 events are dropped and counted in a warning, so a slow destination never slows requests. Queues
 are flushed every 5 seconds, when a batch is full, and at shutdown.
+
+### Prometheus
+
+`/metrics` on the admin listener (`--admin-listen`, TLS like every listener) serves the
+gateway's metrics in the Prometheus text format. They are recorded for every API stage whatever
+its settings. Labels are bounded: `route` is the route template (`/pets/{petId}`, `$default`, or
+`(none)` for a request no route matched), never the request path; `method` is the route's
+method, or for an `ANY` route the request's when it is one of `GET`, `PUT`, `POST`, `DELETE`,
+`PATCH`, `HEAD`, `OPTIONS`, else `OTHER`. `stage` is `$default` for an API served without one.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `apigw_requests_total` | counter | `api_id`, `stage`, `method`, `route`, `status_class` | Requests answered, by `1xx` ... `5xx` |
+| `apigw_request_duration_seconds` | histogram | `api_id`, `stage`, `method`, `route` | Time to the response headers (API Gateway's `Latency`) |
+| `apigw_integration_duration_seconds` | histogram | `api_id`, `stage`, `method`, `route` | Time in the integration (`IntegrationLatency`) |
+| `apigw_cache_hits_total`, `apigw_cache_misses_total` | counter | `api_id`, `stage`, `method`, `route` | Response cache hits and misses, for cached routes |
+| `apigw_data_processed_bytes_total` | counter | `api_id`, `stage`, `method`, `route` | Request and response bytes of known length (`DataProcessed`) |
+| `apigw_requests_in_flight` | gauge | | Requests on the API listener that have not been answered yet |
+| `apigw_build_info` | gauge | `version`, `commit` | Always 1 |
+| `apigw_api_info` | gauge | `api_id`, `stage`, `deployment_id` | Always 1 per loaded stage, naming the deployment being served |
+| `apigw_routes`, `apigw_routes_unservable` | gauge | `api_id`, `stage` | Routes of each loaded stage, and those whose integration answers `501` |
+| `apigw_config_refreshes_total` | counter | `api_id`, `stage`, `outcome` | Definition refreshes: `unchanged`, `swapped`, `fetch_failed`, `rejected` (the definition could not be built; the previous one keeps serving) |
+| `apigw_config_last_success_timestamp_seconds` | gauge | `api_id`, `stage` | When the stage's definition was last loaded or found unchanged |
+| `apigw_usage_refreshes_total` | counter | `api_id`, `stage`, `outcome` | Reads of API keys and usage plans: `success`, `failure` |
+| `apigw_usage_last_success_timestamp_seconds` | gauge | `api_id`, `stage` | When they were last read |
+| `apigw_tls_certificate_expiry_seconds` | gauge | `certificate` | Seconds until the `notAfter` of each served certificate (`default`, or the custom domain); negative once expired |
+| `apigw_tls_reloads_total` | counter | `outcome` | Reloads of changed certificate files: `success`, `failure` (the previous certificate keeps serving) |
+| `apigw_state_errors_total` | counter | `operation` | Valkey calls that failed or timed out: `take_token`, `consume_quota`, `cache_get`, `cache_put`, `cache_invalidate` |
+| `apigw_authorizer_cache_hits_total`, `apigw_authorizer_cache_misses_total` | counter | `api_id`, `stage`, `authorizer` | Lambda authorizer results answered from the cache, and invocations for identities that were not cached |
+| `apigw_jwks_fetches_total` | counter | `issuer`, `outcome` | Fetches of a token issuer's signing keys: `success`, `failure` |
+
+`commit` is `unknown` for builds outside the release images. [deployment.md](deployment.md#monitoring)
+lists the alerts worth setting.
+
+### OpenTelemetry
+
+`--otel` (`APIGW_OTEL=true`) exports the metrics above and a span per request with
+OpenTelemetry, configured with the standard environment variables:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_{TRACES,METRICS}_ENDPOINT` | `http://localhost:4318` (`:4317` for gRPC) | Collector address; `https://` endpoints are verified against the system roots, with aws-lc-rs |
+| `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_EXPORTER_OTLP_{TRACES,METRICS}_PROTOCOL` | `http/protobuf` | `http/protobuf` or `grpc` |
+| `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_TIMEOUT` (and their per-signal forms) | | Passed to the exporter; compression is not built in |
+| `OTEL_TRACES_EXPORTER` | `otlp` | `otlp`, `console` (one OTLP-JSON-shaped object per span on standard output), or `none` |
+| `OTEL_METRICS_EXPORTER` | `otlp` | `otlp` or `none` (Prometheus is served either way) |
+| `OTEL_METRIC_EXPORT_INTERVAL` | `60000` | Milliseconds between metric exports |
+| `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` | `parentbased_always_on` | `always_on`, `always_off`, `traceidratio`, `parentbased_always_on`, `parentbased_always_off`, `parentbased_traceidratio` |
+| `OTEL_SERVICE_NAME` | `apigw` | `service.name` |
+| `OTEL_RESOURCE_ATTRIBUTES` | | More resource attributes; they override the detected ones below |
+
+The resource carries `service.name`, `service.version` (the gateway's version), and, from
+these environment variables when they are set (the Helm chart sets them from the downward
+API), `k8s.pod.name` (`K8S_POD_NAME`), `k8s.pod.uid` (`K8S_POD_UID`, also
+`service.instance.id`), `k8s.namespace.name` (`K8S_NAMESPACE_NAME`), `k8s.node.name`
+(`K8S_NODE_NAME`), `k8s.container.name` (`K8S_CONTAINER_NAME`), and `k8s.deployment.name`
+(`K8S_DEPLOYMENT_NAME`).
+
+Each request has a server span named `{method} {route template}` (`{method}` when no route
+matched) following the HTTP semantic conventions (`http.request.method`, `http.route`,
+`url.path`, `url.scheme`, `server.address`, `client.address`, `user_agent.original`,
+`http.response.status_code`, `http.response.body.size`, and `error.type` for 5xx responses,
+which mark the span as an error) plus `apigw.api_id`, `apigw.stage`, and `apigw.request_id`.
+Beneath it, `authorizer {name}` spans the route's authorizer (`apigw.authorizer.type`,
+`apigw.authorizer.decision`: `allow`, `deny`, or `refused`) and `integration {type}` (a client
+span with `apigw.integration.type`, `apigw.integration.target`, and the backend's
+`http.response.status_code`) spans the integration call. The server span continues the
+caller's W3C `traceparent` and `tracestate`, and HTTP integrations receive the integration
+span as their `traceparent` (with the caller's `tracestate`), in place of the X-Ray-derived
+`traceparent`. X-Ray tracing works alongside: `X-Amzn-Trace-Id` is still propagated, and a
+caller's `traceparent` gives both the same trace ID.

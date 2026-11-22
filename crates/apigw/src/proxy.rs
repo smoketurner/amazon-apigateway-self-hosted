@@ -13,7 +13,7 @@ use crate::integration::{HttpProxy, ParamSource, PrivateRouting};
 use crate::integration_tls::TlsClientError;
 use crate::mapped::{BackendReply, BackendRequest, RequestOverrides};
 use crate::model::{ApiKind, Protection, RoutePath};
-use crate::pipeline::RequestContext;
+use crate::pipeline::{EndpointExchange, RequestContext};
 use crate::route::Route;
 
 /// Why no backend URL could be made for a request.
@@ -155,6 +155,9 @@ impl HttpProxy {
             tracing::warn!(route = %route.key, bytes = body.len(), "integration response is too large");
             return Err(GatewayError::IntegrationFailure);
         }
+        if let Some(ref mut exchange) = ctx.integration.exchange {
+            exchange.response_body = Some(body.clone());
+        }
         Ok(BackendReply::new(status, headers, body))
     }
 
@@ -206,6 +209,12 @@ impl HttpProxy {
         }
         ctx.integration.transfer_mode = Some(self.transfer);
         let (client, url) = self.client_for(client, route, url, &mut headers).await?;
+        if ctx.capture_exchange {
+            let exchange = ctx.integration.exchange.get_or_insert_default();
+            exchange.uri = Some(url.to_string());
+            exchange.request_headers = EndpointExchange::header_list(&headers);
+            exchange.request_body = Some(body.clone());
+        }
         let started = Instant::now();
         let result = client
             .request(method, url)
@@ -232,6 +241,9 @@ impl HttpProxy {
         };
         let headers_after = u64::try_from(started.elapsed().as_millis()).ok();
         ctx.integration.status = Some(upstream.status().as_u16());
+        if let Some(ref mut exchange) = ctx.integration.exchange {
+            exchange.response_headers = EndpointExchange::header_list(upstream.headers());
+        }
         ctx.integration.time_to_all_headers_ms = headers_after;
         tracing::debug!(
             route = %route.key,
@@ -248,7 +260,9 @@ impl HttpProxy {
         if let Some(PrivateRouting::HostHeader(ref host)) = self.private {
             headers.insert(header::HOST, host.clone());
         }
-        if let Some(trace) = ctx.trace
+        if let Some(ref span) = ctx.otel_integration {
+            span.inject(headers);
+        } else if let Some(trace) = ctx.trace
             && let Ok(value) = HeaderValue::try_from(trace.traceparent())
         {
             headers.insert(HeaderName::from_static("traceparent"), value);

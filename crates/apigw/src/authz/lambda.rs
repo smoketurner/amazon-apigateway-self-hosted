@@ -23,6 +23,7 @@ use crate::model::{ApiKind, AuthorizerSpec, PayloadVersion};
 use crate::pipeline::RequestContext;
 use crate::pipeline::context::AuthorizerContext;
 use crate::state::{StateBackend, StateKey};
+use crate::telemetry::{ApiStage, GatewayMetrics};
 use crate::usage::KeyValue;
 
 /// Where a cached response keeps the digest of the API key it named.
@@ -96,6 +97,10 @@ struct Answer {
 }
 
 impl LambdaAuthorizer {
+    pub(super) fn name(&self) -> &str {
+        &self.name
+    }
+
     pub(super) fn compile(
         name: &str,
         spec: &AuthorizerSpec,
@@ -233,9 +238,19 @@ impl LambdaAuthorizer {
         let cache_key =
             (!self.ttl.is_zero() && !identity.is_empty()).then(|| self.cache_key(ctx, &identity));
         let rest = ctx.api.kind == ApiKind::Rest;
-        if let Some(ref key) = cache_key
-            && let Some(cached) = self.cached(request.state, key).await
-        {
+        let cached = match cache_key {
+            Some(ref key) => {
+                let cached = self.cached(request.state, key).await;
+                GatewayMetrics::global().authorizer_cache(
+                    &ApiStage::new(&ctx.api.api_id, Some(ctx.api.stage_name())),
+                    &self.name,
+                    cached.is_some(),
+                );
+                cached
+            }
+            None => None,
+        };
+        if let Some(cached) = cached {
             let mut authorized = cached.authorize(&arn);
             if rest {
                 authorized.context.set_integration_latency(Duration::ZERO);

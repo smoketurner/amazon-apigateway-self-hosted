@@ -126,6 +126,17 @@ impl Integration {
         }
     }
 
+    /// The backend: a URI, Lambda function, or AWS service.
+    pub(crate) fn target(&self) -> Option<String> {
+        match self {
+            Self::HttpProxy(proxy) => Some(proxy.uri.clone()),
+            Self::Lambda(lambda) => Some(lambda.function.to_string()),
+            Self::Mapped(mapped) => mapped.target(),
+            Self::AwsSubtype(subtype) => Some(subtype.subtype.name().to_owned()),
+            Self::Unsupported { .. } => None,
+        }
+    }
+
     /// Compiles an operation's integration. Anything that can't be served
     /// becomes [`Integration::Unsupported`] with the reason.
     pub(crate) fn compile(

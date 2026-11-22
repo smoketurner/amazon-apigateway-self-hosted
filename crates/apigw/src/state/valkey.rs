@@ -24,6 +24,7 @@ use super::bucket::{Admission, BucketLimits};
 use super::cache::CacheStore;
 use super::quota::{QuotaDecision, QuotaLimit};
 use super::{StateError, StateKey};
+use crate::telemetry::GatewayMetrics;
 
 /// How long any one call may take.
 const COMMAND_TIMEOUT: Duration = Duration::from_millis(500);
@@ -230,16 +231,22 @@ impl Valkey {
         StateError::Unavailable(error.to_string())
     }
 
-    /// Runs `call` with the command timeout.
+    /// Runs `call` with the command timeout; a failure is counted against
+    /// `operation`.
     async fn timed<T>(
         &self,
+        operation: &'static str,
         call: impl Future<Output = redis::RedisResult<T>>,
     ) -> Result<T, StateError> {
-        match tokio::time::timeout(self.timeout, call).await {
+        let result = match tokio::time::timeout(self.timeout, call).await {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(error)) => Err(Self::unavailable(error)),
             Err(_) => Err(Self::unavailable("timed out")),
+        };
+        if result.is_err() {
+            GatewayMetrics::global().state_error(operation);
         }
+        result
     }
 
     fn name(key: &StateKey) -> String {
@@ -275,6 +282,7 @@ impl Valkey {
         let mut connection = self.connection.clone();
         let admitted: i64 = self
             .timed(
+                "take_token",
                 self.take_token
                     .key(Self::name(key))
                     .arg(limits.rate_per_second())
@@ -311,6 +319,7 @@ impl Valkey {
         let mut connection = self.connection.clone();
         let remaining: i64 = self
             .timed(
+                "consume_quota",
                 self.consume_quota
                     .key(name)
                     .arg(quota.limit)
@@ -328,7 +337,9 @@ impl Valkey {
 
     pub(crate) async fn cache_get(&self, key: &StateKey) -> Result<Option<Bytes>, StateError> {
         let mut connection = self.connection.clone();
-        let value: Option<Vec<u8>> = self.timed(connection.get(Self::name(key))).await?;
+        let value: Option<Vec<u8>> = self
+            .timed("cache_get", connection.get(Self::name(key)))
+            .await?;
         Ok(value.map(Bytes::from))
     }
 
@@ -342,18 +353,23 @@ impl Valkey {
             return Ok(CacheStore::Rejected);
         }
         let mut connection = self.connection.clone();
-        self.timed(connection.set_options::<_, _, ()>(
-            Self::name(key),
-            value.as_ref(),
-            redis::SetOptions::default().with_expiration(redis::SetExpiry::PX(Self::millis(ttl))),
-        ))
+        self.timed(
+            "cache_put",
+            connection.set_options::<_, _, ()>(
+                Self::name(key),
+                value.as_ref(),
+                redis::SetOptions::default()
+                    .with_expiration(redis::SetExpiry::PX(Self::millis(ttl))),
+            ),
+        )
         .await?;
         Ok(CacheStore::Stored)
     }
 
     pub(crate) async fn cache_invalidate(&self, key: &StateKey) -> Result<(), StateError> {
         let mut connection = self.connection.clone();
-        self.timed(connection.del::<_, ()>(Self::name(key))).await
+        self.timed("cache_invalidate", connection.del::<_, ()>(Self::name(key)))
+            .await
     }
 }
 

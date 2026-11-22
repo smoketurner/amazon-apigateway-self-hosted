@@ -11,12 +11,14 @@ mod format;
 mod metrics;
 mod observer;
 mod queue;
+mod sampling;
 #[cfg(test)]
 #[expect(clippy::panic, reason = "a test helper that fails loudly on timeout")]
 pub(crate) mod testing;
 mod trace;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use aws_sdk_cloudwatchlogs::config::Region;
@@ -25,14 +27,15 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) use destination::{LogGroup, StreamName};
 pub(crate) use metrics::MetricsNamespace;
-pub(crate) use observer::{IntegrationTiming, StageObserver};
+pub(crate) use observer::{ExecutionRecord, IntegrationTiming, StageObserver};
 pub(crate) use trace::{Trace, TraceId};
 
 use crate::canary::Release;
+use crate::telemetry::{GatewayMetrics, RequestTracer};
 use destination::Destination;
 use metrics::MetricsAggregator;
 use queue::{CloudWatchShipper, FirehoseShipper, LogQueue, Shipper, Worker, XRayShipper};
-use trace::Sampler;
+use sampling::{RulePoller, Sampler};
 
 /// Where one kind of log goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -47,20 +50,32 @@ pub(crate) enum Delivery {
     Off,
 }
 
-/// Whether stage tracing sends segments to X-Ray.
+/// Where stage tracing sends X-Ray segments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum TraceDelivery {
     /// Send segments for stages with tracing enabled to X-Ray, and propagate
     /// `X-Amzn-Trace-Id` and `traceparent` to integrations.
     Aws,
+    /// Write segment documents to standard output, one per line, and
+    /// propagate trace headers as `aws` does.
+    Stdout,
     /// Neither send segments nor touch trace headers.
     Off,
+}
+
+/// Where embedded metric format events go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MetricsDestination {
+    /// A CloudWatch Logs log group, which extracts the metrics.
+    LogGroup(LogGroup),
+    /// Standard output, for the CloudWatch agent or Fluent Bit to forward.
+    Stdout,
 }
 
 /// Where metrics are published.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MetricsSettings {
-    pub(crate) group: LogGroup,
+    pub(crate) destination: MetricsDestination,
     pub(crate) namespace: MetricsNamespace,
 }
 
@@ -69,19 +84,44 @@ pub(crate) struct MetricsSettings {
 pub(crate) struct Settings {
     pub(crate) access_logs: Delivery,
     pub(crate) execution_logs: Delivery,
-    /// Metrics are published only when a log group is configured for them.
+    /// Embedded metric format events, when published.
     pub(crate) metrics: Option<MetricsSettings>,
     pub(crate) tracing: TraceDelivery,
     /// Percentage of requests sampled once the first request of each second
-    /// has been, for requests whose caller made no sampling decision.
+    /// has been, for requests whose caller made no sampling decision and
+    /// no X-Ray sampling rule applies.
     pub(crate) sampling_percent: u8,
+    /// Read X-Ray's sampling rules and reservoir quotas (with `tracing: Aws`).
+    pub(crate) sampling_rules: bool,
+    /// Trace requests the caller sampled on stages without tracing enabled.
+    pub(crate) passive: bool,
     pub(crate) stream: StreamName,
+}
+
+/// The process's OpenTelemetry instruments, which every stage records into.
+#[derive(Debug, Clone)]
+pub(crate) struct Instrumentation {
+    pub(crate) metrics: GatewayMetrics,
+    /// Starts request spans, when spans are exported.
+    pub(crate) tracer: Option<RequestTracer>,
+}
+
+impl Instrumentation {
+    /// Metrics into the process-wide instruments and no spans.
+    #[cfg(test)]
+    pub(crate) fn metrics_only() -> Self {
+        Self {
+            metrics: GatewayMetrics::global().clone(),
+            tracer: None,
+        }
+    }
 }
 
 /// Delivery queues and workers shared by every loaded stage.
 pub(crate) struct Observability {
     sdk_config: aws_config::SdkConfig,
     settings: Settings,
+    instrumentation: Instrumentation,
     queues: Mutex<HashMap<Destination, LogQueue>>,
     workers: Mutex<JoinSet<()>>,
     aggregator: Option<Arc<MetricsAggregator>>,
@@ -89,12 +129,17 @@ pub(crate) struct Observability {
     aggregator_task: Mutex<Option<JoinHandle<()>>>,
     publishing: CancellationToken,
     closed: CancellationToken,
+    poller_started: AtomicBool,
 }
 
 impl Observability {
     /// Starts delivery. Must be called inside a Tokio runtime: workers and the
     /// metrics publisher run as tasks.
-    pub(crate) fn start(sdk_config: aws_config::SdkConfig, settings: Settings) -> Arc<Self> {
+    pub(crate) fn start(
+        sdk_config: aws_config::SdkConfig,
+        settings: Settings,
+        instrumentation: Instrumentation,
+    ) -> Arc<Self> {
         let aggregator = settings
             .metrics
             .as_ref()
@@ -103,6 +148,7 @@ impl Observability {
         let observability = Arc::new(Self {
             sdk_config,
             settings,
+            instrumentation,
             sampler,
             queues: Mutex::new(HashMap::new()),
             workers: Mutex::new(JoinSet::new()),
@@ -110,6 +156,7 @@ impl Observability {
             aggregator_task: Mutex::new(None),
             publishing: CancellationToken::new(),
             closed: CancellationToken::new(),
+            poller_started: AtomicBool::new(false),
         });
         observability.start_metrics_publisher();
         observability
@@ -119,6 +166,12 @@ impl Observability {
     /// to deliver from.
     #[cfg(test)]
     pub(crate) fn off() -> Arc<Self> {
+        Self::off_with(Instrumentation::metrics_only())
+    }
+
+    /// As [`Self::off`], recording metrics and spans into `instrumentation`.
+    #[cfg(test)]
+    pub(crate) fn off_with(instrumentation: Instrumentation) -> Arc<Self> {
         Arc::new(Self {
             sdk_config: aws_config::SdkConfig::builder()
                 .behavior_version(aws_config::BehaviorVersion::latest())
@@ -129,6 +182,8 @@ impl Observability {
                 metrics: None,
                 tracing: TraceDelivery::Off,
                 sampling_percent: 0,
+                sampling_rules: false,
+                passive: false,
                 stream: StreamName::for_pod(
                     Some("test"),
                     None,
@@ -136,6 +191,7 @@ impl Observability {
                     uuid::Uuid::nil(),
                 ),
             },
+            instrumentation,
             queues: Mutex::new(HashMap::new()),
             workers: Mutex::new(JoinSet::new()),
             sampler: Arc::new(Sampler::new(0)),
@@ -143,6 +199,7 @@ impl Observability {
             aggregator_task: Mutex::new(None),
             publishing: CancellationToken::new(),
             closed: CancellationToken::new(),
+            poller_started: AtomicBool::new(false),
         })
     }
 
@@ -152,10 +209,13 @@ impl Observability {
         else {
             return;
         };
-        let queue = self.queue(Destination::CloudWatch {
-            region: None,
-            group: metrics.group,
-            create_group: false,
+        let queue = self.queue(match metrics.destination {
+            MetricsDestination::LogGroup(group) => Destination::CloudWatch {
+                region: None,
+                group,
+                create_group: false,
+            },
+            MetricsDestination::Stdout => Destination::Stdout,
         });
         let publishing = self.publishing.clone();
         let task = tokio::spawn(async move { aggregator.run(queue, publishing).await });
@@ -163,6 +223,49 @@ impl Observability {
             .aggregator_task
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(task);
+    }
+
+    pub(crate) fn instrumentation(&self) -> &Instrumentation {
+        &self.instrumentation
+    }
+
+    /// Polls X-Ray for sampling rules while segments go to X-Ray, from the
+    /// first time a stage with tracing enabled is loaded.
+    fn start_rule_poller(&self) {
+        if self.settings.tracing != TraceDelivery::Aws
+            || !self.settings.sampling_rules
+            || self.poller_started.swap(true, Ordering::Relaxed)
+        {
+            return;
+        }
+        let poller = RulePoller::new(
+            aws_sdk_xray::Client::new(&self.sdk_config),
+            Arc::clone(&self.sampler),
+        );
+        let publishing = self.publishing.clone();
+        self.workers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .spawn(poller.run(publishing));
+    }
+
+    /// Whether stages without tracing continue traces their callers sampled.
+    pub(crate) fn passive_tracing(&self) -> bool {
+        self.settings.passive && self.settings.tracing != TraceDelivery::Off
+    }
+
+    /// `arn:{partition}:apigateway:{region}::/restapis/{api_id}/stages/{stage}`,
+    /// the resource X-Ray sampling rules match.
+    pub(crate) fn stage_arn(&self, api_id: &str, stage: &str) -> String {
+        let region = self.sdk_config.region().map_or("", Region::as_ref);
+        let partition = if region.starts_with("cn-") {
+            "aws-cn"
+        } else if region.starts_with("us-gov-") {
+            "aws-us-gov"
+        } else {
+            "aws"
+        };
+        format!("arn:{partition}:apigateway:{region}::/restapis/{api_id}/stages/{stage}")
     }
 
     /// The aggregator requests record metrics into, when metrics are on.
@@ -226,10 +329,13 @@ impl Observability {
         match self.settings.tracing {
             TraceDelivery::Off => None,
             TraceDelivery::Aws => Some(self.queue(Destination::XRay { region: None })),
+            TraceDelivery::Stdout => Some(self.queue(Destination::Stdout)),
         }
     }
 
+    /// The sampler of stages with tracing enabled.
     pub(crate) fn sampler(&self) -> Arc<Sampler> {
+        self.start_rule_poller();
         Arc::clone(&self.sampler)
     }
 
