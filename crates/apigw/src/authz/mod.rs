@@ -106,8 +106,13 @@ impl Denial {
                     "User: anonymous is not authorized to perform: execute-api:Invoke on resource: {resource} because no resource-based policy allows the execute-api:Invoke action"
                 )
             }),
+            // Measured against a deployed REST API, for an authorizer that raises:
+            // an `AUTHORIZER_FAILURE` named `AuthorizerConfigurationException`, with
+            // a null message.
             (Self::AuthorizerFailure, ApiKind::Rest) => {
                 Failure::new(ResponseType::AuthorizerFailure)
+                    .without_message()
+                    .with_error_type("AuthorizerConfigurationException")
             }
             // Measured against a deployed REST API, for an authorizer response
             // without a policy document: `{"message":null}`.

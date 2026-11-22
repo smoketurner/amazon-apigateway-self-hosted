@@ -485,10 +485,10 @@ async fn authorizer_failures_map_to_401_and_500() {
         (status, body),
         (StatusCode::UNAUTHORIZED, json!({"message": "Unauthorized"}))
     );
-    // A function that raises is an authorizer failure.
+    // A function that raises is an authorizer failure, whose message is null.
     let (status, body) = h.get("/pets/7", "boom").await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(body, json!({"message": "Internal server error"}));
+    assert_eq!(body, json!({"message": null}));
     // An answer the gateway cannot use is a configuration error, whose message is null.
     for token in [
         "garbage",

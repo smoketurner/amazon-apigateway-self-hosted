@@ -295,11 +295,16 @@ impl GatewayError {
             (Self::IntegrationUnreachable, ApiKind::Rest) => {
                 Failure::new(ResponseType::IntegrationFailure)
             }
+            // Measured: a REST API names its 504 `InternalServerErrorException`,
+            // and an HTTP API answers a timeout with a 503.
             (Self::IntegrationTimeout, ApiKind::Rest) => {
                 Failure::new(ResponseType::IntegrationTimeout)
+                    .with_error_type("InternalServerErrorException")
             }
             (Self::IntegrationTimeout, ApiKind::Http) => {
-                Failure::new(ResponseType::IntegrationTimeout).with_message("Service Unavailable")
+                Failure::new(ResponseType::IntegrationTimeout)
+                    .with_status(StatusCode::SERVICE_UNAVAILABLE)
+                    .with_message("Service Unavailable")
             }
             // Measured against a deployed REST API: a 500 named
             // `InternalServerErrorException`, not `ApiConfigurationException`.

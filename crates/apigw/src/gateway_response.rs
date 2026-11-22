@@ -805,7 +805,7 @@ mod tests {
             (
                 GatewayError::IntegrationTimeout,
                 ApiKind::Http,
-                504,
+                503,
                 "Service Unavailable",
             ),
             (
