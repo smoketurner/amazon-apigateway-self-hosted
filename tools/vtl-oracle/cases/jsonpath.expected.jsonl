@@ -11,8 +11,8 @@
 {"name":"jp.mixed.10","output":"[3][3]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.11","output":"[5][5]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.12","output":"[4][4]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
-{"name":"jp.mixed.13","output":"[null][$input.path('$.h[5]')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
-{"name":"jp.mixed.14","output":"[null][$input.path('$.h[-6]')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"jp.mixed.13","output":"[\"\"][$input.path('$.h[5]')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"jp.mixed.14","output":"[\"\"][$input.path('$.h[-6]')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.15","output":"[[1,2]][[1, 2]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.16","output":"[[1,3,5]][[1, 3, 5]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.17","output":"[[2,3]][[2, 3]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
@@ -44,7 +44,7 @@
 {"name":"jp.mixed.43","output":"[[{\"l\":{\"m\":\"deep\"}}]][[{l={m=deep}}]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.44","output":"[[\"deep\"]][[deep]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.45","output":"[[{\"k\":{\"l\":{\"m\":\"deep\"}}}]][[{k={l={m=deep}}}]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
-{"name":"jp.mixed.46","output":"[null][$input.path('$.j.k.nothing')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"jp.mixed.46","output":"[\"\"][$input.path('$.j.k.nothing')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.47","output":"[1][1]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.48","output":"[[1,2]][[1, 2]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.49","output":"[[\"two\"]][[two]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
@@ -111,10 +111,10 @@
 {"name":"jp.mixed.110","output":"[\"\"][]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.111","output":"[[1,2,3,4,5,6]][[1, 2, 3, 4, 5, 6]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.113","error":"MethodInvocationException"}
-{"name":"jp.mixed.114","output":"[null][$input.path('$.nothing.length()')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"jp.mixed.114","output":"[\"\"][$input.path('$.nothing.length()')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.115","output":"[null][$input.path('$.a.length()')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.116","output":"[1][1]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
-{"name":"jp.mixed.117","output":"[null][$input.path('a.b')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"jp.mixed.117","output":"[\"\"][$input.path('a.b')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.118","output":"[1][1]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.119","output":"[1][1]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.120","error":"MethodInvocationException"}
@@ -128,16 +128,16 @@
 {"name":"jp.mixed.129","output":"[[1,2]][[1, 2]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.130","output":"[[1,2]][[1, 2]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.131","output":"[[]][[]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
-{"name":"jp.mixed.132","output":"[null][$input.path('$.a.b')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
-{"name":"jp.mixed.133","output":"[null][$input.path('$.a[0]')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
-{"name":"jp.mixed.134","output":"[null][$input.path('$.c[0]')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
-{"name":"jp.mixed.135","output":"[null][$input.path('$.h.a')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"jp.mixed.132","output":"[\"\"][$input.path('$.a.b')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"jp.mixed.133","output":"[\"\"][$input.path('$.a[0]')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"jp.mixed.134","output":"[\"\"][$input.path('$.c[0]')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"jp.mixed.135","output":"[\"\"][$input.path('$.h.a')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.136","output":"[3000000000][3000000000]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.137","output":"[2.5][2.5]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.138","output":"[true][true]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.139","output":"[null][$input.path('$[''e'']')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
-{"name":"jp.mixed.140","output":"[null][$input.path('$.f[0]')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
-{"name":"jp.mixed.141","output":"[null][$input.path('$.g.x')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"jp.mixed.140","output":"[\"\"][$input.path('$.f[0]')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"jp.mixed.141","output":"[\"\"][$input.path('$.g.x')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.143","output":"[[3,4,5]][[3, 4, 5]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.144","output":"[[3,4]][[3, 4]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.145","output":"[[1,3]][[1, 3]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
@@ -151,8 +151,8 @@
 {"name":"jp.mixed.153","output":"[[{\"p\":2,\"q\":\"two\"}]][[{p=2, q=two}]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.154","output":"[[[1,2],[3,4]]][[[1, 2], [3, 4]]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.mixed.155","output":"[[[5]]][[[5]]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
-{"name":"jp.mixed.156","output":"[null][$input.path('$.store')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
-{"name":"jp.mixed.157","output":"[null][$input.path('$.expensive')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"jp.mixed.156","output":"[\"\"][$input.path('$.store')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"jp.mixed.157","output":"[\"\"][$input.path('$.expensive')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.store.0","output":"[[\"Nigel Rees\",\"Evelyn Waugh\",\"Herman Melville\",\"J. R. R. Tolkien\"]][[Nigel Rees, Evelyn Waugh, Herman Melville, J. R. R. Tolkien]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.store.1","output":"[[\"Nigel Rees\",\"Evelyn Waugh\",\"Herman Melville\",\"J. R. R. Tolkien\"]][[Nigel Rees, Evelyn Waugh, Herman Melville, J. R. R. Tolkien]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp.store.2","output":"[[[{\"category\":\"reference\",\"author\":\"Nigel Rees\",\"title\":\"Sayings of the Century\",\"price\":8.95},{\"category\":\"fiction\",\"author\":\"Evelyn Waugh\",\"title\":\"Sword of Honour\",\"price\":12.99},{\"category\":\"fiction\",\"author\":\"Herman Melville\",\"title\":\"Moby Dick\",\"isbn\":\"0-553-21311-3\",\"price\":8.99},{\"category\":\"fiction\",\"author\":\"J. R. R. Tolkien\",\"title\":\"The Lord of the Rings\",\"isbn\":\"0-395-19395-8\",\"price\":22.99}],{\"color\":\"red\",\"price\":19.95}]][[[{category=reference, author=Nigel Rees, title=Sayings of the Century, price=8.95}, {category=fiction, author=Evelyn Waugh, title=Sword of Honour, price=12.99}, {category=fiction, author=Herman Melville, title=Moby Dick, isbn=0-553-21311-3, price=8.99}, {category=fiction, author=J. R. R. Tolkien, title=The Lord of the Rings, isbn=0-395-19395-8, price=22.99}], {color=red, price=19.95}]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
@@ -237,7 +237,7 @@
 {"name":"jp2.39","output":"[[1,2,3,4,5]][[1, 2, 3, 4, 5]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp2.40","output":"[[1,2,3,4,5,1,2]][[1, 2, 3, 4, 5, 1, 2]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp2.41","output":"[[\"x\",\"y\",\"z\"]][[x, y, z]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
-{"name":"jp2.42","output":"[null][$input.path('$.nothing.append(1)')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
+{"name":"jp2.42","output":"[\"\"][$input.path('$.nothing.append(1)')]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp2.43","output":"[\"text\"][text]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp2.44","output":"[[1,2.5,\"text\",true,null,[],{},[1,2,3,4,5],[[1,2],[3,4],[5]],{\"k\":{\"l\":{\"m\":\"deep\"}}},[\"x\",\"y\",\"z\"],[{\"p\":1},{\"p\":2,\"q\":\"two\"},{\"r\":3}],\"space\",\"dotted\",\"dollar\",\"unicode \u00e9\u4e2d\",[10,20.5,30,-5],[null,1,null],3000000000,1,2,3,4,5,[1,2],[3,4],[5],1,2,3,4,5,{\"l\":{\"m\":\"deep\"}},{\"m\":\"deep\"},\"deep\",\"x\",\"y\",\"z\",{\"p\":1},{\"p\":2,\"q\":\"two\"},{\"r\":3},1,2,\"two\",3,10,20.5,30,-5,null,1,null]][[1, 2.5, text, true, null, [], {}, [1, 2, 3, 4, 5], [[1, 2], [3, 4], [5]], {k={l={m=deep}}}, [x, y, z], [{p=1}, {p=2, q=two}, {r=3}], space, dotted, dollar, unicode \u00e9\u4e2d, [10, 20.5, 30, -5], [null, 1, null], 3000000000, 1, 2, 3, 4, 5, [1, 2], [3, 4], [5], 1, 2, 3, 4, 5, {l={m=deep}}, {m=deep}, deep, x, y, z, {p=1}, {p=2, q=two}, {r=3}, 1, 2, two, 3, 10, 20.5, 30, -5, null, 1, null]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}
 {"name":"jp2.46","output":"[[{\"l\":{\"m\":\"deep\"}},{\"m\":\"deep\"},\"deep\"]][[{l={m=deep}}, {m=deep}, deep]]","context":{"requestId":"r1","identity":{"sourceIp":"1.2.3.4"},"requestOverride":{"header":{},"querystring":{},"path":{}}}}

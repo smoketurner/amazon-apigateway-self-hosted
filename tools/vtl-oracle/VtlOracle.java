@@ -1,6 +1,7 @@
 import com.jayway.jsonpath.Configuration;
 import com.jayway.jsonpath.JsonPath;
 import com.jayway.jsonpath.Option;
+import com.jayway.jsonpath.PathNotFoundException;
 import com.jayway.jsonpath.spi.json.JsonSmartJsonProvider;
 import com.jayway.jsonpath.spi.mapper.JsonSmartMappingProvider;
 import java.io.IOException;
@@ -32,6 +33,12 @@ public final class VtlOracle {
             .jsonProvider(new JsonSmartJsonProvider())
             .mappingProvider(new JsonSmartMappingProvider())
             .options(Option.SUPPRESS_EXCEPTIONS)
+            .build();
+
+    /** The same, but throwing, so $input.json can tell a missing member from a null one. */
+    private static final Configuration STRICT_JSON_PATH = Configuration.builder()
+            .jsonProvider(new JsonSmartJsonProvider())
+            .mappingProvider(new JsonSmartMappingProvider())
             .build();
 
     private static final VelocityEngine ENGINE = newEngine();
@@ -136,7 +143,15 @@ public final class VtlOracle {
             return normalize(JsonPath.using(JSON_PATH).parse(body).read(path));
         }
 
+        /** A path that addresses nothing renders as an empty JSON string, as API Gateway does. */
         public String json(String path) {
+            try {
+                JsonPath.using(STRICT_JSON_PATH).parse(body).read(path);
+            } catch (PathNotFoundException missing) {
+                return "\"\"";
+            } catch (RuntimeException other) {
+                // Anything else is left to the suppressed read below.
+            }
             return Json.writeCompact(path(path));
         }
 

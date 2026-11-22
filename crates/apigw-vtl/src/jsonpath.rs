@@ -176,16 +176,20 @@ impl JsonPath {
     /// Returns [`JsonPathError`] when a function cannot be applied, for example `max()` of an
     /// empty array, as Jayway throws.
     pub fn evaluate(&self, document: &Value) -> Result<Value, JsonPathError> {
+        Ok(self.find(document)?.unwrap_or(Value::Null))
+    }
+
+    /// Like [`Self::evaluate`], but `None` when a definite path addresses nothing, so a
+    /// caller can tell a missing member from one that holds `null`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::evaluate`].
+    pub fn find(&self, document: &Value) -> Result<Option<Value>, JsonPathError> {
         Ok(match self.segments.run(document, document)? {
-            Found::One(value) => value,
-            Found::Many(values) => Value::List(List::from_values(values)),
-            Found::Nothing => {
-                if self.segments.is_definite() {
-                    Value::Null
-                } else {
-                    Value::List(List::new())
-                }
-            }
+            Found::One(value) => Some(value),
+            Found::Many(values) => Some(Value::List(List::from_values(values))),
+            Found::Nothing => (!self.segments.is_definite()).then(|| Value::List(List::new())),
         })
     }
 }
@@ -1317,6 +1321,15 @@ mod tests {
 
     #[test]
     fn missing_paths_are_null_or_empty() {
+        let document = Value::from_json(STORE).unwrap_or(Value::Null);
+        let found = |path: &str| {
+            path.parse::<JsonPath>()
+                .ok()
+                .and_then(|path| path.find(&document).ok())
+        };
+        assert_eq!(found("$.nothing"), Some(None));
+        assert_eq!(found("$.store.book[9]"), Some(None));
+        assert!(matches!(found("$.store.book[*].nothing"), Some(Some(_))));
         assert_eq!(eval("$.nothing", STORE), "null");
         assert_eq!(eval("$.store.nothing.deeper", STORE), "null");
         assert_eq!(eval("$.store.book[9]", STORE), "null");

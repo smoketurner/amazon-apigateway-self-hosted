@@ -569,7 +569,15 @@ impl Interpreter<'_> {
             ("json", [Value::Str(path)]) => {
                 self.charge_for_size(self.input.body().len())?;
                 let document = self.body_document()?;
-                ok(evaluate_path(path, &document)?.to_json()?)
+                // A definite path that addresses nothing renders as an empty JSON string, not
+                // `null` (measured against a deployed REST API).
+                match parse_path(path)?
+                    .find(&document)
+                    .map_err(|err| invalid_path(path, &err))?
+                {
+                    Some(value) => ok(value.to_json()?),
+                    None => ok("\"\"".to_owned()),
+                }
             }
             _ => Ok(None),
         }
@@ -617,14 +625,21 @@ fn parse_body(body: &str) -> Result<Value, RenderError> {
 }
 
 fn evaluate_path(path: &str, document: &Value) -> Result<Value, RenderError> {
-    let invalid = |err: JsonPathError| RenderError::InvalidJsonPath {
+    parse_path(path)?
+        .evaluate(document)
+        .map_err(|err| invalid_path(path, &err))
+}
+
+fn parse_path(path: &str) -> Result<JsonPath, RenderError> {
+    path.parse::<JsonPath>()
+        .map_err(|err| invalid_path(path, &err))
+}
+
+fn invalid_path(path: &str, err: &JsonPathError) -> RenderError {
+    RenderError::InvalidJsonPath {
         path: path.to_owned(),
         message: err.to_string(),
-    };
-    path.parse::<JsonPath>()
-        .map_err(invalid)?
-        .evaluate(document)
-        .map_err(invalid)
+    }
 }
 
 /// The argument counts a `String` method accepts, for deciding whether a null argument would
