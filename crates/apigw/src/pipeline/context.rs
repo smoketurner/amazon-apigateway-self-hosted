@@ -412,6 +412,22 @@ impl RequestContext {
         Self::new(api, route, parts, Vec::new())
     }
 
+    /// The path an event reports as sent: the client's own, except that
+    /// API Gateway hands an HTTP API on a custom domain the path its stage URL
+    /// would have had, the mapping key giving way to the stage.
+    fn sent_path(
+        api: &ApiInfo,
+        via_custom_domain: bool,
+        routed: &str,
+        original: Option<&str>,
+    ) -> String {
+        match (api.kind, api.stage.as_deref()) {
+            (ApiKind::Http, None | Some("$default")) if via_custom_domain => routed.to_owned(),
+            (ApiKind::Http, Some(stage)) if via_custom_domain => format!("/{stage}{routed}"),
+            (ApiKind::Http | ApiKind::Rest, _) => original.unwrap_or(routed).to_owned(),
+        }
+    }
+
     /// Captures a request before its body is read. `route` is `None` for
     /// requests that matched no route.
     pub(crate) fn new(
@@ -444,10 +460,22 @@ impl RequestContext {
             tracing::warn!("request reached the pipeline without a client identity");
             ClientIdentity::unknown()
         });
-        let sent_path = extensions
-            .get::<OriginalUri>()
-            .map_or_else(|| uri.path(), |original| original.0.path())
-            .to_owned();
+        let via_custom_domain = extensions.get::<ViaCustomDomain>().is_some();
+        let info = ApiInfo {
+            kind: api.kind,
+            api_id: api.api_id.clone(),
+            stage: api.stage.clone(),
+            release: api.release,
+            deployment_id: api.deployment_id.clone(),
+        };
+        let sent_path = Self::sent_path(
+            &info,
+            via_custom_domain,
+            uri.path(),
+            extensions
+                .get::<OriginalUri>()
+                .map(|original| original.0.path()),
+        );
         // An HTTP API works with the decoded path everywhere but in the
         // payload 1.0 event's `path`; a REST API never decodes it.
         let (path, full_path) = match api.kind {
@@ -464,13 +492,7 @@ impl RequestContext {
             None => (RouteKey::from(""), uri.path().to_owned()),
         };
         Self {
-            api: ApiInfo {
-                kind: api.kind,
-                api_id: api.api_id.clone(),
-                stage: api.stage.clone(),
-                release: api.release,
-                deployment_id: api.deployment_id.clone(),
-            },
+            api: info,
             route_key,
             started_trace: TraceId::generate(jiff::Timestamp::now()),
             resource_id: api.resource_ids.get(&resource_path).cloned(),
@@ -481,7 +503,7 @@ impl RequestContext {
             path,
             full_path,
             sent_path,
-            via_custom_domain: extensions.get::<ViaCustomDomain>().is_some(),
+            via_custom_domain,
             query: QueryString::for_api(api.kind, uri.query()),
             headers,
             header_case,
@@ -859,6 +881,26 @@ pub(crate) mod tests {
         assert_eq!(
             context.event_value(PayloadVersion::V1),
             Some(json!({"claims": {"iat": 1_516_239_022}}))
+        );
+    }
+
+    #[test]
+    fn an_http_api_on_a_custom_domain_reports_its_stage_path() {
+        let mut api = request(ApiKind::Http).api;
+        let sent = |api: &ApiInfo, via_domain| {
+            RequestContext::sent_path(api, via_domain, "/items/7", Some("/v1/items/7"))
+        };
+        assert_eq!(sent(&api, true), "/prod/items/7");
+        assert_eq!(sent(&api, false), "/v1/items/7");
+        api.stage = Some("$default".to_owned());
+        assert_eq!(sent(&api, true), "/items/7");
+        api.stage = None;
+        assert_eq!(sent(&api, true), "/items/7");
+        api.kind = ApiKind::Rest;
+        assert_eq!(sent(&api, true), "/v1/items/7");
+        assert_eq!(
+            RequestContext::sent_path(&api, false, "/items/7", None),
+            "/items/7"
         );
     }
 
