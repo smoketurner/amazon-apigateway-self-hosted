@@ -228,7 +228,8 @@ enum Origin {
 pub(crate) struct Failure {
     origin: Origin,
     status: StatusCode,
-    message: Cow<'static, str>,
+    /// `None` when API Gateway leaves `$context.error.message` null.
+    message: Option<Cow<'static, str>>,
     /// What a request body violated, for `$context.error.validationErrorString`.
     validation: Option<String>,
     /// Whether `$context.error.messageString` starts with a space.
@@ -246,8 +247,8 @@ impl Failure {
     }
 
     #[cfg(test)]
-    pub(crate) fn message(&self) -> &str {
-        &self.message
+    pub(crate) fn message(&self) -> Option<&str> {
+        self.message.as_deref()
     }
 
     #[cfg(test)]
@@ -260,7 +261,7 @@ impl Failure {
         Self {
             origin: Origin::Aws(response_type),
             status: response_type.default_status(),
-            message: Cow::Borrowed(response_type.default_message()),
+            message: Some(Cow::Borrowed(response_type.default_message())),
             validation: None,
             spaced: response_type.message_string_is_spaced(),
             error_type: None,
@@ -273,7 +274,7 @@ impl Failure {
         Self {
             origin: Origin::Gateway,
             status,
-            message: Cow::Borrowed(message),
+            message: Some(Cow::Borrowed(message)),
             validation: None,
             spaced: false,
             error_type: None,
@@ -289,7 +290,15 @@ impl Failure {
 
     #[must_use]
     pub(crate) fn with_message(mut self, message: impl Into<Cow<'static, str>>) -> Self {
-        self.message = message.into();
+        self.message = Some(message.into());
+        self
+    }
+
+    /// Leaves `$context.error.message` and `messageString` null, as a deployed REST
+    /// API does for an authorizer it cannot use.
+    #[must_use]
+    pub(crate) fn without_message(mut self) -> Self {
+        self.message = None;
         self
     }
 
@@ -570,7 +579,10 @@ impl GatewayResponses {
     /// fallback type also applies to a customized type that sets none.
     pub(crate) fn render(&self, failure: &Failure, request: &RequestContext) -> Response {
         if request.api.kind == ApiKind::Http {
-            let mut response = Self::plain(failure.status, &failure.message);
+            let mut response = Self::plain(
+                failure.status,
+                failure.message.as_deref().unwrap_or_default(),
+            );
             if let Some(challenge) = failure.challenge.clone() {
                 response
                     .headers_mut()
@@ -974,6 +986,27 @@ mod tests {
         assert_eq!(
             body(response).await,
             r#"{"message": "Internal server error"}"#
+        );
+    }
+
+    /// Measured against a deployed REST API: an authorizer response without a
+    /// policy document leaves the message null, default and customized alike.
+    #[tokio::test]
+    async fn an_unusable_authorizer_has_a_null_message() {
+        let ctx = request(ApiKind::Rest);
+        let failure = Failure::new(ResponseType::AuthorizerConfigurationError).without_message();
+        let response = GatewayResponses::default().render(&failure, &ctx);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body(response).await, r#"{"message":null}"#);
+        let specs: BTreeMap<String, GatewayResponseSpec> = serde_json::from_value(json!({
+            "DEFAULT_5XX": {"responseTemplates": {"application/json":
+                "{\"message\":$context.error.messageString,\"type\":\"$context.error.responseType\"}"}},
+        }))
+        .unwrap();
+        let customized = GatewayResponses::compile(ApiKind::Rest, &specs).render(&failure, &ctx);
+        assert_eq!(
+            body(customized).await,
+            r#"{"message":null,"type":"AUTHORIZER_CONFIGURATION_ERROR"}"#
         );
     }
 

@@ -109,8 +109,10 @@ impl Denial {
             (Self::AuthorizerFailure, ApiKind::Rest) => {
                 Failure::new(ResponseType::AuthorizerFailure)
             }
+            // Measured against a deployed REST API, for an authorizer response
+            // without a policy document: `{"message":null}`.
             (Self::AuthorizerConfiguration, ApiKind::Rest) => {
-                Failure::new(ResponseType::AuthorizerConfigurationError)
+                Failure::new(ResponseType::AuthorizerConfigurationError).without_message()
             }
             (Self::AuthorizerFailure, ApiKind::Http) => Failure::new(ResponseType::AuthorizerFailure)
                 .with_message("Internal Server Error"),

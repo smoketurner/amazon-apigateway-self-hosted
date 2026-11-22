@@ -190,7 +190,7 @@ async fn a_body_that_breaks_its_model_is_a_bad_request_body() {
             Some(ResponseType::BadRequestBody),
             "{body}"
         );
-        assert_eq!(failed.message(), "Invalid request body");
+        assert_eq!(failed.message(), Some("Invalid request body"));
         assert_eq!(violations(&failed), expected, "{body}");
     }
 }
@@ -968,7 +968,7 @@ async fn required_parameters_must_be_present() {
     );
     assert_eq!(
         failed.message(),
-        "Missing required request parameters: [X-Token]"
+        Some("Missing required request parameters: [X-Token]")
     );
     assert_eq!(failed.validation(), None);
 }
@@ -979,7 +979,7 @@ async fn every_missing_parameter_is_listed() {
     let failed = failure(&route, &with_parameters(None, &[])).await;
     assert_eq!(
         failed.message(),
-        "Missing required request parameters: [X-Token, limit]"
+        Some("Missing required request parameters: [X-Token, limit]")
     );
 }
 

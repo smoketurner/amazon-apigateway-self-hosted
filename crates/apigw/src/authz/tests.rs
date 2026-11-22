@@ -485,8 +485,12 @@ async fn authorizer_failures_map_to_401_and_500() {
         (status, body),
         (StatusCode::UNAUTHORIZED, json!({"message": "Unauthorized"}))
     );
+    // A function that raises is an authorizer failure.
+    let (status, body) = h.get("/pets/7", "boom").await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body, json!({"message": "Internal server error"}));
+    // An answer the gateway cannot use is a configuration error, whose message is null.
     for token in [
-        "boom",
         "garbage",
         "not-an-object",
         "no-principal",
@@ -495,7 +499,7 @@ async fn authorizer_failures_map_to_401_and_500() {
     ] {
         let (status, body) = h.get("/pets/7", token).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{token}");
-        assert_eq!(body, json!({"message": "Internal server error"}), "{token}");
+        assert_eq!(body, json!({"message": null}), "{token}");
     }
     assert_eq!(h.backend_calls.count(), 0, "no failure reaches the backend");
 }
@@ -519,7 +523,7 @@ async fn an_authorizer_that_does_not_answer_in_10_seconds_is_500() {
     let h = Harness::start(&doc, ApiKind::Rest, AuthorizationMode::Enforce).await;
     let (status, body) = h.get("/pets/7", "allow").await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(body, json!({"message": "Internal server error"}));
+    assert_eq!(body, json!({"message": null}));
     assert_eq!(h.backend_calls.count(), 0);
 }
 

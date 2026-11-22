@@ -242,6 +242,7 @@ mod tests {
             .unwrap()
             .failure(&headers, now())
             .message()
+            .unwrap_or_default()
             .to_owned()
     }
 
@@ -251,6 +252,7 @@ mod tests {
             .unwrap()
             .failure(&headers, now())
             .message()
+            .unwrap_or_default()
             .to_owned()
     }
 
