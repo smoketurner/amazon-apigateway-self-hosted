@@ -51,6 +51,15 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 {{- end }}
 
+{{/* OTEL_RESOURCE_ATTRIBUTES from a map: key=value pairs, sorted by key. */}}
+{{- define "apigw.resourceAttributes" -}}
+{{- $pairs := list }}
+{{- range $key, $value := . }}
+{{- $pairs = append $pairs (printf "%s=%s" $key (toString $value)) }}
+{{- end }}
+{{- join "," $pairs }}
+{{- end }}
+
 {{/* Fails the render unless exactly one API source is set, as apigw itself requires. */}}
 {{- define "apigw.validateSource" -}}
 {{- $sources := 0 }}

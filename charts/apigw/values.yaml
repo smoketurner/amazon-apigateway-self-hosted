@@ -94,10 +94,50 @@ service:
   port: 443
   annotations: {}
 
-# The admin listener (/healthz, /routes) is used by the probes and is never
-# added to the Service: /routes lists every backend target.
+# The admin listener (/healthz, /routes, /metrics) is used by the probes and is
+# never added to the Service: /routes lists every backend target.
 adminPort: 9443
 containerPort: 8443
+
+# Prometheus metrics, served on /metrics of the admin listener over TLS (the
+# pod's own certificate, so scrapers either trust its CA or skip verification).
+# Worth alerting on: time since apigw_config_last_success_timestamp_seconds
+# (a gateway that stopped refreshing), apigw_tls_certificate_expiry_seconds,
+# rises in apigw_config_refreshes_total{outcome!~"unchanged|swapped"} and
+# apigw_usage_refreshes_total{outcome="failure"}, apigw_routes_unservable,
+# apigw_state_errors_total, and the 5xx share of apigw_requests_total.
+metrics:
+  # prometheus.io/scrape, scheme, port, and path annotations on the pod.
+  scrapeAnnotations: false
+  # TLS settings for the Prometheus Operator monitors below.
+  tlsConfig:
+    insecureSkipVerify: true
+  # A Prometheus Operator PodMonitor for the admin port.
+  podMonitor:
+    enabled: false
+    interval: 30s
+    # Labels your Prometheus selects monitors by.
+    labels: {}
+  # A Prometheus Operator ServiceMonitor. It needs a Service for the admin
+  # port, so the chart adds `<fullname>-metrics`, which also reaches /routes.
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}
+
+# OpenTelemetry export of metrics and request spans (APIGW_OTEL). Any other
+# OTEL_* variable (headers, sampler, per-signal endpoints) goes in `extraEnv`.
+otel:
+  enabled: false
+  # OTEL_EXPORTER_OTLP_ENDPOINT, e.g. http://otel-collector.observability:4318
+  endpoint: ""
+  # OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf or grpc.
+  protocol: http/protobuf
+  # OTEL_SERVICE_NAME; apigw when empty.
+  serviceName: ""
+  # OTEL_RESOURCE_ATTRIBUTES, as name: value pairs. The pod, namespace, node,
+  # container, and deployment are set from the downward API already.
+  resourceAttributes: {}
 
 podDisruptionBudget:
   enabled: false
