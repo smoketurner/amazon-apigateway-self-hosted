@@ -15,7 +15,7 @@ Every flag has an environment variable (`apigw --help` lists them). The main one
 | `--tls-cert`, `--tls-key` | `APIGW_TLS_CERT`, `APIGW_TLS_KEY` | required | PEM files; reloaded automatically when they change |
 | `--listen` | `APIGW_LISTEN` | `0.0.0.0:8443` | API traffic |
 | `--allowed-host` | `APIGW_ALLOWED_HOSTS` | any | Serve only these `Host` names (repeatable) and answer `403` to the rest, as API Gateway does for a host that is not the API's |
-| `--admin-listen` | `APIGW_ADMIN_LISTEN` | off | `/healthz` and `/routes` (also TLS) |
+| `--admin-listen` | `APIGW_ADMIN_LISTEN` | off | `/healthz`, `/routes`, and Prometheus `/metrics` (also TLS) |
 | `--base-path` | `APIGW_BASE_PATH` | none | Serve under `/prod` etc., like an `execute-api` URL |
 | `--refresh-seconds` | `APIGW_REFRESH_SECONDS` | `60` | Re-download interval; `0` disables |
 | `--config-cache` | `APIGW_CONFIG_CACHE` | none | Last-known-good definition, used when AWS is unreachable at startup |
@@ -35,10 +35,14 @@ Every flag has an environment variable (`apigw --help` lists them). The main one
 | `--proxy-protocol` | `APIGW_PROXY_PROTOCOL` | off | Require a PROXY protocol v2 header on `--listen`, from `--trusted-proxies` only |
 | `--access-logs` | `APIGW_ACCESS_LOGS` | `aws` | `aws` writes to the stage's access log destination, `stdout` writes lines to standard output, `off` writes none ([Observability](operations.md#observability)) |
 | `--execution-logs` | `APIGW_EXECUTION_LOGS` | `aws` | Same choices, for `loggingLevel`/`dataTraceEnabled` execution logs |
-| `--metrics-log-group` | `APIGW_METRICS_LOG_GROUP` | none | CloudWatch Logs log group (must exist) that receives metrics as embedded metric format events; metrics are off when unset |
+| `--metrics` | `APIGW_METRICS` | `aws` | Where API Gateway's CloudWatch metrics go as embedded metric format events: `aws` writes to `--metrics-log-group` (none when it is unset), `stdout` writes one event per line to standard output, `off` writes none |
+| `--metrics-log-group` | `APIGW_METRICS_LOG_GROUP` | none | CloudWatch Logs log group (must exist) that receives the metrics with `--metrics aws` |
 | `--metrics-namespace` | `APIGW_METRICS_NAMESPACE` | `ApiGatewaySelfHosted` | CloudWatch namespace for the metrics (`AWS/` is reserved) |
-| `--tracing` | `APIGW_TRACING` | `aws` | `aws` sends X-Ray segments for stages with tracing enabled and propagates trace headers; `off` does neither |
-| `--xray-sampling-percent` | `APIGW_XRAY_SAMPLING_PERCENT` | `5` | Percentage of requests traced after the first request each second, when the caller made no sampling decision |
+| `--tracing` | `APIGW_TRACING` | `aws` | `aws` sends X-Ray segments for stages with tracing enabled and propagates trace headers; `stdout` writes the segments to standard output instead; `off` does neither |
+| `--xray-sampling-rules` | `APIGW_XRAY_SAMPLING_RULES` | `true` | With `--tracing aws`, sample by the account's X-Ray sampling rules and reservoir quotas (`GetSamplingRules`, `GetSamplingTargets`); `false` applies only the default rule |
+| `--xray-sampling-percent` | `APIGW_XRAY_SAMPLING_PERCENT` | `5` | Percentage of requests traced after the first request each second, when the caller made no sampling decision and no sampling rule applies |
+| `--xray-passive` | `APIGW_XRAY_PASSIVE` | off | On stages without tracing enabled, trace the requests their caller sampled, and start no traces (X-Ray passive mode) |
+| `--otel` | `APIGW_OTEL` | off | Export metrics and request spans with OpenTelemetry, configured with the standard `OTEL_*` variables ([OpenTelemetry](operations.md#opentelemetry)) |
 | `--domain-name NAME` | `APIGW_DOMAIN_NAMES` | none | Serve every API mapped to this custom domain (repeatable or comma-separated; `*.example.com` allowed) instead of one API ([Custom domains](operations.md#custom-domains)) |
 | `--domain-cert-dir DIR` | `APIGW_DOMAIN_CERT_DIR` | none | `DIR/{domain}/tls.crt` and `tls.key` per domain, served by SNI and reloaded on change; without it `--tls-cert` serves every domain |
 | `--canary-export-stage` | `APIGW_CANARY_EXPORT_STAGE` | none | REST stage that holds the canary deployment of `--stage`, exported to build the canary release ([Canary releases](operations.md#canary-releases)) |

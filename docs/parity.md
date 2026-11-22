@@ -100,9 +100,9 @@ Routes whose protection is not evaluated yet are refused, never served unprotect
 | Feature | REST | HTTP | Behavior today / issue |
 |---|---|---|---|
 | Access logs to CloudWatch Logs or Firehose | Supported | Supported | The stage's `$context` format is rendered per request and written to the stage's log group (one stream per process) or Firehose stream, standard output otherwise. `$context.responseLength` is `-` for streamed responses of unknown length; variables for features not implemented yet render `-` ([#41](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/41)) |
-| CloudWatch metrics | Partial | Partial | Published as embedded metric format events under `--metrics-namespace` (not `AWS/ApiGateway`), aggregated per minute, with API Gateway's metric names and dimensions. Use `Sum` for `Count` and error metrics; latency percentiles are estimated from at most 100 samples per minute. Cache hit and miss counts for cached routes, no `DataProcessed` ([#42](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/42)) |
-| X-Ray tracing | Partial | n/a | REST stages with tracing send one segment per sampled request and pass `X-Amzn-Trace-Id` (and `traceparent` to HTTP backends) downstream; callers' sampling decisions are honored, otherwise X-Ray's default rule (1 per second, then 5%) is used without fetching sampling rules. No integration subsegment, no passive mode ([#43](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/43)) |
-| Execution logs | Partial | n/a | `loggingLevel` and `dataTraceEnabled` write a request trace to `API-Gateway-Execution-Logs_{apiId}/{stage}`; steps this gateway does not perform are not logged and bodies are not logged ([#44](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/44)) |
+| CloudWatch metrics | Partial | Partial | Published as embedded metric format events under `--metrics-namespace` (not `AWS/ApiGateway`), to a log group or standard output, aggregated per minute, with API Gateway's metric names and dimensions, including cache hit and miss counts for cached routes and HTTP APIs' `DataProcessed` (bytes of known length only). Use `Sum` for `Count`, error metrics, and `DataProcessed`; latency percentiles are estimated from at most 100 samples per minute. The same metrics are on the Prometheus `/metrics` endpoint and in OTLP ([#42](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/42)) |
+| X-Ray tracing | Partial | n/a | REST stages with tracing send one segment per sampled request, with a subsegment for the integration call, and pass `X-Amzn-Trace-Id` (and `traceparent` to HTTP backends) downstream naming that subsegment as the parent. Callers' sampling decisions are honored; otherwise the account's sampling rules and reservoir quotas apply (rules with attributes never match), falling back to the default rule. `--xray-passive` reproduces passive mode on stages without tracing. Request spans are also exported with OpenTelemetry under `--otel` ([#43](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/43)) |
+| Execution logs | Partial | n/a | `loggingLevel` and `dataTraceEnabled` write a request trace to `API-Gateway-Execution-Logs_{apiId}/{stage}` (or standard output) in API Gateway's wording, with request, endpoint, and response headers and bodies under `dataTraceEnabled`, cut at 1 KB per event. Authorizer steps are not logged, nor bodies of streamed responses or method responses over 1 MiB ([#44](https://github.com/smoketurner/amazon-apigateway-self-hosted/issues/44)) |
 
 ## Operating the gateway
 
@@ -114,7 +114,7 @@ These are properties of `apigw`, not API Gateway features, and are all supported
 | Live refresh | The router is swapped without dropping requests; a failed refresh keeps the current routes and backs off with jitter |
 | Last-known-good cache | `--config-cache` starts the gateway when API Gateway is unreachable |
 | TLS | Always on; certificates reload when the files change |
-| Admin endpoints | `/healthz` and `/routes` (also TLS) |
+| Admin endpoints | `/healthz`, `/routes`, and Prometheus `/metrics` (also TLS) |
 
 ## Out of scope
 

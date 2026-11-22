@@ -35,10 +35,18 @@ The chart needs an API source and a certificate, and fails to render without the
 - `cache.existingClaim` keeps the last-known-good definition on a PersistentVolumeClaim
   instead of an `emptyDir`.
 - `istio.destinationRule.enabled` renders the DestinationRule shown under [Istio](#istio).
+- `metrics.podMonitor.enabled` and `metrics.serviceMonitor.enabled` create Prometheus Operator
+  monitors, and `metrics.scrapeAnnotations` adds `prometheus.io/*` pod annotations, for the
+  admin listener's `/metrics` ([Monitoring](#monitoring)).
+- `otel.enabled` sets `APIGW_OTEL`, with `otel.endpoint`, `otel.protocol`, `otel.serviceName`,
+  and `otel.resourceAttributes` as the matching `OTEL_*` variables. The pod always gets
+  `K8S_POD_NAME`, `K8S_POD_UID`, `K8S_NAMESPACE_NAME`, `K8S_NODE_NAME`,
+  `K8S_CONTAINER_NAME`, and `K8S_DEPLOYMENT_NAME`, which become the OpenTelemetry resource's
+  `k8s.*` attributes ([OpenTelemetry](operations.md#opentelemetry)).
 - Any other flag goes in `extraEnv` as its `APIGW_*` variable.
 
 `charts/apigw/values.yaml` documents every value. The admin port is used by the probes and is
-never added to the Service.
+never added to the API's Service.
 
 ## Linux packages
 
@@ -306,6 +314,51 @@ Keep the admin port off any Ingress — `/routes` lists every backend target.
 
 An `emptyDir` cache survives container restarts but not pod rescheduling. Use a
 `PersistentVolumeClaim` if pods must start while AWS is unreachable after being rescheduled.
+
+## Monitoring
+
+`/metrics` on the admin port serves Prometheus metrics over TLS with the pod's certificate
+([the list](operations.md#prometheus)). Prometheus must use `https` and either trust the
+certificate's CA or skip verification (the chart's monitors default to
+`metrics.tlsConfig.insecureSkipVerify: true`; set `metrics.tlsConfig` to `ca`/`serverName`
+settings to verify). With the Prometheus Operator, prefer the PodMonitor: the ServiceMonitor
+needs a Service for the admin port, so the chart adds `<release>-metrics`, through which
+`/routes` is reachable in the cluster too. With Istio, Prometheus merging
+(`prometheus.io/*` annotations rewritten to the sidecar) scrapes the application over plain HTTP, so scrape the
+admin port directly with a monitor instead of merged annotations.
+
+The metrics worth alerting on:
+
+```yaml
+groups:
+  - name: apigw
+    rules:
+      - alert: ApigwDefinitionStale            # the refresh loop stopped or keeps failing
+        expr: time() - apigw_config_last_success_timestamp_seconds > 900
+        for: 5m
+      - alert: ApigwDefinitionRejected         # API Gateway has a definition this gateway cannot build
+        expr: increase(apigw_config_refreshes_total{outcome="rejected"}[15m]) > 0
+      - alert: ApigwUsagePlansStale            # API keys stop working an hour after the last read
+        expr: time() - apigw_usage_last_success_timestamp_seconds > 1800
+      - alert: ApigwCertificateExpiring
+        expr: apigw_tls_certificate_expiry_seconds < 14 * 86400
+      - alert: ApigwCertificateReloadFailing   # new files on disk that do not load
+        expr: increase(apigw_tls_reloads_total{outcome="failure"}[15m]) > 0
+      - alert: ApigwUnservableRoutes           # routes answering 501
+        expr: apigw_routes_unservable > 0
+      - alert: ApigwValkeyErrors               # limits and caches fall back while Valkey fails
+        expr: rate(apigw_state_errors_total[5m]) > 0
+        for: 5m
+      - alert: ApigwServerErrors
+        expr: |
+          sum by (api_id, stage) (rate(apigw_requests_total{status_class="5xx"}[5m]))
+            / sum by (api_id, stage) (rate(apigw_requests_total[5m])) > 0.05
+        for: 10m
+```
+
+Set the stale-definition threshold above `--refresh-seconds` plus the refresh backoff (at most
+15 minutes). `apigw_jwks_fetches_total{outcome="failure"}` rising means token authorizers
+cannot reach their issuer and will refuse tokens signed by keys they have not cached.
 
 ## Istio
 

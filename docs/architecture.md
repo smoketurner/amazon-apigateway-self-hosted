@@ -18,7 +18,8 @@ gateway supplies the request through `TemplateInput` and reads `requestOverride`
 | `router` | Builds an axum `Router` from the routes; the dispatcher that swaps routers live; admin routes |
 | `client_cert` | The client certificate as API Gateway reports it (`clientCertPem`, `subjectDN`, `issuerDN`, `serialNumber`, `validity`) |
 | `domain` | Custom domains: API mappings, routing rules, mutual TLS truststores, and the supervisor that loads and refreshes one API per mapped stage |
-| `observability` | Access logs, per-minute EMF metrics, and execution logs: `StageObserver` records each request of a loaded stage; `Observability` owns the bounded per-destination queues and workers |
+| `observability` | Access logs, per-minute EMF metrics, execution logs, and X-Ray segments and sampling rules: `StageObserver` records each request of a loaded stage; `Observability` owns the bounded per-destination queues and workers |
+| `telemetry` | OpenTelemetry: `GatewayMetrics` (request and gateway health instruments, rendered for Prometheus by `PrometheusRegistry` and exported over OTLP with `--otel`), request spans (`RequestTracer`, `RequestSpan`) with W3C trace context propagation, and the resource from `OTEL_*` and Kubernetes variables |
 | `pipeline` | Per-request execution in API Gateway's stage order (`Pipeline`), and `RequestContext`, the single owner of `$context` variables |
 | `gateway` | What every route of an API shares (`ApiContext`), enforcement of unevaluated protections, and API Gateway-shaped errors (`GatewayError`) |
 | `gateway_response` | Every error the gateway answers with (`Failure`), rendered through the API's customized REST gateway responses (status, `gatewayresponse.header.*`, `$context` templates, `DEFAULT_4XX`/`DEFAULT_5XX` fallback) or HTTP APIs' fixed messages |
