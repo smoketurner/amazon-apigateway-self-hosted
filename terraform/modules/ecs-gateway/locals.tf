@@ -74,17 +74,24 @@ locals {
         { containerName = "tls-init", condition = "SUCCESS" },
       ]
       stopTimeout = local.stop_timeout_seconds
-      environment = [
-        { name = api.kind == "rest" ? "APIGW_REST_API_ID" : "APIGW_HTTP_API_ID", value = api.id },
-        { name = "APIGW_STAGE", value = var.stage_name },
-        { name = "APIGW_BASE_PATH", value = var.base_path },
-        { name = "APIGW_LISTEN", value = "0.0.0.0:${api.api_port}" },
-        { name = "APIGW_ADMIN_LISTEN", value = "0.0.0.0:${api.admin_port}" },
-        { name = "APIGW_TLS_CERT", value = "${local.tls_dir}/tls.crt" },
-        { name = "APIGW_TLS_KEY", value = "${local.tls_dir}/tls.key" },
-        { name = "APIGW_CONFIG_CACHE", value = "/var/cache/apigw/config.json" },
-        { name = "AWS_REGION", value = local.region },
-      ]
+      # A custom domain brings its stages from its mappings and takes no cache.
+      environment = concat(
+        api.kind == "domain" ? [
+          { name = "APIGW_DOMAIN_NAMES", value = api.id },
+          ] : [
+          { name = api.kind == "rest" ? "APIGW_REST_API_ID" : "APIGW_HTTP_API_ID", value = api.id },
+          { name = "APIGW_STAGE", value = var.stage_name },
+          { name = "APIGW_BASE_PATH", value = var.base_path },
+          { name = "APIGW_CONFIG_CACHE", value = "/var/cache/apigw/config.json" },
+        ],
+        [
+          { name = "APIGW_LISTEN", value = "0.0.0.0:${api.api_port}" },
+          { name = "APIGW_ADMIN_LISTEN", value = "0.0.0.0:${api.admin_port}" },
+          { name = "APIGW_TLS_CERT", value = "${local.tls_dir}/tls.crt" },
+          { name = "APIGW_TLS_KEY", value = "${local.tls_dir}/tls.key" },
+          { name = "AWS_REGION", value = local.region },
+        ],
+      )
       portMappings = [
         { containerPort = api.api_port, protocol = "tcp" },
         { containerPort = api.admin_port, protocol = "tcp" },

@@ -82,6 +82,7 @@ Variables worth knowing (all in `environments/dev/variables.tf`):
 | `enable_logging` | `false` | Access logs and execution logs. REST APIs need the account-wide CloudWatch role |
 | `manage_account_cloudwatch_role` | `false` | Creates the role and sets it in `aws_api_gateway_account`. This **overwrites** the account's current role, and destroying it clears the setting. Leave it off if the account already has one |
 | `enable_cache_cluster` | `false` | Stage cache cluster (billed hourly while it exists) |
+| `custom_domain_zone` | `null` | A public hosted zone in the account. Creates `api.parity.<zone>` (REST at `rest` and `v1/orders`, HTTP at `http`) and `mtls.parity.<zone>` (REST at the root, mutual TLS with a truststore of a test CA), an ACM certificate for both, and on the ECS gateway a domain container on port 8445. It only adds records under `parity.<zone>`, and Route 53 refuses to overwrite an existing one |
 | `enable_vpc_link` | `false` | Internal NLB, VPC link, and a `/vpc-link` REST route. Needs `vpc_id` and `vpc_link_subnet_ids` |
 | `enable_ecs_gateway` | `false` | `apigw` on ECS Fargate against the reference REST API. See [Running apigw on ECS](#running-apigw-on-ecs) |
 | `enable_lambda_gateway` | `false` | `apigw` as a Lambda function behind a public function URL. See [Running apigw on Lambda](#running-apigw-on-lambda) |

@@ -119,6 +119,17 @@ module "http_api" {
   throttle_burst_limit      = var.throttle_burst_limit
 }
 
+module "custom_domain" {
+  source = "../../modules/custom-domain"
+  count  = var.custom_domain_zone == null ? 0 : 1
+
+  name_prefix = var.name_prefix
+  zone_name   = var.custom_domain_zone
+  rest_api_id = module.rest_api.api_id
+  http_api_id = module.http_api.api_id
+  stage_name  = var.stage_name
+}
+
 # What apigw may do to mirror the reference REST API, whatever it runs on.
 module "gateway_policy" {
   source = "../../modules/gateway-policy"

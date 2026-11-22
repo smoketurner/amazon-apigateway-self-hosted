@@ -46,6 +46,12 @@ variable "cache_cluster_size" {
   default     = "0.5"
 }
 
+variable "custom_domain_zone" {
+  description = "Public hosted zone in this account for the custom domain and mutual TLS reference domains, which go under parity.<zone>. Only new records are created in it. Null creates no domains."
+  type        = string
+  default     = null
+}
+
 variable "enable_vpc_link" {
   description = "Add a VPC-link route to the REST API, backed by an internal NLB. The NLB bills hourly."
   type        = bool

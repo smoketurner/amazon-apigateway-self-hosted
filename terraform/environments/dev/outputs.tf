@@ -24,6 +24,12 @@ output "parity_runner" {
       issuer       = module.cognito.issuer
       username     = module.cognito.test_username
     }
+    domain = var.custom_domain_zone == null ? null : {
+      base_url = "https://${module.custom_domain[0].api_domain}"
+    }
+    domain_mtls = var.custom_domain_zone == null ? null : {
+      base_url = "https://${module.custom_domain[0].mtls_domain}"
+    }
     vpc_link_enabled = var.enable_vpc_link
     cache_enabled    = var.enable_cache_cluster
   }
@@ -88,4 +94,15 @@ output "lambda_gateway" {
     role_arn       = module.lambda_gateway[0].role_arn
     log_group_name = module.lambda_gateway[0].log_group_name
   } : null
+}
+
+output "parity_client_certificates" {
+  description = "PEM client certificates and keys for the mutual TLS cases: trusted (chained to the truststore's CA) and stranger (from another CA)."
+  sensitive   = true
+  value = var.custom_domain_zone == null ? null : {
+    trusted_cert  = module.custom_domain[0].client_cert_pem
+    trusted_key   = module.custom_domain[0].client_key_pem
+    stranger_cert = module.custom_domain[0].stranger_cert_pem
+    stranger_key  = module.custom_domain[0].stranger_key_pem
+  }
 }

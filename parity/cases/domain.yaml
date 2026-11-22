@@ -1,0 +1,85 @@
+# Custom domains (api.parity.<zone>: REST at rest and v1/orders, HTTP at http) and mutual
+# TLS (mtls.parity.<zone>: REST at the root). Replay cannot serve a custom domain offline,
+# so these are recorded from API Gateway and compared against apigw on ECS with
+# `record --resolve`.
+cases:
+  - name: domain-rest-mapping
+    api: domain
+    path: /rest/mock
+    compare:
+      headers: [content-type, x-mock]
+      body: json
+
+  - name: domain-multi-level-mapping
+    api: domain
+    path: /v1/orders/mock
+    compare:
+      headers: [content-type, x-mock]
+      body: json
+
+  - name: domain-http-mapping
+    api: domain
+    path: /http/lambda-v2/x?q=1
+    compare:
+      headers: [content-type]
+      body: json
+
+  - name: domain-rest-lambda-event
+    api: domain
+    path: /rest/lambda-proxy/x?q=1
+    compare:
+      headers: [content-type]
+      body: json
+
+  - name: domain-mapping-key-alone
+    api: domain
+    path: /rest
+    compare:
+      headers: [content-type, x-amzn-errortype]
+
+  - name: domain-unmapped-path
+    api: domain
+    path: /nowhere
+    compare:
+      headers: [content-type, x-amzn-errortype]
+
+  - name: domain-partial-multi-level-key
+    api: domain
+    path: /v1/mock
+    compare:
+      headers: [content-type, x-amzn-errortype]
+
+  - name: domain-ping
+    api: domain
+    path: /ping
+    compare:
+      headers: [content-type]
+
+  - name: domain-mtls-trusted
+    api: domain_mtls
+    path: /mock
+    client_cert: trusted
+    compare:
+      headers: [content-type, x-mock]
+      body: json
+
+  - name: domain-mtls-lambda-identity
+    api: domain_mtls
+    path: /lambda-proxy/x
+    client_cert: trusted
+    compare:
+      headers: [content-type]
+      body: json
+
+  - name: domain-mtls-stranger
+    api: domain_mtls
+    path: /mock
+    client_cert: stranger
+    compare:
+      headers: [content-type, x-amzn-errortype]
+
+  - name: domain-mtls-no-certificate
+    api: domain_mtls
+    path: /mock
+    compare:
+      headers: [content-type, x-amzn-errortype]

@@ -23,6 +23,12 @@ aws apigatewayv2 export-api --api-id "$(jq -r .http.api_id "$work/outputs.json")
   --stage-name "$stage" --specification OAS30 --output-type JSON \
   "$work/exports/http.openapi.json" >/dev/null
 
+certs=()
+terraform -chdir="$env_dir" output -json parity_client_certificates >"$work/client-certs.json"
+if [[ "$(cat "$work/client-certs.json")" != "null" ]]; then
+  certs=(--client-certs "$work/client-certs.json")
+fi
+
 PARITY_API_KEY="$(terraform -chdir="$env_dir" output -raw api_key_value)"
 PARITY_COGNITO_PASSWORD="$(terraform -chdir="$env_dir" output -raw cognito_test_password)"
 export PARITY_API_KEY PARITY_COGNITO_PASSWORD
@@ -33,7 +39,7 @@ cargo build --quiet -p apigw-parity
 "$root/target/debug/apigw-parity" record \
   --outputs "$work/outputs.json" --cases "$root/parity/cases" --out "$root/parity" \
   --export-dir "$work/exports" --baseline "$root/parity" --drift-report "$drift" \
-  --secret-env PARITY_API_KEY --secret-env PARITY_COGNITO_PASSWORD
+  --secret-env PARITY_API_KEY --secret-env PARITY_COGNITO_PASSWORD "${certs[@]}"
 
 if [[ -s "$drift" ]]; then
   echo "drifted cases: $(grep -c '^### ' "$drift"), listed in $drift"

@@ -50,7 +50,7 @@ variable "stage_name" {
 }
 
 variable "additional_apis" {
-  description = "More APIs to mirror from the same task, by a short name. One apigw process mirrors one API, so each runs as its own container, on its own ports, from the same image and under the same task role."
+  description = "More APIs to mirror from the same task, by a short name. One apigw process mirrors one API, so each runs as its own container, on its own ports, from the same image and under the same task role. A domain kind serves the custom domains named, comma-separated, in id."
   type = map(object({
     kind                = string
     id                  = string
@@ -61,8 +61,8 @@ variable "additional_apis" {
   default = {}
 
   validation {
-    condition     = alltrue([for api in values(var.additional_apis) : contains(["rest", "http"], api.kind)])
-    error_message = "Each additional API's kind must be rest or http."
+    condition     = alltrue([for api in values(var.additional_apis) : contains(["rest", "http", "domain"], api.kind)])
+    error_message = "Each additional API's kind must be rest, http, or domain."
   }
 }
 
