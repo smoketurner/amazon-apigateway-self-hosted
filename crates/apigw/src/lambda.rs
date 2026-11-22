@@ -431,6 +431,16 @@ impl MultiValues {
         self.0.entry(key).or_default().push(value);
     }
 
+    /// Repeated `Cookie` headers as one value, as a deployed HTTP API's payload
+    /// 1.0 event carries them (`a=1; b=2`).
+    fn join_cookies(&mut self) {
+        if let Some(cookies) = self.0.get_mut("Cookie")
+            && cookies.len() > 1
+        {
+            *cookies = vec![cookies.join("; ")];
+        }
+    }
+
     /// Payload format 1.0: the last value per key, and every value per key.
     fn single_and_multi(&self) -> (Value, Value) {
         if self.0.is_empty() {
@@ -581,6 +591,9 @@ impl<'a> ProxyEvent<'a> {
             headers.push(name.into_owned(), spelling.value(value.as_bytes()));
         }
         self.push_gateway_headers(&mut headers, spelling);
+        if spelling == EventSpelling::HttpV1 {
+            headers.join_cookies();
+        }
         headers
     }
 
@@ -842,6 +855,30 @@ mod tests {
         ProxyEvent::new(ctx, &variables())
             .with_account("123456789012")
             .render(version)
+    }
+
+    /// Measured against a deployed HTTP API: payload 1.0 carries repeated
+    /// `Cookie` headers as one value, other repeated headers as their last value
+    /// and the list; REST payload 1.0 keeps cookies apart like any header.
+    #[test]
+    fn repeated_cookies_are_one_value_in_http_api_payload_1() {
+        let mut ctx = incoming(b"");
+        ctx.headers
+            .append("cookie", HeaderValue::from_static("u=3"));
+        let rest = event(&ctx, PayloadVersion::V1);
+        assert_eq!(
+            rest["multiValueHeaders"]["cookie"],
+            json!(["s=1; t=2", "u=3"])
+        );
+        assert_eq!(rest["headers"]["x-multi"], "b");
+        ctx.api.kind = ApiKind::Http;
+        let http = event(&ctx, PayloadVersion::V1);
+        assert_eq!(http["headers"]["Cookie"], "s=1; t=2; u=3");
+        assert_eq!(
+            http["multiValueHeaders"]["Cookie"],
+            json!(["s=1; t=2; u=3"])
+        );
+        assert_eq!(http["multiValueHeaders"]["x-multi"], json!(["a", "b"]));
     }
 
     #[test]

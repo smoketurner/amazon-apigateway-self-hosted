@@ -504,10 +504,13 @@ impl RequestContext {
 
     /// A header's value as text, for passing on: unlike [`Self::header_str`]
     /// it has a value for a header that is not ASCII, whose UTF-8 bytes reach
-    /// the backend as the client sent them.
+    /// the backend as the client sent them. A repeated header gives its last
+    /// value, as a deployed REST API's `method.request.header` does.
     pub(crate) fn header_text(&self, name: &str) -> Option<String> {
         self.headers
-            .get(name)
+            .get_all(name)
+            .iter()
+            .next_back()
             .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
     }
 

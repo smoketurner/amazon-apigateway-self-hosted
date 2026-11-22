@@ -861,6 +861,18 @@ mod tests {
         assert_eq!(source.resolve(&ctx).as_deref(), Some("café"));
     }
 
+    /// Measured against a deployed REST API: a repeated header maps its last value.
+    #[test]
+    fn a_mapped_repeated_header_gives_its_last_value() {
+        let mut ctx = incoming(&[], None);
+        ctx.headers
+            .append("x-from-client", HeaderValue::from_static("abc"));
+        ctx.headers
+            .append("x-from-client", HeaderValue::from_static("def"));
+        let source = ParamSource::Header("x-from-client".to_owned());
+        assert_eq!(source.resolve(&ctx).as_deref(), Some("def"));
+    }
+
     #[test]
     fn mapped_parameters_are_resolved() {
         let mut target = proxy("http://up/v2/{item}");
