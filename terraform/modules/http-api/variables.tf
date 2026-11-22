@@ -59,6 +59,26 @@ variable "stream_name" {
   type        = string
 }
 
+variable "empty_queue_url" {
+  description = "SQS queue the receive, delete, and purge subtype routes act on."
+  type        = string
+}
+
+variable "appconfig_application" {
+  description = "AppConfig application the GetConfiguration subtype route reads."
+  type        = string
+}
+
+variable "appconfig_environment" {
+  description = "AppConfig environment the GetConfiguration subtype route reads."
+  type        = string
+}
+
+variable "appconfig_configuration" {
+  description = "AppConfig configuration profile the GetConfiguration subtype route reads."
+  type        = string
+}
+
 variable "cors_allowed_origin" {
   description = "Origin allowed by the CORS configuration."
   type        = string

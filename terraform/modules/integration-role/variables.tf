@@ -28,6 +28,16 @@ variable "event_bus_arn" {
   type        = string
 }
 
+variable "empty_queue_arn" {
+  description = "SQS queue the receive, delete, and purge subtypes act on."
+  type        = string
+}
+
+variable "appconfig_application_arn" {
+  description = "AppConfig application the GetConfiguration subtype reads."
+  type        = string
+}
+
 variable "topic_arn" {
   description = "SNS topic the AWS integrations publish to."
   type        = string

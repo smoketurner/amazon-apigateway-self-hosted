@@ -98,3 +98,41 @@ resource "aws_s3_bucket_lifecycle_configuration" "target" {
     }
   }
 }
+
+# Nothing sends to this queue, so a ReceiveMessage of it answers the same empty result
+# behind API Gateway and behind apigw.
+resource "aws_sqs_queue" "empty" {
+  name                      = "${var.name_prefix}-empty"
+  message_retention_seconds = 60
+  sqs_managed_sse_enabled   = true
+}
+
+resource "aws_appconfig_application" "target" {
+  name = "${var.name_prefix}-target"
+}
+
+resource "aws_appconfig_environment" "target" {
+  name           = "parity"
+  application_id = aws_appconfig_application.target.id
+}
+
+resource "aws_appconfig_configuration_profile" "target" {
+  name           = "flags"
+  application_id = aws_appconfig_application.target.id
+  location_uri   = "hosted"
+}
+
+resource "aws_appconfig_hosted_configuration_version" "target" {
+  application_id           = aws_appconfig_application.target.id
+  configuration_profile_id = aws_appconfig_configuration_profile.target.configuration_profile_id
+  content_type             = "application/json"
+  content                  = jsonencode({ parity = true })
+}
+
+resource "aws_appconfig_deployment" "target" {
+  application_id           = aws_appconfig_application.target.id
+  environment_id           = aws_appconfig_environment.target.environment_id
+  configuration_profile_id = aws_appconfig_configuration_profile.target.configuration_profile_id
+  configuration_version    = aws_appconfig_hosted_configuration_version.target.version_number
+  deployment_strategy_id   = "AppConfig.AllAtOnce"
+}

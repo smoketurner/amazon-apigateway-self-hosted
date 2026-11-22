@@ -141,6 +141,69 @@ paths:
           StreamName: "${stream_name}"
           Data: "$request.body"
           PartitionKey: "parity"
+  # The other integration subtypes; the empty queue keeps their answers alike
+  /subtype/sqs-receive:
+    post:
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        integrationSubtype: SQS-ReceiveMessage
+        credentials: "${invoke_role_arn}"
+        payloadFormatVersion: "1.0"
+        requestParameters:
+          QueueUrl: "${empty_queue_url}"
+          MaxNumberOfMessages: "1"
+          WaitTimeSeconds: "0"
+  /subtype/sqs-delete:
+    post:
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        integrationSubtype: SQS-DeleteMessage
+        credentials: "${invoke_role_arn}"
+        payloadFormatVersion: "1.0"
+        requestParameters:
+          QueueUrl: "${empty_queue_url}"
+          ReceiptHandle: "$request.querystring.handle"
+  /subtype/sqs-purge:
+    post:
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        integrationSubtype: SQS-PurgeQueue
+        credentials: "${invoke_role_arn}"
+        payloadFormatVersion: "1.0"
+        requestParameters:
+          QueueUrl: "${empty_queue_url}"
+  /subtype/stepfunctions-start:
+    post:
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        integrationSubtype: StepFunctions-StartExecution
+        credentials: "${invoke_role_arn}"
+        payloadFormatVersion: "1.0"
+        requestParameters:
+          StateMachineArn: "${state_machine_arn}"
+          Input: "$request.body"
+  /subtype/stepfunctions-stop:
+    post:
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        integrationSubtype: StepFunctions-StopExecution
+        credentials: "${invoke_role_arn}"
+        payloadFormatVersion: "1.0"
+        requestParameters:
+          ExecutionArn: "$request.querystring.execution"
+          Cause: "parity"
+  /subtype/appconfig:
+    post:
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        integrationSubtype: AppConfig-GetConfiguration
+        credentials: "${invoke_role_arn}"
+        payloadFormatVersion: "1.0"
+        requestParameters:
+          Application: "${appconfig_application}"
+          Environment: "${appconfig_environment}"
+          Configuration: "${appconfig_configuration}"
+          ClientId: "parity"
   /throttled:
     get:
       x-amazon-apigateway-integration:

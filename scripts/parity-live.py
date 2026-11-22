@@ -75,6 +75,17 @@ def cases(run):
         ("subtype-eventbridge", "POST", "/subtype/eventbridge", '{"e":3}'),
         ("subtype-stepfunctions", "POST", "/subtype/stepfunctions", '{"n":2}'),
         ("subtype-kinesis", "POST", "/subtype/kinesis", '{"k":5}'),
+        ("subtype-sqs-receive", "POST", "/subtype/sqs-receive", "{}"),
+        ("subtype-sqs-delete", "POST", "/subtype/sqs-delete?handle=not-a-handle", "{}"),
+        ("subtype-sqs-purge", "POST", "/subtype/sqs-purge", "{}"),
+        ("subtype-stepfunctions-start", "POST", "/subtype/stepfunctions-start", '{"n":2}'),
+        (
+            "subtype-stepfunctions-stop",
+            "POST",
+            "/subtype/stepfunctions-stop?execution=arn:aws:states:us-east-1:000000000000:execution:absent:absent",
+            "{}",
+        ),
+        ("subtype-appconfig", "POST", "/subtype/appconfig", "{}"),
     ]
     return [("rest", *case) for case in rest] + [("http", *case) for case in http]
 
@@ -90,14 +101,17 @@ def main():
         "http": (outputs["http"]["base_url"].rstrip("/"), f"https://{gateway_ip}:8444/{stage}"),
     }
     run = str(int(time.time()))
+    # SQS takes one PurgeQueue a minute per queue, so the two sides purge a minute apart.
+    gaps = {"subtype-sqs-purge": 61}
     differ = 0
     for api, label, method, path, body in cases(run):
         aws_base, gateway_base = bases[api]
         expected = send(aws_base + path, method, body, insecure=False)
+        time.sleep(gaps.get(label, 0))
         actual = send(gateway_base + path, method, body, insecure=True)
         same = describe(expected, limit=None) == describe(actual, limit=None)
         differ += not same
-        print(f"{'PASS' if same else 'DIFF'} {api:4} {label:22} {expected[0]} {expected[1]}")
+        print(f"{'PASS' if same else 'DIFF'} {api:4} {label:28} {expected[0]} {expected[1]}")
         if not same:
             print(f"       aws:   {describe(expected)}")
             print(f"       apigw: {describe(actual)}")

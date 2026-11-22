@@ -67,3 +67,33 @@ output "bucket_arn" {
   description = "ARN of the S3 target bucket."
   value       = aws_s3_bucket.target.arn
 }
+
+output "empty_queue_url" {
+  description = "URL of the SQS queue nothing sends to."
+  value       = aws_sqs_queue.empty.url
+}
+
+output "empty_queue_arn" {
+  description = "ARN of the SQS queue nothing sends to."
+  value       = aws_sqs_queue.empty.arn
+}
+
+output "appconfig_application" {
+  description = "Name of the AppConfig application."
+  value       = aws_appconfig_application.target.name
+}
+
+output "appconfig_environment" {
+  description = "Name of the AppConfig environment the configuration is deployed to."
+  value       = aws_appconfig_environment.target.name
+}
+
+output "appconfig_configuration" {
+  description = "Name of the AppConfig configuration profile."
+  value       = aws_appconfig_configuration_profile.target.name
+}
+
+output "appconfig_application_arn" {
+  description = "ARN of the AppConfig application."
+  value       = aws_appconfig_application.target.arn
+}

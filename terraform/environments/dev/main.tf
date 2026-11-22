@@ -28,9 +28,12 @@ module "integration_role" {
   table_arn            = module.service_targets.table_arn
   state_machine_arn    = module.service_targets.state_machine_arn
   event_bus_arn        = module.service_targets.event_bus_arn
+  empty_queue_arn      = module.service_targets.empty_queue_arn
   topic_arn            = module.service_targets.topic_arn
   stream_arn           = module.service_targets.stream_arn
   bucket_arn           = module.service_targets.bucket_arn
+
+  appconfig_application_arn = module.service_targets.appconfig_application_arn
 
   trusted_principal_arns = local.gateway_role_arns
 }
@@ -105,6 +108,10 @@ module "http_api" {
   event_bus_name            = module.service_targets.event_bus_name
   state_machine_arn         = module.service_targets.state_machine_arn
   stream_name               = module.service_targets.stream_name
+  empty_queue_url           = module.service_targets.empty_queue_url
+  appconfig_application     = module.service_targets.appconfig_application
+  appconfig_environment     = module.service_targets.appconfig_environment
+  appconfig_configuration   = module.service_targets.appconfig_configuration
   cors_allowed_origin       = var.cors_allowed_origin
   enable_logging            = var.enable_logging
   log_retention_days        = var.log_retention_days

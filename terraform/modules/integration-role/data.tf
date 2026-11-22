@@ -39,13 +39,29 @@ data "aws_iam_policy_document" "invoke" {
   }
 
   statement {
+    actions   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:PurgeQueue"]
+    resources = [var.empty_queue_arn]
+  }
+
+  statement {
     actions   = ["dynamodb:PutItem", "dynamodb:GetItem"]
     resources = [var.table_arn]
   }
 
   statement {
-    actions   = ["states:StartSyncExecution"]
+    actions   = ["states:StartSyncExecution", "states:StartExecution"]
     resources = [var.state_machine_arn]
+  }
+
+  # StopExecution names an execution, not the state machine.
+  statement {
+    actions   = ["states:StopExecution"]
+    resources = ["${replace(var.state_machine_arn, ":stateMachine:", ":execution:")}:*"]
+  }
+
+  statement {
+    actions   = ["appconfig:GetConfiguration"]
+    resources = ["${var.appconfig_application_arn}/*"]
   }
 
   statement {
