@@ -297,7 +297,7 @@ paths:
       x-amazon-apigateway-integration:
         type: http_proxy
         httpMethod: GET
-        uri: "https://apigw-parity.invalid/unresolvable"
+        uri: "https://$${stageVariables.unresolvable_host}/unresolvable"
         passthroughBehavior: when_no_match
         timeoutInMillis: 5000
   /broken/unset-host:

@@ -13,6 +13,9 @@ locals {
   # Safe to publish; the secret is added separately for the APIs.
   public_stage_variables = {
     echo_host = module.lambda_backends.echo_host
+    # API Gateway refuses a reserved domain in a literal integration URI at import,
+    # but resolves a stage variable only per request.
+    unresolvable_host = "apigw-parity.invalid"
   }
 
   stage_variables = merge(local.public_stage_variables, {
