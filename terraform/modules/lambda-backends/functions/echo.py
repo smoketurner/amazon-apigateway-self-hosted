@@ -8,6 +8,7 @@ Query parameters steer the response so one function covers many cases:
   echo_status=<int>        status code of a proxy response
   echo_binary=1            respond with fixed binary bytes (base64 encoded)
   echo_content_type=<mime> content type of the binary response (default image/png)
+  echo_sleep_ms=<int>      wait this long before answering (at most 3000), for timeouts
 
 When ECHO_SHARED_SECRET is set (the function URL deployment), requests must carry
 a matching x-echo-secret header, and the header is redacted in the echoed event.
@@ -16,10 +17,12 @@ a matching x-echo-secret header, and the header is redacted in the echoed event.
 import base64
 import json
 import os
+import time
 
 SECRET = os.environ.get("ECHO_SHARED_SECRET")
 SECRET_HEADER = "x-echo-secret"
 BINARY_BODY = bytes(range(256))
+MAX_SLEEP_MS = 3000
 
 
 def _is_proxy_event(event):
@@ -61,6 +64,9 @@ def handler(event, context):
         return _response(403, json.dumps({"message": "forbidden"}))
 
     query = event.get("queryStringParameters") or {}
+    sleep_ms = query.get("echo_sleep_ms", "")
+    if sleep_ms.isdigit():
+        time.sleep(min(int(sleep_ms), MAX_SLEEP_MS) / 1000)
     if query.get("echo_binary") == "1":
         return _response(
             200,

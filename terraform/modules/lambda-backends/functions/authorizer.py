@@ -2,8 +2,9 @@
 
 The decision depends only on the credential value: "allow" authorizes, "deny"
 returns a Deny policy (or isAuthorized=false), "malformed" returns a REST
-authorizer response without a policy document, and anything else raises, which
-API Gateway reports as 401 Unauthorized. The credential is the authorizationToken of
+authorizer response without a policy document, "error" raises an error other
+than Unauthorized, and anything else raises Unauthorized, which API Gateway
+reports as 401. The credential is the authorizationToken of
 a TOKEN authorizer, or the x-auth header of a REQUEST authorizer.
 """
 
@@ -41,6 +42,8 @@ def _policy(effect, method_arn, context):
 def handler(event, context):
     credential = _credential(event)
     claims = {"principal": PRINCIPAL, "credential": str(credential)}
+    if credential == "error":
+        raise RuntimeError("Error: authorizer failure")
 
     if event.get("version") == "2.0":
         return {"isAuthorized": credential == "allow", "context": claims}

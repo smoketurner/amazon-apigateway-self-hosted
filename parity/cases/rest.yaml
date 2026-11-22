@@ -557,3 +557,36 @@ cases:
     compare:
       body: ignore
       echo: {headers: [x-mapped-header]}
+
+  # Default 5xx answers: an authorizer that raises, and integrations that time out
+  - name: rest-token-authorizer-error
+    api: rest
+    path: /authz/token
+    headers: {Authorization: error}
+    unrecorded: true
+    compare:
+      headers: [content-type, x-amzn-errortype, x-reference-gateway-response]
+
+  - name: rest-request-authorizer-error
+    api: rest
+    path: /authz/request
+    headers: {x-auth: error}
+    unrecorded: true
+    compare:
+      headers: [content-type, x-amzn-errortype, x-reference-gateway-response]
+
+  - name: rest-http-proxy-timeout
+    api: rest
+    path: /timeout
+    query: {echo_sleep_ms: "1000"}
+    unrecorded: true
+    compare:
+      headers: [content-type, x-amzn-errortype, x-reference-gateway-response]
+
+  - name: rest-lambda-proxy-timeout
+    api: rest
+    path: /lambda-timeout
+    query: {echo_sleep_ms: "1000"}
+    unrecorded: true
+    compare:
+      headers: [content-type, x-amzn-errortype, x-reference-gateway-response]

@@ -261,3 +261,28 @@ cases:
     compare:
       body: ignore
       echo: {headers: [x-multi]}
+
+  # Default 5xx answers: an authorizer that raises, and integrations that time out
+  - name: http-lambda-authorizer-error
+    api: http
+    path: /authz/lambda-simple
+    headers: {x-auth: error}
+    unrecorded: true
+    compare:
+      headers: [content-type]
+
+  - name: http-http-proxy-timeout
+    api: http
+    path: /timeout
+    query: {echo_sleep_ms: "1000"}
+    unrecorded: true
+    compare:
+      headers: [content-type]
+
+  - name: http-lambda-timeout
+    api: http
+    path: /lambda-timeout
+    query: {echo_sleep_ms: "1000"}
+    unrecorded: true
+    compare:
+      headers: [content-type]
