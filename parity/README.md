@@ -40,7 +40,7 @@ cases:
     method: GET                        # default GET
     path: /http-proxy/a/b              # relative to the stage URL
     query: {x: "1"}
-    headers: {x-from-client: abc}
+    headers: {x-from-client: abc}      # a list repeats a header: {x-multi: [a, b]}
     body: '{"a":1}'
     known_gap: "#19"                   # optional: an issue for a feature apigw lacks
     unrecorded: true                   # optional: added to the stack, not recorded yet

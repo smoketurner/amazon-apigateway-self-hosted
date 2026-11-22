@@ -180,6 +180,28 @@ impl Default for Compare {
     }
 }
 
+/// The values a case sends for one header: one, or a list sent as separate header lines in
+/// order, so a case can repeat a header.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(from = "OneOrMany")]
+pub(crate) struct HeaderValues(Vec<String>);
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl From<OneOrMany> for HeaderValues {
+    fn from(values: OneOrMany) -> Self {
+        match values {
+            OneOrMany::One(value) => Self(vec![value]),
+            OneOrMany::Many(values) => Self(values),
+        }
+    }
+}
+
 /// One request and the comparison rules for its response.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -190,7 +212,7 @@ pub(crate) struct Case {
     pub(crate) method: MethodName,
     pub(crate) path: String,
     #[serde(default)]
-    pub(crate) headers: BTreeMap<String, String>,
+    pub(crate) headers: BTreeMap<String, HeaderValues>,
     #[serde(default)]
     pub(crate) query: BTreeMap<String, String>,
     #[serde(default)]
@@ -292,9 +314,24 @@ impl<E: EnvSource> Expander<E> {
 pub(crate) struct RequestSpec {
     pub(crate) method: reqwest::Method,
     pub(crate) path: String,
-    pub(crate) headers: BTreeMap<String, String>,
+    /// Header lines in the order they are sent; a name can repeat.
+    pub(crate) headers: Vec<(String, String)>,
     pub(crate) query: BTreeMap<String, String>,
     pub(crate) body: Option<String>,
+}
+
+impl RequestSpec {
+    /// The values sent for `name`, in order.
+    #[cfg(test)]
+    pub(crate) fn header(&self, name: &str) -> Vec<&str> {
+        let mut values = Vec::new();
+        for (sent, value) in &self.headers {
+            if sent == name {
+                values.push(value.as_str());
+            }
+        }
+        values
+    }
 }
 
 /// A [`RequestSpec`] plus the secret values that were substituted into it.
@@ -309,9 +346,11 @@ impl Case {
         let mut secrets = Vec::new();
         let mut expand = |text: &str| expander.expand(&self.name, text, &mut secrets);
         let path = expand(&self.path)?;
-        let mut headers = BTreeMap::new();
-        for (name, value) in &self.headers {
-            headers.insert(name.to_ascii_lowercase(), expand(value)?);
+        let mut headers = Vec::new();
+        for (name, values) in &self.headers {
+            for value in &values.0 {
+                headers.push((name.to_ascii_lowercase(), expand(value)?));
+            }
         }
         let mut query = BTreeMap::new();
         for (name, value) in &self.query {
@@ -495,11 +534,26 @@ mod tests {
     }
 
     #[test]
+    fn a_header_given_a_list_is_sent_once_per_value() {
+        let yaml = "cases:
+  - name: repeated
+    api: rest
+    path: /p
+    headers: {X-Multi: [a, '{{env:SEG}}'], Accept: text/plain}
+";
+        let case = parse(yaml).unwrap().cases.into_iter().next().unwrap();
+        let expander = Expander::new(env(&[("SEG", "b")]), UnsetEnv::Fail);
+        let request = case.request(&expander).unwrap();
+        assert_eq!(request.spec.header("x-multi"), ["a", "b"]);
+        assert_eq!(request.spec.header("accept"), ["text/plain"]);
+    }
+
+    #[test]
     fn placeholders_expand_everywhere_and_report_secrets() {
         let expander = Expander::new(env(&[("TOKEN", "s3cr3t"), ("SEG", "x")]), UnsetEnv::Fail);
         let request = case_with_placeholders().request(&expander).unwrap();
         assert_eq!(request.spec.path, "/p/x");
-        assert_eq!(request.spec.headers["authorization"], "Bearer s3cr3t");
+        assert_eq!(request.spec.header("authorization"), ["Bearer s3cr3t"]);
         assert_eq!(request.spec.query["k"], "x-s3cr3t");
         assert_eq!(request.spec.body.as_deref(), Some("s3cr3t"));
         assert!(request.secrets.contains(&"s3cr3t".to_owned()));
@@ -514,7 +568,7 @@ mod tests {
         ));
         let lenient = Expander::new(env(&[("SEG", "x")]), UnsetEnv::Placeholder);
         let request = case_with_placeholders().request(&lenient).unwrap();
-        assert_eq!(request.spec.headers["authorization"], "Bearer unset-env");
+        assert_eq!(request.spec.header("authorization"), ["Bearer unset-env"]);
         assert!(request.secrets.iter().all(|s| s == "x"));
     }
 
