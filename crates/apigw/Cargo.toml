@@ -38,9 +38,9 @@ jsonschema-regex     = { workspace = true }
 jsonwebtoken         = { workspace = true, features = ["aws_lc_rs"] }
 matchit              = { workspace = true }
 opentelemetry        = { workspace = true, features = ["trace", "metrics"] }
-opentelemetry-otlp   = { workspace = true, features = ["trace", "metrics", "http-proto", "reqwest-blocking-client", "grpc-tonic", "tls-aws-lc", "tls-roots"] }
+opentelemetry-otlp   = { workspace = true, features = ["trace", "metrics", "internal-logs", "http-proto", "reqwest-blocking-client", "grpc-tonic", "tls-aws-lc", "tls-roots"] }
 opentelemetry-prometheus = { workspace = true }
-opentelemetry_sdk    = { workspace = true, features = ["trace", "metrics"] }
+opentelemetry_sdk    = { workspace = true, features = ["trace", "metrics", "internal-logs"] }
 prometheus           = { workspace = true }
 proxy-header         = { workspace = true, features = ["tokio"] }
 redis                = { workspace = true, features = ["aio", "tokio-rustls-comp", "tls-rustls", "connection-manager", "script"] }
