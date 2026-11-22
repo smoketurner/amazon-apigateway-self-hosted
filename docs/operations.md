@@ -23,8 +23,26 @@ matches answer `403 {"message":"Forbidden"}`.
 - **`/ping` and `/sping`** are reserved on every domain and answer `200` with `healthy`.
 - **REST and HTTP APIs** can be mapped to the same domain. Mappings do not say which kind an API
   is, so each API ID is looked up as a REST API first.
-- **Certificates:** a client that asks for a domain name (SNI) gets that domain's certificate from
-  `--domain-cert-dir`, exact names before wildcards; everything else gets `--tls-cert`.
+- **Certificates:** a client that asks for a domain name (SNI) gets that domain's certificate,
+  exact names before wildcards; everything else gets `--tls-cert`. The certificate comes from
+  `--domain-cert-dir`, or, with `--domain-cert-source acm`, from ACM (below).
+
+**Certificates from ACM.** With `--domain-cert-source acm` the gateway serves the certificate API
+Gateway serves for each domain, so clients see the same certificate from both. It reads the
+certificate ARN from the domain (`domainNameConfigurations`), checks with `DescribeCertificate`
+that the certificate is issued and was requested as
+[exportable](https://docs.aws.amazon.com/acm/latest/userguide/acm-exportable-certificates.html),
+and exports it with `ExportCertificate`. The export's passphrase is random, made for that one
+export, and never leaves the process; the decrypted key is held in memory only and never
+written to disk or to the configuration cache. On every refresh the gateway asks for the
+certificate's serial number and exports again only when it changes (a renewal, or a different
+certificate on the domain), so a domain costs about one export per renewal. The new certificate
+takes effect for new connections. Until the first export succeeds the domain is served
+`--tls-cert`; a failed export keeps the certificate already served. Both cases are logged,
+counted in `apigw_tls_reloads_total{outcome="failure"}`, and shown on `/routes` under the domain's
+`certificate` (`arn`, the `serial` being served, and the last `error`). Certificates requested
+without the export option, and ACM public certificates issued before 2025-06-17, cannot be
+exported.
 - **Not supported with `--domain-name`:** `--stage`, `--base-path`, `--integration-overrides`,
   `--config-cache`, and `--canary-export-stage` (each API serves its stage's deployment; a
   stage with a canary serves both releases as in single-API mode).
@@ -210,7 +228,7 @@ method, or for an `ANY` route the request's when it is one of `GET`, `PUT`, `POS
 | `apigw_usage_refreshes_total` | counter | `api_id`, `stage`, `outcome` | Reads of API keys and usage plans: `success`, `failure` |
 | `apigw_usage_last_success_timestamp_seconds` | gauge | `api_id`, `stage` | When they were last read |
 | `apigw_tls_certificate_expiry_seconds` | gauge | `certificate` | Seconds until the `notAfter` of each served certificate (`default`, or the custom domain); negative once expired |
-| `apigw_tls_reloads_total` | counter | `outcome` | Reloads of changed certificate files: `success`, `failure` (the previous certificate keeps serving) |
+| `apigw_tls_reloads_total` | counter | `outcome` | Reloads of changed certificate files and certificates exported from ACM: `success`, `failure` (the previous certificate keeps serving) |
 | `apigw_state_errors_total` | counter | `operation` | Valkey calls that failed or timed out: `take_token`, `consume_quota`, `cache_get`, `cache_put`, `cache_invalidate` |
 | `apigw_authorizer_cache_hits_total`, `apigw_authorizer_cache_misses_total` | counter | `api_id`, `stage`, `authorizer` | Lambda authorizer results answered from the cache, and invocations for identities that were not cached |
 | `apigw_jwks_fetches_total` | counter | `issuer`, `outcome` | Fetches of a token issuer's signing keys: `success`, `failure` |

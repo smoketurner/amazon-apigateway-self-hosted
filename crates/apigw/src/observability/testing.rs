@@ -48,15 +48,19 @@ impl Reply {
     }
 }
 
+/// Builds a reply from the request body.
+type Responder = Arc<dyn Fn(&Value) -> Reply + Send + Sync>;
+
 #[derive(Default)]
 struct Shared {
     calls: Mutex<Vec<Call>>,
     sticky: Mutex<HashMap<String, Reply>>,
     once: Mutex<HashMap<String, VecDeque<Reply>>>,
+    responders: Mutex<HashMap<String, Responder>>,
 }
 
 impl Shared {
-    fn reply_for(&self, target: &str) -> Reply {
+    fn reply_for(&self, target: &str, body: &Value) -> Reply {
         let queued = self
             .once
             .lock()
@@ -65,6 +69,15 @@ impl Shared {
             .and_then(VecDeque::pop_front);
         if let Some(reply) = queued {
             return reply;
+        }
+        let responder = self
+            .responders
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(target)
+            .cloned();
+        if let Some(responder) = responder {
+            return responder(body);
         }
         if let Some(reply) = self
             .sticky
@@ -93,17 +106,17 @@ async fn handle(
         .get("x-amz-target")
         .and_then(|v| v.to_str().ok())
         .map_or_else(|| uri.path().to_owned(), str::to_owned);
-    let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let reply = shared.reply_for(&target, &body);
     shared
         .calls
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .push(Call {
-            target: target.clone(),
+            target,
             query: uri.query().map(str::to_owned),
             body,
         });
-    let reply = shared.reply_for(&target);
     (
         reply.status,
         [("content-type", "application/x-amz-json-1.1")],
@@ -165,6 +178,20 @@ impl MockAws {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(target.to_owned(), reply);
+    }
+
+    /// Answers every `target` request with what `respond` builds from its body,
+    /// unless a [`MockAws::reply_once`] reply is queued.
+    pub(crate) fn reply_with(
+        &self,
+        target: &str,
+        respond: impl Fn(&Value) -> Reply + Send + Sync + 'static,
+    ) {
+        self.shared
+            .responders
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(target.to_owned(), Arc::new(respond));
     }
 
     /// Answers the next `target` request with `reply`, then goes back to the default.

@@ -4,6 +4,7 @@ api:
   domainNames:
     - api.example.com
     - "*.example.org"
+  domainCertSource: acm
 aws:
   profile: gateway
   configFile: /etc/aws/config

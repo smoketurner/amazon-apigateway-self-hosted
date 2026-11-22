@@ -273,7 +273,7 @@ impl GatewayMetrics {
             tls_reloads: counter(
                 "apigw.tls.reloads",
                 "",
-                "Reloads of changed certificate files, by outcome.",
+                "Reloads of changed certificate files and ACM exports, by outcome.",
             ),
             state_errors: counter(
                 "apigw.state.errors",

@@ -723,7 +723,7 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         &config.tls_cert,
         &config.tls_key,
         &config.domain_names,
-        &config.domain_certs(),
+        &config.domain_certs()?,
     )
     .context("failed to load the TLS certificates")?;
     let sdk_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;

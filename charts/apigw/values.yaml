@@ -27,6 +27,12 @@ api:
   # Custom domain names whose mapped APIs are served. Excludes `stage`,
   # `basePath`, and the cache.
   domainNames: []
+  # Where the domains' certificates come from: `files` (`tls`, for every
+  # domain) or `acm`, which exports the certificate API Gateway serves for each
+  # domain (it must be an ACM exportable certificate). `tls` is served until the
+  # first export succeeds. The gateway's role needs acm:DescribeCertificate and
+  # acm:ExportCertificate on those certificates.
+  domainCertSource: files
   # Path of an OpenAPI export mounted with `extraVolumes`; `type` is `rest` or `http`.
   openapiFile: ""
   type: rest

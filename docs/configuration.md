@@ -45,6 +45,7 @@ Every flag has an environment variable (`apigw --help` lists them). The main one
 | `--otel` | `APIGW_OTEL` | off | Export metrics and request spans with OpenTelemetry, configured with the standard `OTEL_*` variables ([OpenTelemetry](operations.md#opentelemetry)) |
 | `--domain-name NAME` | `APIGW_DOMAIN_NAMES` | none | Serve every API mapped to this custom domain (repeatable or comma-separated; `*.example.com` allowed) instead of one API ([Custom domains](operations.md#custom-domains)) |
 | `--domain-cert-dir DIR` | `APIGW_DOMAIN_CERT_DIR` | none | `DIR/{domain}/tls.crt` and `tls.key` per domain, served by SNI and reloaded on change; without it `--tls-cert` serves every domain |
+| `--domain-cert-source` | `APIGW_DOMAIN_CERT_SOURCE` | `files` | `files` reads certificates from `--domain-cert-dir` (or serves `--tls-cert`); `acm` exports the ACM certificate API Gateway serves for each domain and follows its renewals ([Custom domains](operations.md#custom-domains)) |
 | `--canary-export-stage` | `APIGW_CANARY_EXPORT_STAGE` | none | REST stage that holds the canary deployment of `--stage`, exported to build the canary release ([Canary releases](operations.md#canary-releases)) |
 | `--log-stream` | `APIGW_LOG_STREAM` | `{HOSTNAME}/{start time}/{suffix}` | Log stream this process writes to in every log group |
 

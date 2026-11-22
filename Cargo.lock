@@ -49,6 +49,7 @@ dependencies = [
  "apigw-vtl",
  "aws-config",
  "aws-lc-rs",
+ "aws-sdk-acm",
  "aws-sdk-apigateway",
  "aws-sdk-apigatewayv2",
  "aws-sdk-cloudwatchlogs",
@@ -91,6 +92,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "x509-parser",
+ "zeroize",
 ]
 
 [[package]]
@@ -324,6 +326,29 @@ dependencies = [
  "pin-project-lite",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "aws-sdk-acm"
+version = "1.128.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0279dcdde9d3d46bdab171480edd17376e19fcdd2861445f3171acb75ac9413"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-types",
+ "fastrand",
+ "regex-lite",
+ "tracing",
 ]
 
 [[package]]

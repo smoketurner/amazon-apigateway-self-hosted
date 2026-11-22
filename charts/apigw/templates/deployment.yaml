@@ -115,6 +115,10 @@ spec:
             {{- with .Values.api.domainNames }}
             - name: APIGW_DOMAIN_NAMES
               value: {{ join "," . | quote }}
+            {{- if eq $.Values.api.domainCertSource "acm" }}
+            - name: APIGW_DOMAIN_CERT_SOURCE
+              value: acm
+            {{- end }}
             {{- end }}
             {{- with .Values.api.openapiFile }}
             - name: APIGW_OPENAPI_FILE

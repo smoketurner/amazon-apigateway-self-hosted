@@ -16,6 +16,7 @@ apigw-regex          = { path = "crates/apigw-regex" }
 apigw-vtl            = { path = "crates/apigw-vtl" }
 aws-config           = { version = "=1.13.2", default-features = false }
 aws-lc-rs            = { version = "=1.19.0", default-features = false }
+aws-sdk-acm          = { version = "=1.128.0", default-features = false }
 aws-sdk-apigateway   = { version = "=1.127.0", default-features = false }
 aws-sdk-apigatewayv2 = { version = "=1.125.0", default-features = false }
 aws-sdk-cloudwatchlogs = { version = "=1.165.0", default-features = false }
@@ -60,6 +61,7 @@ tracing              = { version = "=0.1.44", default-features = false }
 tracing-subscriber  = { version = "=0.3.23", default-features = false }
 uuid                 = { version = "=1.29.2", default-features = false }
 x509-parser          = { version = "=0.18.1", default-features = false }
+zeroize              = { version = "=1.9.1", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code           = "deny"
