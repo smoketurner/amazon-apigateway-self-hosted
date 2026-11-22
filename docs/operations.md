@@ -42,9 +42,10 @@ certificate on the domain), so a domain costs about one export per renewal. The 
 takes effect for new connections. Until the first export succeeds the domain is served
 `--tls-cert`; a failed export keeps the certificate already served. Both cases are logged,
 counted in `apigw_tls_reloads_total{outcome="failure"}`, and shown on `/routes` under the domain's
-`certificate` (`arn`, the `serial` being served, and the last `error`). Certificates requested
-without the export option, and ACM public certificates issued before 2025-06-17, cannot be
-exported.
+`certificate` (`arn`, the `serial` being served, and the last `error`). ACM exports public
+certificates requested with the export option and certificates issued by AWS Private CA. It
+never exports a certificate imported into it, nor a public certificate requested without the
+option or issued before 2025-06-17; serve those with `--domain-cert-dir`.
 - **Not supported with `--domain-name`:** `--stage`, `--base-path`, `--integration-overrides`,
   `--config-cache`, and `--canary-export-stage` (each API serves its stage's deployment; a
   stage with a canary serves both releases as in single-API mode).

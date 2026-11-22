@@ -5,7 +5,7 @@
 //! <https://docs.aws.amazon.com/acm/latest/userguide/acm-exportable-certificates.html>
 
 use aws_sdk_acm::primitives::Blob;
-use aws_sdk_acm::types::{CertificateExport, CertificateStatus};
+use aws_sdk_acm::types::{CertificateExport, CertificateStatus, CertificateType};
 use rustls::pki_types::pem::PemObject as _;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use zeroize::Zeroizing;
@@ -94,15 +94,27 @@ impl AcmCertificates {
             arn: arn.to_owned(),
             reason,
         };
-        if detail.status() != Some(&CertificateStatus::Issued) {
-            return Err(not_exportable("it is not issued"));
-        }
-        if detail.options().and_then(|options| options.export())
-            != Some(&CertificateExport::Enabled)
-        {
+        // ACM exports what it issued with the Export option and what AWS
+        // Private CA issued; never a certificate imported into it.
+        let exportable = match detail.r#type() {
+            Some(CertificateType::Imported) => {
+                return Err(not_exportable(
+                    "it was imported into ACM, which never exports imported certificates; serve its files with --domain-cert-dir",
+                ));
+            }
+            Some(CertificateType::Private) => true,
+            _ => {
+                detail.options().and_then(|options| options.export())
+                    == Some(&CertificateExport::Enabled)
+            }
+        };
+        if !exportable {
             return Err(not_exportable(
                 "it was not requested as exportable (ACM's Export option)",
             ));
+        }
+        if detail.status() != Some(&CertificateStatus::Issued) {
+            return Err(not_exportable("it is not issued"));
         }
         detail
             .serial()
@@ -206,12 +218,16 @@ pub(crate) mod tests {
     pub(crate) const DESCRIBE: &str = "CertificateManager.DescribeCertificate";
     pub(crate) const EXPORT: &str = "CertificateManager.ExportCertificate";
 
-    /// A `DescribeCertificate` answer.
+    /// A `DescribeCertificate` answer for a certificate ACM issued.
     pub(crate) fn described(serial: &str, status: &str, export: &str) -> Reply {
+        described_as("AMAZON_ISSUED", serial, status, export)
+    }
+
+    fn described_as(kind: &str, serial: &str, status: &str, export: &str) -> Reply {
         Reply::json(
             &json!({"Certificate": {
                 "CertificateArn": ARN, "Serial": serial, "Status": status,
-                "Options": {"Export": export}
+                "Type": kind, "Options": {"Export": export}
             }})
             .to_string(),
         )
@@ -363,6 +379,32 @@ pub(crate) mod tests {
         ));
         aws.reply_once(DESCRIBE, Reply::error("ResourceNotFoundException"));
         assert!(matches!(acm.serial(ARN).await, Err(AcmError::Aws { .. })));
+    }
+
+    #[tokio::test]
+    async fn imported_certificates_are_never_exportable_and_private_ca_ones_always_are() {
+        let aws = MockAws::start().await;
+        let acm = AcmCertificates::new(&aws.sdk_config());
+        aws.reply_once(
+            DESCRIBE,
+            described_as("IMPORTED", "0a:01", "ISSUED", "ENABLED"),
+        );
+        let err = acm.serial(ARN).await.unwrap_err();
+        assert!(err.to_string().contains("imported"), "{err}");
+        assert!(err.to_string().contains("--domain-cert-dir"), "{err}");
+        aws.reply_once(
+            DESCRIBE,
+            described_as("PRIVATE", "0a:02", "ISSUED", "DISABLED"),
+        );
+        assert_eq!(acm.serial(ARN).await.unwrap(), "0a:02");
+        aws.reply_once(
+            DESCRIBE,
+            described_as("PRIVATE", "0a:02", "EXPIRED", "DISABLED"),
+        );
+        assert!(matches!(
+            acm.serial(ARN).await,
+            Err(AcmError::NotExportable { .. })
+        ));
     }
 
     #[tokio::test]
