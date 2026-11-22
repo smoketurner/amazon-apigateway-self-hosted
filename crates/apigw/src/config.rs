@@ -16,7 +16,8 @@ use crate::identity::{TrustedProxies, TrustedProxy};
 use crate::listener::{DomainCert, Edge, ProxyProtocol};
 use crate::model::ApiKind;
 use crate::observability::{
-    Delivery, LogGroup, MetricsNamespace, MetricsSettings, Settings, StreamName, TraceDelivery,
+    Delivery, LogGroup, MetricsDestination, MetricsNamespace, MetricsSettings, Settings,
+    StreamName, TraceDelivery,
 };
 use crate::router::BasePath;
 use crate::source::Source;
@@ -264,8 +265,14 @@ pub(crate) struct Config {
     #[arg(long, env = "APIGW_EXECUTION_LOGS", value_enum, default_value_t = Delivery::Aws)]
     pub(crate) execution_logs: Delivery,
 
+    /// Where API Gateway's CloudWatch metrics go, as embedded metric format
+    /// events: `aws` writes to `--metrics-log-group` (none when it is unset),
+    /// `stdout` writes one event per line to standard output, `off` writes none.
+    #[arg(long, env = "APIGW_METRICS", value_enum, default_value_t = Delivery::Aws)]
+    pub(crate) metrics: Delivery,
+
     /// CloudWatch Logs log group that receives metrics as embedded metric
-    /// format events. Metrics are not published when unset. The group must exist.
+    /// format events with `--metrics aws`. The group must exist.
     #[arg(long, env = "APIGW_METRICS_LOG_GROUP")]
     pub(crate) metrics_log_group: Option<String>,
 
@@ -275,7 +282,8 @@ pub(crate) struct Config {
 
     /// What stage tracing does: `aws` sends X-Ray segments for stages with
     /// tracing enabled and propagates `X-Amzn-Trace-Id` and `traceparent` to
-    /// integrations; `off` does neither.
+    /// integrations; `stdout` writes the segments to standard output instead;
+    /// `off` does neither.
     #[arg(long, env = "APIGW_TRACING", value_enum, default_value_t = TraceDelivery::Aws)]
     pub(crate) tracing: TraceDelivery,
 
@@ -380,10 +388,9 @@ impl Config {
             access_logs: self.access_logs,
             execution_logs: self.execution_logs,
             metrics: self
-                .metrics_log_group
-                .as_deref()
-                .map(|group| MetricsSettings {
-                    group: LogGroup::new(group),
+                .metrics_destination()
+                .map(|destination| MetricsSettings {
+                    destination,
                     namespace: self.metrics_namespace.clone(),
                 }),
             tracing: self.tracing,
@@ -407,6 +414,17 @@ impl Config {
         env: impl Fn(&str) -> Option<String>,
     ) -> Result<OtelSettings, SettingsError> {
         OtelSettings::from_env(self.otel, env)
+    }
+
+    fn metrics_destination(&self) -> Option<MetricsDestination> {
+        match self.metrics {
+            Delivery::Aws => self
+                .metrics_log_group
+                .as_deref()
+                .map(|group| MetricsDestination::LogGroup(LogGroup::new(group))),
+            Delivery::Stdout => Some(MetricsDestination::Stdout),
+            Delivery::Off => None,
+        }
     }
 
     pub(crate) fn trusted_proxies(&self) -> TrustedProxies {
@@ -467,6 +485,34 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Config, clap::Error> {
         Config::try_parse_from(std::iter::once(&"apigw").chain(args).chain(TLS.iter()))
+    }
+
+    #[test]
+    fn embedded_metric_format_events_go_to_the_log_group_or_stdout() {
+        let destination = |args: &[&str]| {
+            let mut all = vec!["--openapi-file", "a.json"];
+            all.extend_from_slice(args);
+            parse(&all).unwrap().metrics_destination()
+        };
+        assert_eq!(destination(&[]), None, "no log group, no metrics");
+        assert_eq!(
+            destination(&["--metrics-log-group", "g"]),
+            Some(MetricsDestination::LogGroup(LogGroup::new("g")))
+        );
+        assert_eq!(
+            destination(&["--metrics", "stdout"]),
+            Some(MetricsDestination::Stdout)
+        );
+        assert_eq!(
+            destination(&["--metrics", "stdout", "--metrics-log-group", "g"]),
+            Some(MetricsDestination::Stdout)
+        );
+        assert_eq!(
+            destination(&["--metrics", "off", "--metrics-log-group", "g"]),
+            None
+        );
+        let tracing = parse(&["--openapi-file", "a.json", "--tracing", "stdout"]).unwrap();
+        assert_eq!(tracing.tracing, TraceDelivery::Stdout);
     }
 
     #[test]

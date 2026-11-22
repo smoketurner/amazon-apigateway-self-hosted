@@ -320,6 +320,9 @@ impl StageObserver {
         let settings = pending.route.as_ref().and_then(|key| inner.routes.get(key));
         let response_length = Self::response_length(&response);
         let cache = response.extensions().get::<CacheOutcome>().copied();
+        let data_processed = pending
+            .request_bytes
+            .saturating_add(response_length.unwrap_or(0));
         inner.instrumentation.metrics.request(
             &pending.labels,
             RequestOutcome {
@@ -327,9 +330,7 @@ impl StageObserver {
                 latency: pending.started.elapsed(),
                 integration_latency: timing.map(|t| t.0),
                 cache_hit: cache.map(|c| c == CacheOutcome::Hit),
-                data_processed: pending
-                    .request_bytes
-                    .saturating_add(response_length.unwrap_or(0)),
+                data_processed,
             },
         );
         if let Some(ref span) = pending.otel {
@@ -342,6 +343,7 @@ impl StageObserver {
                 status,
                 latency_ms,
                 integration_latency_ms: integration_ms,
+                data_processed,
             };
             for key in inner.metric_keys(metrics, settings, &pending.method) {
                 metrics.aggregator.record(&key, request);
@@ -541,7 +543,8 @@ mod tests {
     };
     use crate::observability::testing::MockAws;
     use crate::observability::{
-        Delivery, LogGroup, MetricsNamespace, MetricsSettings, Settings, StreamName, TraceDelivery,
+        Delivery, LogGroup, MetricsDestination, MetricsNamespace, MetricsSettings, Settings,
+        StreamName, TraceDelivery,
     };
     use crate::router::{BasePath, build};
     use crate::state::{InMemoryLimits, StateBackend};
@@ -597,7 +600,7 @@ mod tests {
             tracing: TraceDelivery::Aws,
             sampling_percent: 100,
             metrics: metrics.then(|| MetricsSettings {
-                group: LogGroup::new("metrics-group"),
+                destination: MetricsDestination::LogGroup(LogGroup::new("metrics-group")),
                 namespace: MetricsNamespace::default(),
             }),
             stream: StreamName::for_pod(
@@ -1121,6 +1124,35 @@ mod tests {
         assert_eq!(passed["x-amzn-trace-id"], incoming);
         observability.close().await;
         assert_eq!(segments(&aws), Vec::<Value>::new());
+    }
+
+    #[tokio::test]
+    async fn segments_and_metrics_can_go_to_stdout_without_calling_aws() {
+        let aws = MockAws::start().await;
+        let addr = upstream().await;
+        let mut stdout = settings(Delivery::Stdout, Delivery::Stdout, true);
+        stdout.tracing = TraceDelivery::Stdout;
+        if let Some(ref mut metrics) = stdout.metrics {
+            metrics.destination = MetricsDestination::Stdout;
+        }
+        let (router, observability) = serve_doc(
+            &aws,
+            &proxy_doc(addr),
+            ApiKind::Rest,
+            tracing_stage(),
+            stdout,
+        );
+        let (status, seen) = traced_get(&router, &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        observability.close().await;
+        assert!(
+            seen["x-amzn-trace-id"]
+                .as_str()
+                .unwrap()
+                .starts_with("Root=1-"),
+            "trace headers are propagated as with X-Ray"
+        );
+        assert!(aws.calls().is_empty(), "{:?}", aws.calls());
     }
 
     #[tokio::test]

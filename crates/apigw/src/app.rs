@@ -1255,8 +1255,8 @@ mod tests {
         use crate::model::{AccessLogSettings, MethodSettings, SettingsScope};
         use crate::observability::testing::MockAws;
         use crate::observability::{
-            Delivery, LogGroup, MetricsNamespace, MetricsSettings, Settings, StreamName,
-            TraceDelivery,
+            Delivery, LogGroup, MetricsDestination, MetricsNamespace, MetricsSettings, Settings,
+            StreamName, TraceDelivery,
         };
 
         const ACCESS_GROUP: &str = "/aws/apigw/access";
@@ -1289,7 +1289,7 @@ mod tests {
                     access_logs: Delivery::Aws,
                     execution_logs: Delivery::Off,
                     metrics: Some(MetricsSettings {
-                        group: LogGroup::new("metrics-group"),
+                        destination: MetricsDestination::LogGroup(LogGroup::new("metrics-group")),
                         namespace: MetricsNamespace::default(),
                     }),
                     tracing: TraceDelivery::Off,

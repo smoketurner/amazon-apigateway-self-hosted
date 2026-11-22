@@ -48,20 +48,32 @@ pub(crate) enum Delivery {
     Off,
 }
 
-/// Whether stage tracing sends segments to X-Ray.
+/// Where stage tracing sends X-Ray segments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum TraceDelivery {
     /// Send segments for stages with tracing enabled to X-Ray, and propagate
     /// `X-Amzn-Trace-Id` and `traceparent` to integrations.
     Aws,
+    /// Write segment documents to standard output, one per line, and
+    /// propagate trace headers as `aws` does.
+    Stdout,
     /// Neither send segments nor touch trace headers.
     Off,
+}
+
+/// Where embedded metric format events go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MetricsDestination {
+    /// A CloudWatch Logs log group, which extracts the metrics.
+    LogGroup(LogGroup),
+    /// Standard output, for the CloudWatch agent or Fluent Bit to forward.
+    Stdout,
 }
 
 /// Where metrics are published.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MetricsSettings {
-    pub(crate) group: LogGroup,
+    pub(crate) destination: MetricsDestination,
     pub(crate) namespace: MetricsNamespace,
 }
 
@@ -70,7 +82,7 @@ pub(crate) struct MetricsSettings {
 pub(crate) struct Settings {
     pub(crate) access_logs: Delivery,
     pub(crate) execution_logs: Delivery,
-    /// Metrics are published only when a log group is configured for them.
+    /// Embedded metric format events, when published.
     pub(crate) metrics: Option<MetricsSettings>,
     pub(crate) tracing: TraceDelivery,
     /// Percentage of requests sampled once the first request of each second
@@ -185,10 +197,13 @@ impl Observability {
         else {
             return;
         };
-        let queue = self.queue(Destination::CloudWatch {
-            region: None,
-            group: metrics.group,
-            create_group: false,
+        let queue = self.queue(match metrics.destination {
+            MetricsDestination::LogGroup(group) => Destination::CloudWatch {
+                region: None,
+                group,
+                create_group: false,
+            },
+            MetricsDestination::Stdout => Destination::Stdout,
         });
         let publishing = self.publishing.clone();
         let task = tokio::spawn(async move { aggregator.run(queue, publishing).await });
@@ -263,6 +278,7 @@ impl Observability {
         match self.settings.tracing {
             TraceDelivery::Off => None,
             TraceDelivery::Aws => Some(self.queue(Destination::XRay { region: None })),
+            TraceDelivery::Stdout => Some(self.queue(Destination::Stdout)),
         }
     }
 
