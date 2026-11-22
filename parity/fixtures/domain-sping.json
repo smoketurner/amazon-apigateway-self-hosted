@@ -1,0 +1,13 @@
+{
+  "name": "domain-sping",
+  "source": "recorded",
+  "api": "domain",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "null",
+      "date": "[masked]"
+    },
+    "body": "healthy"
+  }
+}

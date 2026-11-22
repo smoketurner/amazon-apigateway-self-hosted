@@ -32,6 +32,8 @@ enum DriftKind {
     NoBaseline,
     /// No response at all, such as a connection closed in the TLS handshake.
     RequestFailed(String),
+    /// A response to a case that expects none.
+    UnexpectedResponse(u16),
 }
 
 /// The cases whose recorded behavior differs from the baseline.
@@ -73,6 +75,9 @@ impl DriftReport {
                 }
                 DriftKind::RequestFailed(reason) => {
                     writeln!(out, "The request got no response: {reason}\n")?;
+                }
+                DriftKind::UnexpectedResponse(status) => {
+                    writeln!(out, "Expected no response, got {status}.\n")?;
                 }
             }
         }
@@ -185,7 +190,18 @@ impl Record {
                 .send(&case.name, base_url, &request.spec)
                 .await
             {
+                Ok(raw) if case.no_response => {
+                    drift.entries.push(Drift {
+                        case: case.name.clone(),
+                        kind: DriftKind::UnexpectedResponse(raw.status),
+                    });
+                    continue;
+                }
                 Ok(raw) => raw,
+                Err(ParityError::Request { .. }) if case.no_response => {
+                    tracing::info!(case = %case.name, "got no response, as expected");
+                    continue;
+                }
                 // One case without a response (a refused handshake) does not
                 // stop the rest; it is reported, and no fixture is written.
                 Err(ParityError::Request { source, .. }) => {

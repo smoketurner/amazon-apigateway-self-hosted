@@ -87,5 +87,7 @@ cases:
   - name: domain-mtls-no-certificate
     api: domain_mtls
     path: /mock
+    # API Gateway refuses the TLS handshake of a client without a certificate.
+    no_response: true
     compare:
       headers: [content-type, x-amzn-errortype]

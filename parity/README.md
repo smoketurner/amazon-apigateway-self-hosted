@@ -45,6 +45,7 @@ cases:
     known_gap: "#19"                   # optional: an issue for a feature apigw lacks
     unrecorded: true                   # optional: added to the stack, not recorded yet
     client_cert: trusted               # optional: trusted | stranger, for mutual TLS cases
+    no_response: true                  # optional: expect no response (a refused handshake)
     compare:
       status: true                     # default true
       headers: [content-type]          # response headers to compare, by name

@@ -685,7 +685,6 @@ cases:
     path: /vtl/util-escape
     headers: {content-type: application/json}
     body: '{"name":"n","store":{"books":[{"price":1},{"price":2.5}],"bike":{"price":3}}}'
-    unrecorded: true
     compare:
       headers: [content-type]
 
@@ -695,7 +694,6 @@ cases:
     path: /vtl/util-url
     headers: {content-type: application/json}
     body: '{"name":"n","store":{"books":[{"price":1},{"price":2.5}],"bike":{"price":3}}}'
-    unrecorded: true
     compare:
       headers: [content-type]
 
@@ -705,7 +703,6 @@ cases:
     path: /vtl/util-base64
     headers: {content-type: application/json}
     body: '{"name":"n","store":{"books":[{"price":1},{"price":2.5}],"bike":{"price":3}}}'
-    unrecorded: true
     compare:
       headers: [content-type]
 
@@ -715,7 +712,6 @@ cases:
     path: /vtl/util-parse-json
     headers: {content-type: application/json}
     body: '{"name":"n","store":{"books":[{"price":1},{"price":2.5}],"bike":{"price":3}}}'
-    unrecorded: true
     compare:
       headers: [content-type]
 
@@ -734,6 +730,5 @@ cases:
     path: /vtl/undefined
     headers: {content-type: application/json}
     body: '{"name":"n","store":{"books":[{"price":1},{"price":2.5}],"bike":{"price":3}}}'
-    unrecorded: true
     compare:
       headers: [content-type]

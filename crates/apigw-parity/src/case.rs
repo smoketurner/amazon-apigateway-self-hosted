@@ -252,6 +252,10 @@ pub(crate) struct Case {
     /// The client certificate to present; none by default.
     #[serde(default)]
     pub(crate) client_cert: Option<ClientCert>,
+    /// The request is expected to get no response at all, such as a TLS
+    /// handshake the server refuses; an answer is drift.
+    #[serde(default)]
+    pub(crate) no_response: bool,
 }
 
 #[derive(Debug, Deserialize)]
