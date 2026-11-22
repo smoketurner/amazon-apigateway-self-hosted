@@ -14,13 +14,9 @@ cp "$root/parity/cases/domain.yaml" "$work/cases/"
 
 terraform -chdir="$env_dir" output -json parity_runner >"$work/outputs.json"
 terraform -chdir="$env_dir" output -json parity_client_certificates >"$work/client-certs.json"
-cluster="$(terraform -chdir="$env_dir" output -json ecs_gateway | jq -r .cluster_name)"
-task="$(aws ecs list-tasks --cluster "$cluster" --desired-status RUNNING \
-  --query 'taskArns[0]' --output text)"
-eni="$(aws ecs describe-tasks --cluster "$cluster" --tasks "$task" \
-  --query "tasks[0].attachments[0].details[?name=='networkInterfaceId'].value" --output text)"
-ip="$(aws ec2 describe-network-interfaces --network-interface-ids "$eni" \
-  --query 'NetworkInterfaces[0].Association.PublicIp' --output text)"
+ecs="$(terraform -chdir="$env_dir" output -json ecs_gateway)"
+ip="$("$root/scripts/ecs-gateway-ip.sh" "$(jq -r .cluster_name <<<"$ecs")" \
+  "$(jq -r .service_name <<<"$ecs")")"
 
 resolve=()
 for api in domain domain_mtls; do

@@ -10,12 +10,8 @@ mkdir -p "$root/target"
 outputs="$root/target/parity-live-outputs.json"
 
 terraform -chdir="$env_dir" output -json parity_runner >"$outputs"
-cluster="$(terraform -chdir="$env_dir" output -json ecs_gateway | jq -r .cluster_name)"
-task="$(aws ecs list-tasks --cluster "$cluster" --desired-status RUNNING \
-  --query 'taskArns[0]' --output text)"
-eni="$(aws ecs describe-tasks --cluster "$cluster" --tasks "$task" \
-  --query "tasks[0].attachments[0].details[?name=='networkInterfaceId'].value" --output text)"
-ip="$(aws ec2 describe-network-interfaces --network-interface-ids "$eni" \
-  --query 'NetworkInterfaces[0].Association.PublicIp' --output text)"
+ecs="$(terraform -chdir="$env_dir" output -json ecs_gateway)"
+ip="$("$root/scripts/ecs-gateway-ip.sh" "$(jq -r .cluster_name <<<"$ecs")" \
+  "$(jq -r .service_name <<<"$ecs")")"
 
 uv run --no-project --python 3 python -I "$root/scripts/parity-live.py" "$outputs" "$ip"
