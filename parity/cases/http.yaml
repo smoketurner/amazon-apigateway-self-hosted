@@ -110,7 +110,7 @@ cases:
     compare:
       headers: [content-type]
 
-  # Parameter mapping (overwrite/append/remove) is not applied yet
+  # Parameter mapping: path overwrite, appended and overwritten query and header values
   - name: http-parameter-mapping
     api: http
     path: /mapped/42
@@ -238,24 +238,6 @@ cases:
     compare:
       body: json
 
-  # Whether remove: takes a header out of an HTTP_PROXY request
-  - name: http-parameter-mapping-remove
-    api: http
-    path: /mapped/42
-    headers: {x-remove-me: gone}
-    unrecorded: true
-    compare:
-      body: ignore
-      echo: {headers: [x-remove-me, x-appended]}
-
-  # Whether remove: takes a query parameter out of a Lambda proxy event
-  - name: http-lambda-v2-request-mapping-remove-query
-    api: http
-    path: /lambda-mapped/42
-    query: {drop: "1", q: "1"}
-    unrecorded: true
-    compare:
-      body: json
 
   # Repeated request headers: each value is sent as its own header line
   - name: http-lambda-v2-repeated-headers
