@@ -237,6 +237,34 @@ impl fmt::Debug for ApiKeyIdentity {
     }
 }
 
+/// What the gateway sent to the integration endpoint and what came back,
+/// recorded for execution logs with `dataTraceEnabled`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct EndpointExchange {
+    /// The method request body, which integrations may take from the context.
+    pub(crate) method_request_body: Option<Bytes>,
+    pub(crate) uri: Option<String>,
+    pub(crate) request_headers: Vec<(String, String)>,
+    pub(crate) request_body: Option<Bytes>,
+    pub(crate) response_headers: Vec<(String, String)>,
+    /// Absent for responses streamed to the client.
+    pub(crate) response_body: Option<Bytes>,
+}
+
+impl EndpointExchange {
+    pub(crate) fn header_list(headers: &HeaderMap) -> Vec<(String, String)> {
+        headers
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_owned(),
+                    String::from_utf8_lossy(value.as_bytes()).into_owned(),
+                )
+            })
+            .collect()
+    }
+}
+
 /// Outcome of the integration call, for `$context.integration.*`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct IntegrationOutcome {
@@ -247,6 +275,8 @@ pub(crate) struct IntegrationOutcome {
     /// Streaming integrations: time from connecting to having every response
     /// header (`$context.integration.timeToAllHeaders`).
     pub(crate) time_to_all_headers_ms: Option<u64>,
+    /// The exchange with the endpoint, when execution logs trace data.
+    pub(crate) exchange: Option<EndpointExchange>,
 }
 
 impl ResponseTransferMode {
@@ -302,6 +332,9 @@ pub(crate) struct RequestContext {
     /// The span of the integration call in progress, whose context HTTP
     /// integrations propagate.
     pub(crate) otel_integration: Option<ChildSpan>,
+    /// Integrations record what they exchange in `integration.exchange`, for
+    /// execution logs with `dataTraceEnabled`.
+    pub(crate) capture_exchange: bool,
     pub(crate) integration: IntegrationOutcome,
 }
 
@@ -459,6 +492,7 @@ impl RequestContext {
             trace,
             otel,
             otel_integration: None,
+            capture_exchange: false,
             integration: IntegrationOutcome::default(),
         }
     }
@@ -685,6 +719,7 @@ pub(crate) mod tests {
             trace: None,
             otel: None,
             otel_integration: None,
+            capture_exchange: false,
             stage_variables: Arc::default(),
             payload: Arc::default(),
             integration: IntegrationOutcome::default(),
@@ -743,6 +778,7 @@ pub(crate) mod tests {
             error: None,
             transfer_mode: Some(ResponseTransferMode::Stream),
             time_to_all_headers_ms: Some(5),
+            exchange: None,
         };
         request.authorizer = AuthorizerContext::lambda(Map::from_iter([
             ("principalId".to_owned(), json!("user-1")),

@@ -5,13 +5,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::body::HttpBody as _;
+use axum::body::{Bytes, HttpBody as _};
 use axum::extract::Request;
 use axum::http::{HeaderName, HeaderValue, Method, header};
 use axum::response::Response;
 use serde_json::{Value, json};
 
-use super::exec::Outcome;
+use super::exec::{Outcome, ResponseData};
 use super::format::AccessLogFormat;
 use super::metrics::{MetricKey, MetricsAggregator, RequestMetrics, RouteDimensions};
 use super::queue::{LogEvent, LogQueue};
@@ -22,7 +22,7 @@ use crate::cache::CacheOutcome;
 use crate::canary::Release;
 use crate::gateway::{ApiContext, RequestId};
 use crate::identity::ClientIdentity;
-use crate::model::{ApiKind, ApiModel, ExecutionLogging, MethodMatch, RouteKey};
+use crate::model::{ApiKind, ApiModel, ExecutionLogging, MethodMatch, Protection, RouteKey};
 use crate::pipeline::RequestContext;
 use crate::pipeline::context::{ApiInfo, IntegrationOutcome};
 use crate::route::Route;
@@ -60,6 +60,17 @@ struct AccessLog {
 struct Metrics {
     aggregator: Arc<MetricsAggregator>,
     api: String,
+}
+
+/// What the pipeline saw of a request on a route with execution logs,
+/// attached to its response.
+#[derive(Debug, Clone)]
+pub(crate) struct ExecutionRecord {
+    /// The request after the pipeline: path parameters, body, authorizer, API
+    /// key, and the exchange with the endpoint when data is traced.
+    pub(crate) ctx: Arc<RequestContext>,
+    /// The body of a response of known length, when data is traced.
+    pub(crate) response_body: Option<Bytes>,
 }
 
 /// Whether the stage traces requests itself or only continues its callers'.
@@ -141,6 +152,8 @@ struct RouteSettings {
     method: Option<String>,
     /// The route template (`/pets/{petId}`, `$default`), the `route` label.
     template: String,
+    /// The method requires an API key, which execution logs report.
+    api_key_required: bool,
 }
 
 #[derive(Debug)]
@@ -232,6 +245,10 @@ impl StageObserver {
                     detailed,
                     method,
                     template,
+                    api_key_required: operation
+                        .protections
+                        .iter()
+                        .any(|p| p == Protection::ApiKey),
                 },
             );
         }
@@ -277,6 +294,15 @@ impl StageObserver {
             instrumentation: observability.instrumentation().clone(),
             labels,
         })))
+    }
+
+    /// The execution logging of `route`, when its logs are delivered.
+    pub(crate) fn execution_logging(&self, route: &RouteKey) -> Option<ExecutionLogging> {
+        let inner = self.0.as_ref()?;
+        if inner.execution_queues.is_empty() {
+            return None;
+        }
+        inner.routes.get(route)?.execution_logging
     }
 
     /// REST metrics are keyed by API name (ASCII only, as API Gateway strips
@@ -412,16 +438,17 @@ impl StageObserver {
             .and_then(|s| s.execution_logging)
             .filter(|_| !inner.execution_queues.is_empty())
         {
-            let outcome = Outcome {
-                status,
-                integration: integration_ms.map(|ms| (status, ms)),
-            };
-            for line in logging.lines(&context, outcome) {
-                let event = LogEvent::now(line);
-                for queue in &inner.execution_queues {
-                    queue.push(event.clone());
-                }
-            }
+            inner.log_execution(
+                logging,
+                &context,
+                &mut response,
+                Outcome {
+                    status,
+                    integration: integration_ms
+                        .map(|ms| (timing.and_then(|t| t.status).unwrap_or(status), ms)),
+                    api_key_required: settings.is_some_and(|s| s.api_key_required),
+                },
+            );
         }
         if let (Some(trace), Some(tracing)) = (
             pending.trace.filter(Trace::is_sampled),
@@ -521,6 +548,29 @@ impl StageObserver {
 }
 
 impl Inner {
+    /// Writes the request's execution log, from what the pipeline recorded
+    /// when it did (else from `context`, taken before the pipeline ran).
+    fn log_execution(
+        &self,
+        logging: ExecutionLogging,
+        context: &RequestContext,
+        response: &mut Response,
+        outcome: Outcome,
+    ) {
+        let record = response.extensions_mut().remove::<ExecutionRecord>();
+        let response_data = ResponseData {
+            headers: response.headers(),
+            body: record.as_ref().and_then(|r| r.response_body.as_ref()),
+        };
+        let ctx = record.as_ref().map_or(context, |r| r.ctx.as_ref());
+        for line in logging.lines(ctx, outcome, &response_data) {
+            let event = LogEvent::now(line);
+            for queue in &self.execution_queues {
+                queue.push(event.clone());
+            }
+        }
+    }
+
     /// Starts the request's server span.
     fn start_span(
         &self,
@@ -868,6 +918,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn data_traces_log_the_bodies_and_the_endpoint_exchange() {
+        let aws = MockAws::start().await;
+        let addr = upstream().await;
+        let doc = json!({
+            "info": {"title": "Logged"},
+            "paths": {"/echo": {"post": {"x-amazon-apigateway-integration": {
+                "type": "http_proxy", "httpMethod": "POST", "uri": format!("http://{addr}/")}}}}
+        });
+        let (router, observability) = serve_doc(
+            &aws,
+            &doc,
+            ApiKind::Rest,
+            stage_settings(false, Some("INFO")),
+            settings(Delivery::Off, Delivery::Aws, false),
+        );
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/echo")
+            .header("host", "abc.example.com")
+            .header("content-type", "text/plain")
+            .body(Body::from("hello backend"))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(RequestId(uuid::Uuid::nil()));
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(&*body, b"{}", "the logged body still reaches the client");
+        observability.close().await;
+        let lines = messages(&aws, EXECUTION_GROUP).join("\n");
+        for expected in [
+            "Method request body before transformations: hello backend".to_owned(),
+            format!("Endpoint request URI: http://{addr}/"),
+            "Endpoint request body after transformations: hello backend".to_owned(),
+            format!("Sending request to http://{addr}/"),
+            "Received response. Status: 200, Integration latency:".to_owned(),
+            "Endpoint response headers: {content-type=application/json".to_owned(),
+            "Method response body after transformations: {}".to_owned(),
+            "Method response headers: {".to_owned(),
+            "API Key  authorized because method 'POST /echo' does not require API Key".to_owned(),
+            "Successfully completed execution".to_owned(),
+        ] {
+            assert!(lines.contains(&expected), "{expected}\n{lines}");
+        }
+    }
+
+    #[tokio::test]
     async fn stage_metrics_have_no_route_dimensions_unless_detailed() {
         let aws = MockAws::start().await;
         let (router, observability) = serve(
@@ -971,6 +1071,7 @@ mod tests {
             detailed: Some((None, "/x".to_owned())),
             method: None,
             template: "/x".to_owned(),
+            api_key_required: false,
         };
         let method_of = |method: &str| {
             inner

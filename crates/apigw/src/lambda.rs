@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, header};
 use axum::response::Response;
 use base64::Engine as _;
@@ -56,6 +56,15 @@ impl LambdaProxy {
             return Err(GatewayError::IntegrationFailure);
         }
         ctx.integration.transfer_mode = Some(self.transfer);
+        if ctx.capture_exchange {
+            let exchange = ctx.integration.exchange.get_or_insert_default();
+            exchange.uri = Some(format!(
+                "https://lambda.{}.amazonaws.com/2015-03-31/functions/{}/invocations",
+                self.function.region().unwrap_or_default(),
+                self.function.as_str()
+            ));
+            exchange.request_body = Some(Bytes::from(event.clone()));
+        }
         let started = Instant::now();
         let result = match self.transfer {
             ResponseTransferMode::Buffered => self.invoke_buffered(aws, route, ctx, event).await,
@@ -74,7 +83,7 @@ impl LambdaProxy {
         &self,
         aws: &AwsClients,
         route: &Route,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
         event: Vec<u8>,
     ) -> Result<Response, GatewayError> {
         let call = aws.invoke_lambda(
@@ -101,6 +110,9 @@ impl LambdaProxy {
         if invocation.payload.len() > LAMBDA_PAYLOAD_LIMIT {
             tracing::error!(route = %route.key, function = %self.function, bytes = invocation.payload.len(), "Lambda response is larger than the invocation payload limit");
             return Err(GatewayError::IntegrationFailure);
+        }
+        if let Some(ref mut exchange) = ctx.integration.exchange {
+            exchange.response_body = Some(Bytes::copy_from_slice(&invocation.payload));
         }
         let negotiation =
             (ctx.api.kind == ApiKind::Rest).then(|| ctx.payload.negotiate(&ctx.headers));
