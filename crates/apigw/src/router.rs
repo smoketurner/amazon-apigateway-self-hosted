@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::Router;
+use axum::body::Body;
 use axum::extract::{OriginalUri, Request};
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -19,7 +20,7 @@ use crate::authz::{Authorizers, ResourcePolicies};
 use crate::aws::{AwsClients, RoleArn, RoleStatus};
 use crate::cache::CacheSettings;
 use crate::canary::{CanaryRelease, CanarySummary};
-use crate::domain::{DomainName, DomainRegistry, DomainSummary, Resolution};
+use crate::domain::{DomainName, DomainRegistry, DomainSummary, Resolution, ViaCustomDomain};
 use crate::gateway::{ApiContext, Enforcement, GatewayError, RequestId};
 use crate::http_routes::{HttpRoutes, PathPattern, decoded_path};
 use crate::identity::ClientIdentity;
@@ -28,6 +29,7 @@ use crate::model::{ApiKind, ApiModel, MethodMatch, Protections, RouteKey, RouteP
 use crate::pipeline::Pipeline;
 use crate::rest_path::{self, EdgeResponse};
 use crate::route::{AccessRules, Route};
+use crate::telemetry::{GatewayMetrics, PrometheusRegistry};
 use crate::throttle::ThrottleSettings;
 use crate::usage::ApiKeyRules;
 use crate::validation::RequestValidators;
@@ -144,19 +146,12 @@ impl RouteSummary {
             .refusals(route)
             .map(|protection| protection.refusal_reason(route))
             .collect();
-        let target = match route.integration {
-            Integration::HttpProxy(ref proxy) => Some(proxy.uri.clone()),
-            Integration::Lambda(ref lambda) => Some(lambda.function.to_string()),
-            Integration::Mapped(ref mapped) => {
-                problems.extend(mapped.problems());
-                mapped.target()
-            }
-            Integration::AwsSubtype(ref subtype) => Some(subtype.subtype.name().to_owned()),
-            Integration::Unsupported { ref reason } => {
-                problems.push(reason.clone());
-                None
-            }
-        };
+        match route.integration {
+            Integration::Mapped(ref mapped) => problems.extend(mapped.problems()),
+            Integration::Unsupported { ref reason } => problems.push(reason.clone()),
+            Integration::HttpProxy(_) | Integration::Lambda(_) | Integration::AwsSubtype(_) => {}
+        }
+        let target = route.integration.target();
         let credentials = match route.integration {
             Integration::Lambda(ref lambda) => lambda.credentials.clone(),
             Integration::Mapped(ref mapped) => mapped.role().cloned(),
@@ -509,6 +504,17 @@ impl CustomDomain {
             .into_response()
     }
 
+    /// API Gateway's answer to a request the domain does not serve (measured):
+    /// `403 {"message":"Forbidden"}` named `ForbiddenException`.
+    fn forbidden() -> Response {
+        let mut response = Self::error(StatusCode::FORBIDDEN, "Forbidden");
+        response.headers_mut().insert(
+            HeaderName::from_static("x-amzn-errortype"),
+            HeaderValue::from_static("ForbiddenException"),
+        );
+        response
+    }
+
     /// Replaces the path of `request`, keeping its query string.
     fn rewrite_path(request: &mut Request, path: &str) -> Result<(), axum::http::uri::InvalidUri> {
         let target = match request.uri().query() {
@@ -535,8 +541,9 @@ pub(crate) fn domain_dispatcher(domains: DomainRegistry) -> Router {
         let domains = domains.clone();
         async move {
             let path = request.uri().path().to_owned();
+            // Measured: `200 Healthy Connection`, with no Content-Type.
             if RESERVED_HEALTH_PATHS.contains(&path.as_str()) {
-                return (StatusCode::OK, "healthy").into_response();
+                return Response::new(Body::from("Healthy Connection"));
             }
             let host = request
                 .headers()
@@ -550,7 +557,7 @@ pub(crate) fn domain_dispatcher(domains: DomainRegistry) -> Router {
                 })
                 .map_or_default(DomainName::host_of);
             let Some(state) = domains.find(&host) else {
-                return CustomDomain::error(StatusCode::FORBIDDEN, "Forbidden");
+                return CustomDomain::forbidden();
             };
             if state.requires_client_certificate()
                 && !request
@@ -564,10 +571,11 @@ pub(crate) fn domain_dispatcher(domains: DomainRegistry) -> Router {
                     host,
                     "refused a request to a mutual TLS domain without a verified client certificate"
                 );
-                return CustomDomain::error(StatusCode::FORBIDDEN, "Forbidden");
+                return CustomDomain::forbidden();
             }
             match state.resolve(&path, request.headers()) {
                 Resolution::Matched(loaded, routed_path) => {
+                    request.extensions_mut().insert(ViaCustomDomain);
                     if CustomDomain::rewrite_path(&mut request, &routed_path).is_err() {
                         return CustomDomain::error(StatusCode::BAD_REQUEST, "Bad Request");
                     }
@@ -577,13 +585,46 @@ pub(crate) fn domain_dispatcher(domains: DomainRegistry) -> Router {
                     tracing::warn!(%stage, host, "request for an API stage that has not loaded");
                     CustomDomain::error(StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable")
                 }
-                Resolution::NoMatch => CustomDomain::error(StatusCode::FORBIDDEN, "Forbidden"),
+                Resolution::NoMatch => CustomDomain::forbidden(),
             }
         }
     })
 }
 
-/// Health and introspection routes for the admin listener.
+/// Adds `/metrics`, the gateway's metrics in the Prometheus text format, to
+/// the admin routes.
+pub(crate) fn with_metrics(admin: Router, registry: PrometheusRegistry) -> Router {
+    admin.route(
+        "/metrics",
+        axum::routing::get(move || {
+            let text = registry.render();
+            async move {
+                (
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        "text/plain; version=0.0.4; charset=utf-8",
+                    )],
+                    text,
+                )
+            }
+        }),
+    )
+}
+
+/// Counts every request the API listener is handling.
+pub(crate) fn count_in_flight(app: Router, metrics: GatewayMetrics) -> Router {
+    app.layer(axum::middleware::from_fn(
+        move |request: Request, next: axum::middleware::Next| {
+            let guard = metrics.in_flight();
+            async move {
+                let response = next.run(request).await;
+                drop(guard);
+                response
+            }
+        },
+    ))
+}
+
 /// The `/routes` document: the loaded API plus the current state of every
 /// integration role the gateway has tried to assume.
 #[derive(Serialize)]
@@ -1596,6 +1637,44 @@ pub(crate) mod tests {
             headers: parts.headers,
             body: String::from_utf8(body.to_vec()).unwrap(),
         }
+    }
+
+    #[tokio::test]
+    async fn the_admin_listener_serves_prometheus_metrics() {
+        let registry = PrometheusRegistry::new();
+        let admin = with_metrics(Router::new(), registry);
+        let request = Request::builder()
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap();
+        let response = admin.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "text/plain; version=0.0.4; charset=utf-8"
+        );
+    }
+
+    #[tokio::test]
+    async fn requests_in_flight_are_counted_until_they_are_answered() {
+        use opentelemetry::metrics::MeterProvider as _;
+        let registry = PrometheusRegistry::new();
+        let provider = registry.meter_provider_builder().unwrap().build();
+        let metrics = GatewayMetrics::new(&provider.meter("apigw"));
+        let seen = Arc::new(std::sync::Mutex::new(String::new()));
+        let during = Arc::clone(&seen);
+        let inner = registry.clone();
+        let app = count_in_flight(
+            Router::new().fallback(move || {
+                *during.lock().unwrap() = inner.render();
+                async { "ok" }
+            }),
+            metrics,
+        );
+        let request = Request::builder().uri("/").body(Body::empty()).unwrap();
+        app.oneshot(request).await.unwrap();
+        assert!(seen.lock().unwrap().contains("apigw_requests_in_flight 1"));
+        assert!(registry.render().contains("apigw_requests_in_flight 0"));
     }
 
     async fn call(router: &Router, method: Method, uri: &str) -> (StatusCode, String) {

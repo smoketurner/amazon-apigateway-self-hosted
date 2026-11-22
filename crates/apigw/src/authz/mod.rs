@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 
+pub(crate) use glob::{CaseSensitivity, Glob};
 pub(crate) use jwt::{Challenge, IssuerEndpoint, KeyStore};
 pub(crate) use policy::MethodArn;
 pub(crate) use resource_policy::{ResourcePolicies, RoutePolicy};
@@ -304,10 +305,31 @@ impl Authorizer {
         request: &AuthRequest<'_>,
         scopes: &[String],
     ) -> Result<Authorized, Denial> {
-        match *self {
+        let span = request.ctx.otel.as_ref().map(|server| match *self {
+            Self::Lambda(ref authorizer) => server.authorizer("lambda", authorizer.name()),
+            Self::Jwt(_) => server.authorizer("jwt", "jwt"),
+        });
+        let decided = match *self {
             Self::Lambda(ref authorizer) => authorizer.authorize(request).await,
             Self::Jwt(ref authorizer) => authorizer.authorize(request, scopes).await,
+        };
+        if let Some(span) = span {
+            match decided {
+                Ok(ref authorized) => span.set(
+                    "apigw.authorizer.decision",
+                    match authorized.decision {
+                        Decision::Allow => "allow",
+                        Decision::ExplicitDeny | Decision::ImplicitDeny => "deny",
+                    },
+                ),
+                Err(ref denial) => {
+                    span.set("apigw.authorizer.decision", "refused");
+                    span.set("apigw.authorizer.denial", format!("{denial:?}"));
+                }
+            }
+            span.end();
         }
+        decided
     }
 
     /// How a caller this authorizer accepted counts as authenticated, which

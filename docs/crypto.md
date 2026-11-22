@@ -1,7 +1,7 @@
 # Crypto & TLS: aws-lc-rs only
 
 apigw uses **aws-lc-rs** as the single crypto provider, everywhere — for the TLS listeners,
-outbound HTTPS to integrations, and the AWS SDK's HTTPS client. OpenSSL and `ring` are deliberately kept out: they're
+outbound HTTPS to integrations, the AWS SDK's HTTPS client, and the OTLP exporters. OpenSSL and `ring` are deliberately kept out: they're
 banned in `deny.toml` and excluded by feature selection.
 
 Why: one audited, FIPS-capable provider; no system OpenSSL to cross-compile or patch; a
@@ -47,9 +47,10 @@ tokio-rustls = { workspace = true, features = ["aws-lc-rs", "tls12"] }
 reqwest      = { workspace = true, features = ["rustls", "http2", "stream"] }  # rustls = aws-lc-rs in 0.13
 aws-sdk-*    = { workspace = true, features = ["default-https-client", ...] }  # not the legacy `rustls` feature
 rcgen        = { workspace = true, features = ["aws_lc_rs", "pem"] }           # dev-dependency
+opentelemetry-otlp = { workspace = true, features = ["reqwest-blocking-client", "grpc-tonic", "tls-aws-lc", "tls-roots", ...] }
 ```
 
-Never enable `native-tls`, `default-tls`, a `ring` feature, or the AWS SDK's
+Never enable `native-tls`, `default-tls`, a `ring` feature (`tls-ring` on `opentelemetry-otlp`), or the AWS SDK's
 `rustls`/`legacy-https-client` features (they pull hyper 0.14 with `ring`).
 
 ## Enforce it

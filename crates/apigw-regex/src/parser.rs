@@ -4,10 +4,7 @@
 //! that a pattern Java rejects is rejected here and a pattern Java accepts is either
 //! translated faithfully or refused with an explicit [`Unsupported`] error.
 
-use crate::ast::{
-    Anchor, BackReference, CaseMode, ClassItem, ClassSet, Flag, Flags, Greed, GroupKind, LineMode,
-    Node,
-};
+use crate::ast::{Anchor, ClassItem, ClassSet, Flag, Flags, Greed, GroupKind, LineMode, Node};
 use crate::classes::{Predefined, Property};
 use crate::error::{RegexError, Unsupported};
 
@@ -25,7 +22,8 @@ pub(crate) struct Parsed {
 
 /// What `\x` style escapes resolve to inside and outside classes.
 enum Escape {
-    Char(char),
+    /// A code point, which may be a lone UTF-16 surrogate.
+    Code(u32),
     Class(ClassItem),
 }
 
@@ -193,10 +191,40 @@ impl Parser {
             items.extend(atoms);
             items.push(self.parse_quantifier(last)?);
         }
+        Self::mark_slices(&mut items);
         Ok(match items.len() {
             0 => Node::Empty,
             1 => items.pop().unwrap_or(Node::Empty),
             _ => Node::Concat(items),
+        })
+    }
+
+    /// Marks runs of two or more literal characters, which Java matches as one slice.
+    fn mark_slices(items: &mut [Node]) {
+        let mut start = 0;
+        while start < items.len() {
+            let run = items.get(start..).map_or(0, |rest| {
+                rest.iter()
+                    .take_while(|node| matches!(node, Node::Literal { .. }))
+                    .count()
+            });
+            if run >= 2 {
+                for node in items.iter_mut().skip(start).take(run) {
+                    if let Node::Literal { slice, .. } = node {
+                        *slice = true;
+                    }
+                }
+            }
+            start = start.saturating_add(run.max(1));
+        }
+    }
+
+    /// A literal character; a lone surrogate never matches a Rust string.
+    fn literal(&self, code: u32) -> Node {
+        char::from_u32(code).map_or_else(Node::nothing, |ch| Node::Literal {
+            ch,
+            mode: self.flags.case_mode(),
+            slice: false,
         })
     }
 
@@ -308,7 +336,7 @@ impl Parser {
                 }
             }
             '\\' => return self.parse_escape(start),
-            other => Node::Literal(other, mode),
+            other => self.literal(u32::from(other)),
         };
         Ok(vec![node])
     }
@@ -322,41 +350,54 @@ impl Parser {
             ));
         };
         let node = match e {
-            'Q' => return Ok(self.parse_quote(mode)),
+            'Q' => return Ok(self.parse_quote()),
             'A' => Node::Anchor(Anchor::InputStart),
             'z' => Node::Anchor(Anchor::InputEnd),
             'Z' => Node::Anchor(Anchor::InputEndBeforeTerminator(self.line_mode())),
             'b' | 'B' => self.parse_boundary(e == 'B', start)?,
-            'G' => {
-                return Err(RegexError::unsupported(
-                    Unsupported::EndOfPreviousMatch,
-                    start,
-                ));
-            }
-            'X' => return Err(RegexError::unsupported(Unsupported::GraphemeCluster, start)),
+            'G' => Node::Anchor(Anchor::PreviousMatchEnd),
+            'X' => Node::Grapheme,
             'R' => Node::LineBreak,
             'N' => return Err(self.parse_named_character(start)),
-            'k' => self.parse_named_back_reference(start)?,
-            '1'..='9' => self.parse_numeric_back_reference(e, start)?,
+            'k' => self.parse_named_back_reference()?,
+            '1'..='9' => self.parse_numeric_back_reference(e),
             _ => match self.parse_class_escape(e, start)? {
-                Escape::Char(c) => Node::Literal(c, mode),
+                Escape::Code(code) => self.literal(code),
                 Escape::Class(item) => Node::Class(ClassSet::union(false, vec![item]), mode),
             },
         };
         Ok(vec![node])
     }
 
+    /// `\N{name}`. Resolving the name needs the Unicode character name table, which this
+    /// crate does not carry, so a well-formed one is refused as untranslatable.
     fn parse_named_character(&self, start: usize) -> RegexError {
-        if self.raw(0) == Some('{') {
+        if self.raw(0) != Some('{') {
+            return RegexError::syntax("Illegal character name escape sequence", start);
+        }
+        let closed = self
+            .chars
+            .get(self.pos.saturating_add(1)..)
+            .is_some_and(|rest| rest.contains(&'}'));
+        if closed {
             RegexError::unsupported(Unsupported::NamedCharacter, start)
         } else {
-            RegexError::syntax("Illegal/unsupported escape sequence", start)
+            RegexError::syntax("Unclosed character name escape sequence", start)
         }
     }
 
-    fn parse_boundary(&self, negated: bool, start: usize) -> Result<Node, RegexError> {
-        if self.raw(0) == Some('{') {
-            return Err(RegexError::unsupported(Unsupported::GraphemeCluster, start));
+    /// `\b`, `\B`, or `\b{g}`. Like Java, a `{` after `\b` that does not start `{g` is left
+    /// for the quantifier parser.
+    fn parse_boundary(&mut self, negated: bool, start: usize) -> Result<Node, RegexError> {
+        if !negated && self.raw(0) == Some('{') && self.raw(1) == Some('g') {
+            if self.raw(2) != Some('}') {
+                return Err(RegexError::syntax(
+                    "Illegal/unsupported escape sequence",
+                    start,
+                ));
+            }
+            self.pos = self.pos.saturating_add(3);
+            return Ok(Node::Anchor(Anchor::GraphemeBoundary));
         }
         let unicode = self.unicode_classes();
         Ok(Node::Anchor(if negated {
@@ -366,41 +407,54 @@ impl Parser {
         }))
     }
 
-    /// Reads the text of a `\Q...\E` quote, whose characters are all literal.
-    fn parse_quote(&mut self, mode: CaseMode) -> Vec<Node> {
-        let mut nodes = Vec::new();
+    /// Reads the characters of a `\Q...\E` quote, which are all literal.
+    fn read_quote(&mut self) -> Vec<char> {
+        let mut chars = Vec::new();
         while let Some(c) = self.next_raw() {
             if c == '\\' && self.raw(0) == Some('E') {
                 self.advance();
                 break;
             }
-            nodes.push(Node::Literal(c, mode));
+            chars.push(c);
         }
-        nodes
+        chars
     }
 
-    fn parse_named_back_reference(&mut self, start: usize) -> Result<Node, RegexError> {
+    fn parse_quote(&mut self) -> Vec<Node> {
+        self.read_quote()
+            .into_iter()
+            .map(|c| self.literal(u32::from(c)))
+            .collect()
+    }
+
+    fn back_reference(&self, group: usize) -> Node {
+        Node::BackReference {
+            group,
+            mode: self.flags.case_mode(),
+        }
+    }
+
+    fn parse_named_back_reference(&mut self) -> Result<Node, RegexError> {
         if !self.eat_raw('<') {
             return Err(self.error("\\k is not followed by '<' for named capturing group"));
         }
         let name = self.parse_group_name()?;
-        if !self.names.iter().any(|(known, _)| *known == name) {
+        let Some(group) = self
+            .names
+            .iter()
+            .find_map(|(known, group)| (*known == name).then_some(*group))
+        else {
             return Err(RegexError::syntax(
                 format!("named capturing group <{name}> does not exist"),
                 self.pos,
             ));
-        }
-        self.reject_case_insensitive_back_reference(start)?;
-        Ok(Node::BackReference(BackReference::Named(name)))
+        };
+        Ok(self.back_reference(group))
     }
 
     /// Reads Java's greedy back reference number: more digits are taken only while the
     /// resulting group number already exists.
-    fn parse_numeric_back_reference(
-        &mut self,
-        first: char,
-        start: usize,
-    ) -> Result<Node, RegexError> {
+    fn parse_numeric_back_reference(&mut self, first: char) -> Node {
         let mut number = first.to_digit(10).map_or(0, |d| d as usize);
         while let Some(digit) = self.raw(0).and_then(|c| c.to_digit(10)) {
             let candidate = number.saturating_mul(10).saturating_add(digit as usize);
@@ -410,19 +464,7 @@ impl Parser {
             number = candidate;
             self.advance();
         }
-        self.reject_case_insensitive_back_reference(start)?;
-        Ok(Node::BackReference(BackReference::Number(number)))
-    }
-
-    fn reject_case_insensitive_back_reference(&self, start: usize) -> Result<(), RegexError> {
-        if self.flags.has(Flag::CaseInsensitive) {
-            Err(RegexError::unsupported(
-                Unsupported::CaseInsensitiveBackReference,
-                start,
-            ))
-        } else {
-            Ok(())
-        }
+        self.back_reference(number)
     }
 
     fn parse_group_name(&mut self) -> Result<String, RegexError> {
@@ -460,9 +502,8 @@ impl Parser {
             }
         } else {
             self.group_count = self.group_count.saturating_add(1);
-            GroupKind::Capture(None)
+            GroupKind::Capture
         };
-        let kind = self.register_group_name(kind)?;
         let inner = self.parse_alternation()?;
         if !self.eat_raw(')') {
             return Err(RegexError::syntax("Unclosed group", self.pos));
@@ -480,17 +521,15 @@ impl Parser {
     }
 
     /// Records a named group's number now that it has been counted.
-    fn register_group_name(&mut self, kind: GroupKind) -> Result<GroupKind, RegexError> {
-        if let GroupKind::Capture(Some(name)) = &kind {
-            if self.names.iter().any(|(known, _)| known == name) {
-                return Err(RegexError::syntax(
-                    format!("Named capturing group <{name}> is already defined"),
-                    self.pos,
-                ));
-            }
-            self.names.push((name.clone(), self.group_count));
+    fn register_group_name(&mut self, name: String) -> Result<(), RegexError> {
+        if self.names.iter().any(|(known, _)| *known == name) {
+            return Err(RegexError::syntax(
+                format!("Named capturing group <{name}> is already defined"),
+                self.pos,
+            ));
         }
-        Ok(kind)
+        self.names.push((name, self.group_count));
+        Ok(())
     }
 
     /// Parses what follows `(?`.
@@ -515,7 +554,8 @@ impl Parser {
                 _ => {
                     let name = self.parse_group_name()?;
                     self.group_count = self.group_count.saturating_add(1);
-                    GroupKind::Capture(Some(name))
+                    self.register_group_name(name)?;
+                    GroupKind::Capture
                 }
             },
             _ => {
@@ -607,20 +647,17 @@ impl Parser {
             };
             if e == 'Q' {
                 return Ok(self
-                    .parse_quote(CaseMode::Sensitive)
+                    .read_quote()
                     .into_iter()
-                    .filter_map(|node| match node {
-                        Node::Literal(ch, _) => Some(ClassItem::Range(ch, ch)),
-                        _ => None,
-                    })
+                    .map(ClassItem::Single)
                     .collect());
             }
             match self.parse_class_escape(e, start)? {
-                Escape::Char(ch) => ch,
+                Escape::Code(code) => code,
                 Escape::Class(item) => return Ok(vec![item]),
             }
         } else {
-            c
+            u32::from(c)
         };
         if self.peek() == Some('-') && !matches!(self.raw(1), Some('[' | ']') | None) {
             self.advance();
@@ -628,24 +665,29 @@ impl Parser {
             if high < low {
                 return Err(RegexError::syntax("Illegal character range", start));
             }
-            return Ok(vec![ClassItem::Range(low, high)]);
+            return Ok(vec![match (char::from_u32(low), char::from_u32(high)) {
+                (Some(low), Some(high)) => ClassItem::Range(low, high),
+                _ => ClassItem::code_range(low, high),
+            }]);
         }
-        Ok(vec![ClassItem::Range(low, low)])
+        Ok(vec![
+            char::from_u32(low).map_or_else(ClassItem::nothing, ClassItem::Single),
+        ])
     }
 
-    fn parse_range_end(&mut self) -> Result<char, RegexError> {
+    fn parse_range_end(&mut self) -> Result<u32, RegexError> {
         let start = self.pos;
         let Some(c) = self.next() else {
             return Err(self.error("Unclosed character class"));
         };
         if c != '\\' {
-            return Ok(c);
+            return Ok(u32::from(c));
         }
         let Some(e) = self.next_raw() else {
             return Err(self.error("Unclosed character class"));
         };
         match self.parse_class_escape(e, start)? {
-            Escape::Char(ch) => Ok(ch),
+            Escape::Code(code) => Ok(code),
             Escape::Class(_) => Err(RegexError::syntax("Illegal character range", start)),
         }
     }
@@ -656,22 +698,20 @@ impl Parser {
     fn parse_class_escape(&mut self, e: char, start: usize) -> Result<Escape, RegexError> {
         let unicode = self.unicode_classes();
         let item = match e {
-            't' => return Ok(Escape::Char('\t')),
-            'n' => return Ok(Escape::Char('\n')),
-            'r' => return Ok(Escape::Char('\r')),
-            'f' => return Ok(Escape::Char('\u{C}')),
-            'a' => return Ok(Escape::Char('\u{7}')),
-            'e' => return Ok(Escape::Char('\u{1B}')),
-            '0' => return self.parse_octal(start).map(Escape::Char),
-            'x' => return self.parse_hex(start).map(Escape::Char),
-            'u' => return self.parse_unicode(start).map(Escape::Char),
+            't' => return Ok(Escape::Code(0x9)),
+            'n' => return Ok(Escape::Code(0xA)),
+            'r' => return Ok(Escape::Code(0xD)),
+            'f' => return Ok(Escape::Code(0xC)),
+            'a' => return Ok(Escape::Code(0x7)),
+            'e' => return Ok(Escape::Code(0x1B)),
+            '0' => return self.parse_octal(start).map(Escape::Code),
+            'x' => return self.parse_hex(start).map(Escape::Code),
+            'u' => return self.parse_unicode(start).map(Escape::Code),
             'c' => {
                 let control = self
                     .next_raw()
                     .ok_or_else(|| RegexError::syntax("Illegal control escape sequence", start))?;
-                return Ok(Escape::Char(
-                    char::from_u32(u32::from(control) ^ 64).unwrap_or(control),
-                ));
+                return Ok(Escape::Code(u32::from(control) ^ 64));
             }
             'd' | 'D' | 's' | 'S' | 'w' | 'W' | 'h' | 'H' | 'v' | 'V' => {
                 Predefined::item(e, unicode)
@@ -683,12 +723,12 @@ impl Parser {
                     start,
                 ));
             }
-            e => return Ok(Escape::Char(e)),
+            e => return Ok(Escape::Code(u32::from(e))),
         };
         Ok(Escape::Class(item))
     }
 
-    fn parse_octal(&mut self, start: usize) -> Result<char, RegexError> {
+    fn parse_octal(&mut self, start: usize) -> Result<u32, RegexError> {
         let octal = |c: Option<char>| c.and_then(|c| c.to_digit(8));
         let Some(n) = octal(self.raw(0)) else {
             return Err(RegexError::syntax("Illegal octal escape sequence", start));
@@ -705,11 +745,10 @@ impl Parser {
                 value = Self::shift_in(value, 8, o);
             }
         }
-        char::from_u32(value)
-            .ok_or_else(|| RegexError::syntax("Illegal octal escape sequence", start))
+        Ok(value)
     }
 
-    fn parse_hex(&mut self, start: usize) -> Result<char, RegexError> {
+    fn parse_hex(&mut self, start: usize) -> Result<u32, RegexError> {
         let hex = |c: Option<char>| c.and_then(|c| c.to_digit(16));
         if self.raw(0) == Some('{') && hex(self.raw(1)).is_some() {
             self.advance();
@@ -730,12 +769,12 @@ impl Parser {
                     start,
                 ));
             }
-            return Self::scalar(value, start);
+            return Ok(value);
         }
         match (hex(self.raw(0)), hex(self.raw(1))) {
             (Some(a), Some(b)) => {
                 self.pos = self.pos.saturating_add(2);
-                Self::scalar(Self::shift_in(a, 16, b), start)
+                Ok(Self::shift_in(a, 16, b))
             }
             _ => Err(RegexError::syntax(
                 "Illegal hexadecimal escape sequence",
@@ -745,7 +784,7 @@ impl Parser {
     }
 
     /// Reads `\uXXXX`, joining a high surrogate with a following `\uXXXX` low surrogate.
-    fn parse_unicode(&mut self, start: usize) -> Result<char, RegexError> {
+    fn parse_unicode(&mut self, start: usize) -> Result<u32, RegexError> {
         let high = self.parse_four_hex(start)?;
         if (0xD800..0xDC00).contains(&high) && self.raw(0) == Some('\\') && self.raw(1) == Some('u')
         {
@@ -755,11 +794,11 @@ impl Parser {
                 && let (Ok(high_unit), Ok(low_unit)) = (u16::try_from(high), u16::try_from(low))
                 && let Some(Ok(pair)) = char::decode_utf16([high_unit, low_unit]).next()
             {
-                return Ok(pair);
+                return Ok(u32::from(pair));
             }
             self.pos = saved;
         }
-        Self::scalar(high, start)
+        Ok(high)
     }
 
     fn parse_four_hex(&mut self, start: usize) -> Result<u32, RegexError> {
@@ -777,11 +816,6 @@ impl Parser {
 
     fn shift_in(value: u32, radix: u32, digit: u32) -> u32 {
         value.saturating_mul(radix).saturating_add(digit)
-    }
-
-    fn scalar(value: u32, start: usize) -> Result<char, RegexError> {
-        char::from_u32(value)
-            .ok_or_else(|| RegexError::unsupported(Unsupported::LoneSurrogate, start))
     }
 
     /// Parses `\p{Name}` or `\pL` after the `p` or `P`.
@@ -804,8 +838,8 @@ impl Parser {
             Some(c) => c.to_string(),
             None => return Err(RegexError::syntax("Illegal character family", start)),
         };
-        let property = Property::resolve(&name, self.unicode_classes())
-            .map_err(|construct| RegexError::unsupported(construct, start))?
+        let case_insensitive = self.flags.has(Flag::CaseInsensitive);
+        let property = Property::resolve(&name, self.unicode_classes(), case_insensitive)
             .ok_or_else(|| {
                 RegexError::syntax(format!("Unknown character property name {{{name}}}"), start)
             })?;

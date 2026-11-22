@@ -502,6 +502,7 @@ mod tests {
 
     use super::*;
     use crate::client_cert::tests::certificate;
+    use crate::model::ApiKind;
 
     fn proxies(nets: &[&str], hops: u8) -> TrustedProxies {
         let nets: Vec<TrustedProxy> = nets.iter().map(|net| net.parse().unwrap()).collect();
@@ -981,9 +982,11 @@ mod tests {
     }
 
     fn subject_of(identity: &ClientIdentity) -> Option<String> {
-        identity
-            .client_cert()
-            .and_then(|c| c.to_json().get("subjectDN").map(ToString::to_string))
+        identity.client_cert().and_then(|c| {
+            c.to_json(ApiKind::Http)
+                .get("subjectDN")
+                .map(ToString::to_string)
+        })
     }
 
     #[test]
@@ -999,7 +1002,7 @@ mod tests {
             identity
                 .client_cert()
                 .unwrap()
-                .to_json()
+                .to_json(ApiKind::Http)
                 .get("clientCertPem")
                 .is_some()
         );
@@ -1012,7 +1015,7 @@ mod tests {
         let mut map = headers(&[("x-forwarded-client-cert", CERT_HEADER)]);
         let identity = trust.identify(peer("10.0.0.1"), &mut map);
         assert_eq!(
-            identity.client_cert().unwrap().to_json(),
+            identity.client_cert().unwrap().to_json(ApiKind::Http),
             serde_json::json!({"subjectDN": "CN=client,O=Acme"})
         );
     }

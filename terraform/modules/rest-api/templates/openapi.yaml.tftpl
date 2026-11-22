@@ -632,6 +632,26 @@ paths:
             responseTemplates:
               application/json: |-
                 $input.json('$.body') $input.path('$.body.name') $input.json('$.body.absent') [$input.path('$.body.absent')] $input.params('missing')
+  /vtl/undefined:
+    post:
+      responses:
+        "200":
+          description: "the rendered template"
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        uri: "${echo_invocation_uri}"
+        credentials: "${invoke_role_arn}"
+        passthroughBehavior: when_no_templates
+        requestTemplates:
+          application/json: |-
+            {"body":$input.json('$')}
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: |-
+                #set($m = {'a': 1})#set($n = $input.path('$.body.absent'))[$undefined] [$undefined.prop] [$undefined.size()] [$!undefined] [$m.missing] [$m.get('missing')] [$n] [$n.length()]
   /lambda-nonproxy:
     post:
       responses:

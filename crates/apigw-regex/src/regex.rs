@@ -2,7 +2,7 @@
 
 use fancy_regex::{Regex, RegexBuilder};
 
-use crate::emit::Emitter;
+use crate::emit::{Emitter, Translation};
 use crate::error::RegexError;
 use crate::parser::Parser;
 use crate::replacement::Replacement;
@@ -110,15 +110,23 @@ pub struct Captures<'t> {
 }
 
 impl<'t> Captures<'t> {
-    fn new(input: &'t str, captures: &fancy_regex::Captures<'t, str>) -> Self {
-        let groups = captures
+    /// Reads the engine's groups back in Java's numbering; `numbering` maps each Java group to
+    /// the engine group that holds it.
+    fn new(
+        input: &'t str,
+        captures: &fancy_regex::Captures<'t, str>,
+        numbering: &[Option<usize>],
+    ) -> Self {
+        let groups = numbering
             .iter()
-            .map(|group| {
-                group.map(|m| Match {
-                    input,
-                    start: m.start(),
-                    end: m.end(),
-                })
+            .map(|engine| {
+                engine
+                    .and_then(|engine| captures.get(engine))
+                    .map(|m| Match {
+                        input,
+                        start: m.start(),
+                        end: m.end(),
+                    })
             })
             .collect();
         Self { groups }
@@ -188,6 +196,13 @@ pub struct JavaRegex {
     source: String,
     search: Regex,
     whole: Regex,
+    /// For patterns using `\G` or `\b{g}`: the search to run after an empty match. Java then
+    /// starts one character later while `\G` still means the end of that empty match; the
+    /// engine's `\G` is where the search starts, so this pattern starts there, skips at least
+    /// one character, and drops the skipped text from the match with `\K`.
+    resume: Option<Regex>,
+    /// The engine group of each Java group.
+    numbering: Vec<Option<usize>>,
     group_count: usize,
     group_names: Vec<(String, usize)>,
 }
@@ -211,13 +226,23 @@ impl JavaRegex {
     /// [`RegexError::Engine`] when the translated pattern exceeds the engine's limits.
     pub fn with_options(pattern: &str, options: &RegexOptions) -> Result<Self, RegexError> {
         let parsed = Parser::parse(pattern)?;
-        let translated = Emitter::render(&parsed.root, parsed.group_count);
+        let Translation {
+            pattern: translated,
+            groups: numbering,
+        } = Emitter::render(&parsed.root, parsed.group_count);
         let search = options.build(&translated)?;
         let whole = options.build(&format!(r"\A(?:{translated})\z"))?;
+        let resume = if parsed.root.reads_previous_match_end() {
+            Some(options.build(&format!(r"\G(?s:.)+?\K(?:{translated})"))?)
+        } else {
+            None
+        };
         Ok(Self {
             source: pattern.to_owned(),
             search,
             whole,
+            resume,
+            numbering,
             group_count: parsed.group_count,
             group_names: parsed.group_names,
         })
@@ -273,18 +298,26 @@ impl JavaRegex {
     ///
     /// Returns [`RegexError::BacktrackLimitExceeded`] when matching takes too many steps.
     pub fn captures<'t>(&self, input: &'t str) -> Result<Option<Captures<'t>>, RegexError> {
-        self.captures_from(input, 0)
+        self.captures_from(input, Resume::At(0))
     }
 
     fn captures_from<'t>(
         &self,
         input: &'t str,
-        from: usize,
+        from: Resume,
     ) -> Result<Option<Captures<'t>>, RegexError> {
-        Ok(self
-            .search
-            .captures_from_pos(input, from)?
-            .map(|captures| Captures::new(input, &captures)))
+        let found = match (from, &self.resume) {
+            (Resume::At(at), _) => self.search.captures_from_pos(input, at)?,
+            (Resume::AfterEmpty(at), Some(resume)) => resume.captures_from_pos(input, at)?,
+            (Resume::AfterEmpty(at), None) => {
+                let Some(width) = input.get(at..).and_then(|rest| rest.chars().next()) else {
+                    return Ok(None);
+                };
+                self.search
+                    .captures_from_pos(input, at.saturating_add(width.len_utf8()))?
+            }
+        };
+        Ok(found.map(|captures| Captures::new(input, &captures, &self.numbering)))
     }
 
     /// Iterates over successive matches the way repeated `Matcher.find` calls do, including
@@ -297,7 +330,7 @@ impl JavaRegex {
         Matches {
             regex: self,
             input,
-            next_from: Some(0),
+            next_from: Some(Resume::At(0)),
         }
     }
 
@@ -390,25 +423,33 @@ impl JavaRegex {
         CapturesIter {
             regex: self,
             input,
-            next_from: Some(0),
+            next_from: Some(Resume::At(0)),
         }
     }
 
-    /// Where the next search starts after `captures`: Java skips one character after an
-    /// empty match so the scan always advances.
-    fn resume_after(input: &str, whole: Match<'_>) -> Option<usize> {
+    /// Where the next search starts after `whole`: Java skips one character after an empty
+    /// match so the scan always advances, and stops after an empty match at the end.
+    fn resume_after(input: &str, whole: Match<'_>) -> Option<Resume> {
         if whole.start() != whole.end() {
-            return Some(whole.end());
+            return Some(Resume::At(whole.end()));
         }
-        let width = input.get(whole.end()..)?.chars().next()?.len_utf8();
-        Some(whole.end().saturating_add(width))
+        (whole.end() < input.len()).then_some(Resume::AfterEmpty(whole.end()))
     }
+}
+
+/// Where the next search of an iteration starts.
+#[derive(Debug, Clone, Copy)]
+enum Resume {
+    /// At this byte offset, which is also where the previous match ended.
+    At(usize),
+    /// One character after this offset, where the previous, empty, match ended.
+    AfterEmpty(usize),
 }
 
 struct CapturesIter<'r, 't> {
     regex: &'r JavaRegex,
     input: &'t str,
-    next_from: Option<usize>,
+    next_from: Option<Resume>,
 }
 
 impl<'t> Iterator for CapturesIter<'_, 't> {
@@ -434,7 +475,7 @@ impl<'t> Iterator for CapturesIter<'_, 't> {
 pub struct Matches<'r, 't> {
     regex: &'r JavaRegex,
     input: &'t str,
-    next_from: Option<usize>,
+    next_from: Option<Resume>,
 }
 
 impl<'t> Iterator for Matches<'_, 't> {

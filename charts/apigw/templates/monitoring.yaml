@@ -1,0 +1,72 @@
+{{- with .Values.metrics }}
+{{- if .serviceMonitor.enabled }}
+# The admin port, for the ServiceMonitor only. /routes is reachable through it
+# too, so it is a separate Service that nothing else selects.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "apigw.fullname" $ }}-metrics
+  labels:
+    {{- include "apigw.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: metrics
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "apigw.selectorLabels" $ | nindent 4 }}
+  ports:
+    - name: admin
+      port: {{ $.Values.adminPort }}
+      targetPort: admin
+      protocol: TCP
+      appProtocol: https
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "apigw.fullname" $ }}
+  labels:
+    {{- include "apigw.labels" $ | nindent 4 }}
+    {{- with .serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "apigw.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: metrics
+  endpoints:
+    - port: admin
+      scheme: https
+      path: /metrics
+      interval: {{ .serviceMonitor.interval }}
+      {{- with .tlsConfig }}
+      tlsConfig:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- if .podMonitor.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "apigw.fullname" $ }}
+  labels:
+    {{- include "apigw.labels" $ | nindent 4 }}
+    {{- with .podMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "apigw.selectorLabels" $ | nindent 6 }}
+  podMetricsEndpoints:
+    - port: admin
+      scheme: https
+      path: /metrics
+      interval: {{ .podMonitor.interval }}
+      {{- with .tlsConfig }}
+      tlsConfig:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}

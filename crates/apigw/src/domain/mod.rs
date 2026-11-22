@@ -144,6 +144,10 @@ pub(crate) struct Routed {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ApiMappings(Vec<ApiMapping>);
 
+/// Marks a request that reached its API through a custom domain.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ViaCustomDomain;
+
 impl ApiMappings {
     pub(crate) fn new(mut mappings: Vec<ApiMapping>) -> Self {
         mappings.sort_by(|a, b| {
@@ -158,6 +162,11 @@ impl ApiMappings {
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = &ApiMapping> {
         self.0.iter()
+    }
+
+    /// Whether any mapping key has more than one level (`v1/orders`).
+    pub(crate) fn has_multi_level(&self) -> bool {
+        self.0.iter().any(|m| m.key.is_multi_level())
     }
 
     /// The mapping that serves `path`, and the path left after removing it.

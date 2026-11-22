@@ -55,6 +55,12 @@ cases:
     compare:
       headers: [content-type]
 
+  - name: domain-sping
+    api: domain
+    path: /sping
+    compare:
+      headers: [content-type]
+
   - name: domain-mtls-trusted
     api: domain_mtls
     path: /mock

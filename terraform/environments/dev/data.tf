@@ -19,9 +19,9 @@ data "aws_iam_policy_document" "gateway_domain" {
     actions = ["apigateway:GET"]
     resources = flatten([
       for domain in [module.custom_domain[0].api_domain, module.custom_domain[0].mtls_domain] : [
-        "arn:${local.partition}:apigateway:${local.region}::/v2/domainnames/${domain}",
-        "arn:${local.partition}:apigateway:${local.region}::/v2/domainnames/${domain}/apimappings",
-        "arn:${local.partition}:apigateway:${local.region}::/v2/domainnames/${domain}/routingrules",
+        "arn:${local.partition}:apigateway:${local.region}::/domainnames/${domain}",
+        "arn:${local.partition}:apigateway:${local.region}::/domainnames/${domain}/apimappings",
+        "arn:${local.partition}:apigateway:${local.region}::/domainnames/${domain}/routingrules",
       ]
     ])
   }

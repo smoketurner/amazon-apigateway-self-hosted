@@ -58,7 +58,7 @@ The flags most deployments set (each has an environment variable; `apigw --help`
 | `--openapi-file` + `--api-type` | `APIGW_OPENAPI_FILE` | `rest` | Serve an export from disk, with no AWS calls for configuration |
 | `--tls-cert`, `--tls-key` | `APIGW_TLS_CERT`, `APIGW_TLS_KEY` | required | PEM files, reloaded when they change |
 | `--listen` | `APIGW_LISTEN` | `0.0.0.0:8443` | API traffic |
-| `--admin-listen` | `APIGW_ADMIN_LISTEN` | off | `/healthz` and `/routes` (also TLS) |
+| `--admin-listen` | `APIGW_ADMIN_LISTEN` | off | `/healthz`, `/routes`, and Prometheus `/metrics` (also TLS) |
 | `--base-path` | `APIGW_BASE_PATH` | none | Serve under `/prod` etc., like an `execute-api` URL |
 | `--refresh-seconds` | `APIGW_REFRESH_SECONDS` | `60` | How often to check API Gateway for changes; `0` disables |
 | `--config-cache` | `APIGW_CONFIG_CACHE` | none | Last-known-good definition, used when AWS is unreachable at startup |
@@ -83,7 +83,7 @@ APIs, `apigw-requestid` for HTTP APIs).
 |---|---|
 | [docs/deployment.md](docs/deployment.md) | Installing with Helm, the `.rpm` and `.deb` packages, or the container image; Istio, certificates, credentials and IAM permissions |
 | [docs/configuration.md](docs/configuration.md) | Every flag, stage variables and integration overrides, refresh and failure behavior |
-| [docs/operations.md](docs/operations.md) | Custom domains and mutual TLS, canary releases, response caching, logs, metrics, and tracing |
+| [docs/operations.md](docs/operations.md) | Custom domains and mutual TLS, canary releases, response caching, logs, CloudWatch and Prometheus metrics, X-Ray and OpenTelemetry tracing |
 | [docs/parity.md](docs/parity.md) | Feature matrix: what is supported, partial, planned, or not possible, for REST and HTTP APIs |
 | [docs/architecture.md](docs/architecture.md) | Modules, request flow, the accept loop, router swapping |
 | [docs/crypto.md](docs/crypto.md) | aws-lc-rs as the only crypto provider |

@@ -41,6 +41,7 @@ mod route;
 mod router;
 mod source;
 mod state;
+mod telemetry;
 mod throttle;
 mod usage;
 mod validation;

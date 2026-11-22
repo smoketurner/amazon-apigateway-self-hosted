@@ -5,9 +5,9 @@
   "response": {
     "status": 200,
     "headers": {
-      "content-type": "null",
+      "apigw-requestid": "[masked]",
       "date": "[masked]"
     },
-    "body": "healthy"
+    "body": "Healthy Connection"
   }
 }

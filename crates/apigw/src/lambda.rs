@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, header};
 use axum::response::Response;
 use base64::Engine as _;
@@ -56,6 +56,15 @@ impl LambdaProxy {
             return Err(GatewayError::IntegrationFailure);
         }
         ctx.integration.transfer_mode = Some(self.transfer);
+        if ctx.capture_exchange {
+            let exchange = ctx.integration.exchange.get_or_insert_default();
+            exchange.uri = Some(format!(
+                "https://lambda.{}.amazonaws.com/2015-03-31/functions/{}/invocations",
+                self.function.region().unwrap_or_default(),
+                self.function.as_str()
+            ));
+            exchange.request_body = Some(Bytes::from(event.clone()));
+        }
         let started = Instant::now();
         let result = match self.transfer {
             ResponseTransferMode::Buffered => self.invoke_buffered(aws, route, ctx, event).await,
@@ -74,7 +83,7 @@ impl LambdaProxy {
         &self,
         aws: &AwsClients,
         route: &Route,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
         event: Vec<u8>,
     ) -> Result<Response, GatewayError> {
         let call = aws.invoke_lambda(
@@ -101,6 +110,9 @@ impl LambdaProxy {
         if invocation.payload.len() > LAMBDA_PAYLOAD_LIMIT {
             tracing::error!(route = %route.key, function = %self.function, bytes = invocation.payload.len(), "Lambda response is larger than the invocation payload limit");
             return Err(GatewayError::IntegrationFailure);
+        }
+        if let Some(ref mut exchange) = ctx.integration.exchange {
+            exchange.response_body = Some(Bytes::copy_from_slice(&invocation.payload));
         }
         let negotiation =
             (ctx.api.kind == ApiKind::Rest).then(|| ctx.payload.negotiate(&ctx.headers));
@@ -623,8 +635,12 @@ impl<'a> ProxyEvent<'a> {
         if let Some(forwarded_for) = forwarded_for {
             push("x-forwarded-for", forwarded_for);
         }
-        push("x-forwarded-port", ctx.port().to_string());
-        push("x-forwarded-proto", "https".to_owned());
+        // Measured: a REST API's event for a mutual TLS request carries neither.
+        let mutual_tls = spelling == EventSpelling::Rest && ctx.identity.has_verified_certificate();
+        if !mutual_tls {
+            push("x-forwarded-port", ctx.port().to_string());
+            push("x-forwarded-proto", "https".to_owned());
+        }
         if let Some(trace) = ctx.started_trace_header() {
             push("x-amzn-trace-id", trace);
         }
@@ -669,7 +685,7 @@ impl<'a> ProxyEvent<'a> {
         if let (Value::Object(fields), Some(cert)) =
             (&mut identity, self.ctx.identity.client_cert())
         {
-            fields.insert("clientCert".to_owned(), cert.to_json());
+            fields.insert("clientCert".to_owned(), cert.to_json(self.ctx.api.kind));
         }
         identity
     }
@@ -682,8 +698,10 @@ impl<'a> ProxyEvent<'a> {
         let http_api = ctx.api.kind == ApiKind::Http;
         let mut event = json!({
             "resource": ctx.resource_path,
-            // An HTTP API reports the path as sent, stage and escapes included.
-            "path": if http_api { &ctx.sent_path } else { &ctx.path },
+            // An HTTP API reports the path as sent, stage and escapes included,
+            // and so does a REST API reached through a custom domain, mapping
+            // key included (measured).
+            "path": if http_api || ctx.via_custom_domain { &ctx.sent_path } else { &ctx.path },
             "httpMethod": ctx.method.as_str(),
             "headers": headers,
             "multiValueHeaders": multi_headers,
@@ -800,7 +818,7 @@ impl<'a> ProxyEvent<'a> {
                 if let Some(cert) = ctx.identity.client_cert() {
                     request_context.insert(
                         "authentication".to_owned(),
-                        json!({"clientCert": cert.to_json()}),
+                        json!({"clientCert": cert.to_json(ctx.api.kind)}),
                     );
                 }
             }

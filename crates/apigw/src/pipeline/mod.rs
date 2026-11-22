@@ -10,6 +10,7 @@
 
 pub(crate) mod context;
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::body::{Body, Bytes, HttpBody};
@@ -17,7 +18,7 @@ use axum::extract::{FromRequestParts as _, RawPathParams, Request};
 use axum::http::{HeaderName, HeaderValue, Method, header};
 use axum::response::Response;
 
-pub(crate) use context::{ApiKeyIdentity, RequestContext};
+pub(crate) use context::{ApiKeyIdentity, EndpointExchange, RequestContext};
 
 use crate::authz::{AuthRequest, Denial};
 use crate::cache::CacheOutcome;
@@ -29,11 +30,12 @@ use crate::mapping::ResponseMapping;
 use crate::model::{
     ApiKeySource, ApiKind, Protection, ResponseTransferMode, ResponseType, RoutePath,
 };
-use crate::observability::IntegrationTiming;
+use crate::observability::{ExecutionRecord, IntegrationTiming};
 use crate::payload::PayloadSettings;
 use crate::rest_path::RestPath;
 use crate::route::Route;
 use crate::state::Admission;
+use crate::telemetry::SpanTarget;
 use crate::usage::{KeyValue, RouteApiKey, UsageOutcome};
 
 /// One route's handling of one request.
@@ -86,10 +88,54 @@ impl<'a> Pipeline<'a> {
             parts,
             path_params.unwrap_or_default(),
         );
+        let logging = self.api.observer.execution_logging(&self.route.key);
+        ctx.capture_exchange = logging.is_some_and(|logging| logging.data_trace);
         let mut response = self.process(&mut ctx, body, readable).await;
         if let Some(ref cors) = self.api.cors {
             cors.decorate(&ctx, &mut response);
         }
+        if logging.is_some() {
+            return Self::recorded(ctx, response).await;
+        }
+        response
+    }
+
+    /// Attaches what execution logs report about the request to `response`:
+    /// the request as the pipeline saw it and, with data tracing, the body of a
+    /// buffered response of known length up to 1 MiB (read and put back).
+    async fn recorded(ctx: RequestContext, response: Response) -> Response {
+        const MAX_LOGGED_BODY: u64 = 1_048_576;
+        let length = HttpBody::size_hint(response.body()).exact().or_else(|| {
+            response
+                .headers()
+                .get(header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse().ok())
+        });
+        let buffered = ctx.capture_exchange
+            && ctx.integration.transfer_mode != Some(ResponseTransferMode::Stream)
+            && length.is_some_and(|length| length <= MAX_LOGGED_BODY);
+        let (mut response, body) = if buffered {
+            let (parts, body) = response.into_parts();
+            match axum::body::to_bytes(body, usize::try_from(MAX_LOGGED_BODY).unwrap_or(usize::MAX))
+                .await
+            {
+                Ok(bytes) => (
+                    Response::from_parts(parts, Body::from(bytes.clone())),
+                    Some(bytes),
+                ),
+                Err(err) => {
+                    tracing::warn!(%err, "a response body could not be read for the execution log");
+                    (Response::from_parts(parts, Body::empty()), None)
+                }
+            }
+        } else {
+            (response, None)
+        };
+        response.extensions_mut().insert(ExecutionRecord {
+            ctx: Arc::new(ctx),
+            response_body: body,
+        });
         response
     }
 
@@ -117,6 +163,7 @@ impl<'a> Pipeline<'a> {
         if let Err(error) = self.decode_request(ctx) {
             return self.fail(ctx, &error.failure(self.api.kind));
         }
+        Self::start_exchange(ctx);
         if let Err(failure) = self.route.validation.check(ctx).await {
             return self.fail(ctx, &failure);
         }
@@ -131,8 +178,31 @@ impl<'a> Pipeline<'a> {
             return self.encode(ctx, hit).await;
         }
         let started = Instant::now();
+        let started_at = jiff::Timestamp::now();
+        let span = ctx.otel.as_ref().map(|server| {
+            server.integration(&SpanTarget {
+                kind: self.route.integration.kind(),
+                target: self.route.integration.target(),
+            })
+        });
+        ctx.otel_integration.clone_from(&span);
         let result = self.integrate(ctx).await;
-        let timing = IntegrationTiming(started.elapsed());
+        let timing = IntegrationTiming {
+            started_at,
+            elapsed: started.elapsed(),
+            status: ctx.integration.status,
+            failed: result.is_err(),
+        };
+        ctx.otel_integration = None;
+        if let Some(span) = span {
+            if let Some(status) = ctx.integration.status {
+                span.set("http.response.status_code", i64::from(status));
+            }
+            if let Err(ref error) = result {
+                span.fail(format!("{error:?}"));
+            }
+            span.end();
+        }
         let succeeded = result.is_ok();
         let mut response = match result {
             Ok(response) => response,
@@ -217,6 +287,17 @@ impl<'a> Pipeline<'a> {
         match self.encode_response(ctx, response).await {
             Ok(response) => response,
             Err(error) => self.fail(ctx, &error.failure(self.api.kind)),
+        }
+    }
+
+    /// Keeps the method request body for execution logs with data tracing,
+    /// before integrations take it.
+    fn start_exchange(ctx: &mut RequestContext) {
+        if ctx.capture_exchange {
+            ctx.integration.exchange = Some(EndpointExchange {
+                method_request_body: Some(ctx.body.clone()),
+                ..EndpointExchange::default()
+            });
         }
     }
 

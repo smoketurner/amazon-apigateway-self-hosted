@@ -14,20 +14,7 @@ use serde_json::Value;
 const FIXTURES: &str = include_str!("fixtures/java-regex.jsonl");
 
 /// Patterns Java accepts but this crate refuses with a typed "unsupported" error.
-const UNTRANSLATABLE: &[&str] = &[
-    r"\Ga",
-    r"\G",
-    r"\X",
-    r"\N{LATIN SMALL LETTER A}",
-    r"\b{g}",
-    r"\p{javaLowerCase}",
-    r"\p{InGreek}",
-    r"\p{block=Greek}",
-    r"\ud83d",
-    r"\ude00",
-    r"(?U)\p{Graph}",
-    r"(?i)(a)\1",
-];
+const UNTRANSLATABLE: &[&str] = &[r"\N{LATIN SMALL LETTER A}"];
 
 /// A case whose result differs from Java in a way a translation cannot fix.
 struct Divergence {
@@ -46,60 +33,44 @@ impl Divergence {
     }
 }
 
-const EMPTY_ITERATION: &str = "Java records an empty final iteration of a repeated group; the engine keeps the last non-empty one";
-const COMBINING_MARKS: &str = "Java treats a combining mark after a letter as a word character for \\b; the translation uses ASCII word characters only";
-const DOTTED_I: &str = "Java compares case-insensitive Unicode text through toUpperCase/toLowerCase, which equates dotted and dotless i with i and I; the engine uses simple case folding";
+const BACK_REFERENCE_FOLDING: &str = "fancy-regex compares a case-insensitive back reference by Unicode simple case folding over the same number of UTF-8 bytes; Java compares each character through toUpperCase/toLowerCase, and only ASCII letters without UNICODE_CASE";
+const GRAPHEME_IN_LOOK_BEHIND: &str = "Java bounds a look-behind as if \\X had no maximum width, so a look-behind around \\X never matches; the translation matches the cluster";
 
 const KNOWN_DIVERGENCES: &[Divergence] = &[
     Divergence {
-        pattern: "(^)*a",
+        pattern: "(?i)(é)\\1",
+        input: Some("éÉ"),
+        reason: BACK_REFERENCE_FOLDING,
+    },
+    Divergence {
+        pattern: "(?iu)(i)\\1",
+        input: Some("i\u{131}"),
+        reason: BACK_REFERENCE_FOLDING,
+    },
+    Divergence {
+        pattern: "(?iu)(i)\\1",
+        input: Some("i\u{130}"),
+        reason: BACK_REFERENCE_FOLDING,
+    },
+    Divergence {
+        pattern: "(?iu)(k)\\1",
+        input: Some("k\u{212A}"),
+        reason: BACK_REFERENCE_FOLDING,
+    },
+    Divergence {
+        pattern: "(?iu)(s)\\1",
+        input: Some("s\u{17F}"),
+        reason: BACK_REFERENCE_FOLDING,
+    },
+    Divergence {
+        pattern: "(?iu)(ß)\\1",
+        input: Some("ß\u{1E9E}"),
+        reason: BACK_REFERENCE_FOLDING,
+    },
+    Divergence {
+        pattern: "(?<=\\G\\X)",
         input: None,
-        reason: EMPTY_ITERATION,
-    },
-    Divergence {
-        pattern: "(a*)*",
-        input: None,
-        reason: EMPTY_ITERATION,
-    },
-    Divergence {
-        pattern: "(a*)+",
-        input: None,
-        reason: EMPTY_ITERATION,
-    },
-    Divergence {
-        pattern: "(a?)*",
-        input: None,
-        reason: EMPTY_ITERATION,
-    },
-    Divergence {
-        pattern: r"\b",
-        input: Some("e\u{301} x"),
-        reason: COMBINING_MARKS,
-    },
-    Divergence {
-        pattern: r"\b",
-        input: Some("a\u{301}b"),
-        reason: COMBINING_MARKS,
-    },
-    Divergence {
-        pattern: r"\bx",
-        input: Some("e\u{301}x"),
-        reason: COMBINING_MARKS,
-    },
-    Divergence {
-        pattern: "(?iu)i",
-        input: Some("\u{130}"),
-        reason: DOTTED_I,
-    },
-    Divergence {
-        pattern: "(?iu)i",
-        input: Some("\u{131}"),
-        reason: DOTTED_I,
-    },
-    Divergence {
-        pattern: "(?iu)\u{131}",
-        input: None,
-        reason: DOTTED_I,
+        reason: GRAPHEME_IN_LOOK_BEHIND,
     },
 ];
 
