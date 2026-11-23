@@ -45,7 +45,6 @@ opentelemetry-prometheus = { workspace = true }
 opentelemetry_sdk    = { workspace = true, features = ["trace", "metrics", "internal-logs"] }
 prometheus           = { workspace = true }
 proxy-header         = { workspace = true, features = ["tokio"] }
-redis                = { workspace = true, features = ["aio", "tokio-rustls-comp", "tls-rustls", "connection-manager", "script"] }
 reqwest              = { workspace = true, features = ["rustls", "http2", "stream"] }
 rustls               = { workspace = true, features = ["aws-lc-rs", "std", "tls12", "prefer-post-quantum"] }
 serde                = { workspace = true, features = ["std", "derive"] }
@@ -58,6 +57,7 @@ tower                = { workspace = true, features = ["util"] }
 tracing              = { workspace = true, features = ["std", "attributes"] }
 tracing-subscriber   = { workspace = true, features = ["std", "fmt", "env-filter", "ansi", "json"] }
 uuid                 = { workspace = true, features = ["std", "v7"] }
+valkey-glide         = { workspace = true }
 x509-parser          = { workspace = true }
 zeroize              = { workspace = true, features = ["alloc"] }
 

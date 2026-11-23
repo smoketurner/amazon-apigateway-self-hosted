@@ -22,7 +22,7 @@ absolute-paths-allowed-crates = [
     "core",
     "alloc",
     "jsonschema_regex",
-    "redis",
+    "glide",
     "proc_macro",
     "anyhow",
     "apigw_regex",
@@ -89,8 +89,9 @@ absolute-paths-allowed-crates = [
 doc-valid-idents = ["CloudWatch", "X-Ray", ".."]
 
 # Conventions from CLAUDE.md, enforced; opt out with
-# `#[expect(clippy::disallowed_methods, reason = "...")]`. UUID v4 needs no entry:
-# uuid's `v4` feature is never enabled, so `Uuid::new_v4` does not exist here.
+# `#[expect(clippy::disallowed_methods, reason = "...")]`. valkey-glide's core
+# enables uuid's `v4` feature, so `Uuid::new_v4` compiles and has to be banned here.
 disallowed-methods = [
     { path = "std::time::SystemTime::now", reason = "date/time goes through jiff: use `jiff::Timestamp::now()`" },
+    { path = "uuid::Uuid::new_v4", reason = "IDs are time-ordered: use `Uuid::now_v7()`" },
 ]

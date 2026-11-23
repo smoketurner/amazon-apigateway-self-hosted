@@ -423,13 +423,7 @@ async fn an_unusable_ca_certificate_is_refused() {
     let error = Valkey::connect(&url("rediss://127.0.0.1:1"), Some(b"not a certificate"))
         .await
         .unwrap_err();
-    assert!(
-        matches!(
-            error,
-            ValkeyError::CaCertificate(_) | ValkeyError::Connect { .. }
-        ),
-        "{error:?}"
-    );
+    assert!(matches!(error, ValkeyError::Connect { .. }), "{error:?}");
 }
 
 struct Pki {
