@@ -53,6 +53,23 @@ opentelemetry-otlp = { workspace = true, features = ["reqwest-blocking-client", 
 Never enable `native-tls`, `default-tls`, a `ring` feature (`tls-ring` on `opentelemetry-otlp`), or the AWS SDK's
 `rustls`/`legacy-https-client` features (they pull hyper 0.14 with `ring`).
 
+## Keys exported from ACM
+
+With `--domain-cert-source acm`, ACM's `ExportCertificate` returns the private key as an encrypted
+PKCS #8 `EncryptedPrivateKeyInfo` (RFC 5958). `domain/encrypted_key.rs` decrypts it with aws-lc-rs
+alone (`pbkdf2` and `cipher`), so no PKCS #8 or PBES2 crate joins the graph:
+
+- **Accepted:** PBES2 with PBKDF2 (HMAC-SHA1, SHA-256, SHA-384 or SHA-512) and AES-128/192/256-CBC.
+  PBES1, scrypt, other PRFs and other ciphers are refused, not guessed at.
+- **Checked:** the iteration count (1 to 10,000,000), a `keyLength` that matches the cipher, a
+  16-byte IV, no trailing data, and that the plaintext is a single DER SEQUENCE, which catches a
+  wrong passphrase that still unpads.
+- **Run off the async runtime:** decryption runs on a blocking thread (`spawn_blocking`), because
+  the maximum iteration count takes seconds.
+- **Zeroized:** the passphrase, the derived key and the ciphertext buffer. rustls's
+  `PrivatePkcs8KeyDer` and the AWS SDK's request buffers are not, so copies of the key and the
+  passphrase can stay in memory until the allocator reuses it.
+
 ## Enforce it
 
 `deny.toml` already denies `openssl`, `openssl-sys`, `native-tls`, and `ring`, so a stray

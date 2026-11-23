@@ -20,6 +20,7 @@ repos:
         exclude: ^charts/[^/]+/templates/
       - id: check-toml
       - id: detect-private-key
+        exclude: ^crates/apigw/tests/fixtures/encrypted-keys/
       - id: mixed-line-ending
         args: [--fix=lf]
 

@@ -9,6 +9,8 @@
 //! <https://docs.aws.amazon.com/apigateway/latest/developerguide/rest-api-mappings.html>
 //! <https://docs.aws.amazon.com/apigateway/latest/developerguide/rest-api-routing-rules.html>
 
+mod acm;
+mod encrypted_key;
 mod rules;
 mod runtime;
 mod truststore;

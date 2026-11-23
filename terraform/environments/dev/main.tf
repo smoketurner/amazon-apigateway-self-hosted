@@ -128,6 +128,8 @@ module "custom_domain" {
   rest_api_id = module.rest_api.api_id
   http_api_id = module.http_api.api_id
   stage_name  = var.stage_name
+
+  exportable_certificate = var.custom_domain_export_certificate
 }
 
 # What apigw may do to mirror the reference REST API, whatever it runs on.

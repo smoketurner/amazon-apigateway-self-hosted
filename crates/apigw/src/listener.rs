@@ -119,6 +119,8 @@ pub(crate) struct DomainTls {
     name: DomainName,
     provider: Arc<rustls::crypto::CryptoProvider>,
     resolver: Arc<dyn ResolvesServerCert>,
+    /// Where the domain's certificate goes when it comes from ACM.
+    exported: Option<Arc<ExportedSlot>>,
     config: RwLock<Option<Arc<rustls::ServerConfig>>>,
     /// The truststore's verifier, applied after the handshake to the
     /// certificate the client presented.
@@ -158,6 +160,45 @@ impl DomainTls {
         };
         *self.config.write().unwrap_or_else(PoisonError::into_inner) = config;
         *self.trust.write().unwrap_or_else(PoisonError::into_inner) = trust;
+        Ok(())
+    }
+
+    /// Whether the domain's certificate comes from ACM rather than files.
+    pub(crate) fn takes_exported_certificate(&self) -> bool {
+        self.exported.is_some()
+    }
+
+    /// The ACM certificate being served, if one has been exported.
+    pub(crate) fn exported_certificate(&self) -> Option<ExportedId> {
+        self.exported.as_ref().and_then(|slot| slot.id())
+    }
+
+    /// Serves `chain` and `key`, exported from ACM, to new connections for the
+    /// domain.
+    ///
+    /// # Errors
+    ///
+    /// When the domain does not take exported certificates, or rustls rejects
+    /// the pair (a key that does not match the certificate); the certificate
+    /// served before stays in place.
+    pub(crate) fn serve_exported(
+        &self,
+        id: ExportedId,
+        chain: Vec<CertificateDer<'static>>,
+        key: PrivateKeyDer<'static>,
+    ) -> Result<(), TlsError> {
+        let Some(slot) = &self.exported else {
+            return Err(TlsError::NotExported(self.name.to_string()));
+        };
+        if chain.is_empty() {
+            return Err(TlsError::NoCertificates(format!(
+                "the export of {}",
+                self.name
+            )));
+        }
+        let key = CertifiedKey::from_der(chain, key, &self.provider)?;
+        CertStore::report_expiry(&slot.name, &key);
+        *slot.current.write().unwrap_or_else(PoisonError::into_inner) = Some((id, Arc::new(key)));
         Ok(())
     }
 
@@ -261,6 +302,60 @@ pub(crate) enum TlsError {
     },
     #[error("invalid TLS certificate or key: {0}")]
     Config(#[from] rustls::Error),
+    #[error("{0} serves certificates from files, not exported ones")]
+    NotExported(String),
+}
+
+/// Where the certificates of custom domains come from.
+#[derive(Debug, Clone)]
+pub(crate) enum DomainCerts {
+    /// PEM files per domain (`--domain-cert-dir`); a domain without any is
+    /// served the default certificate.
+    Files(Vec<DomainCert>),
+    /// Exported from ACM by each domain's supervisor; the default certificate
+    /// is served until the first export is in place.
+    Exported,
+}
+
+/// Which ACM certificate an export is: its ARN and the serial number ACM
+/// reported, which tells renewals apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExportedId {
+    pub(crate) arn: String,
+    pub(crate) serial: String,
+}
+
+/// A custom domain's certificate exported from ACM, once there is one.
+#[derive(Debug)]
+struct ExportedSlot {
+    /// The domain, for the expiry metric.
+    name: String,
+    current: RwLock<Option<(ExportedId, Arc<CertifiedKey>)>>,
+}
+
+impl ExportedSlot {
+    fn certified(&self) -> Option<Arc<CertifiedKey>> {
+        self.current
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|(_, key)| Arc::clone(key))
+    }
+
+    fn id(&self) -> Option<ExportedId> {
+        self.current
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|(id, _)| id.clone())
+    }
+}
+
+/// One custom domain's certificate.
+#[derive(Debug)]
+enum DomainStore {
+    Files(CertStore),
+    Exported(Arc<ExportedSlot>),
 }
 
 /// Identifies one version of the PEM files on disk. `metadata` follows
@@ -372,36 +467,49 @@ impl CertStore {
 #[derive(Debug)]
 struct CertSet {
     default: CertStore,
-    domains: Vec<(DomainName, CertStore)>,
+    domains: Vec<(DomainName, DomainStore)>,
 }
 
 impl CertSet {
+    /// The certificates read from files, which are reloaded when they change.
     fn stores(&self) -> impl Iterator<Item = &CertStore> {
-        std::iter::once(&self.default).chain(self.domains.iter().map(|(_, store)| store))
+        let domains = self.domains.iter().filter_map(|(_, store)| match store {
+            DomainStore::Files(store) => Some(store),
+            DomainStore::Exported(_) => None,
+        });
+        std::iter::once(&self.default).chain(domains)
     }
 
-    /// An exact domain name wins over a wildcard that also matches.
-    fn store_for(&self, server_name: &str) -> &CertStore {
+    /// The certificate for `server_name`. An exact domain name wins over a
+    /// wildcard that also matches; a domain whose ACM certificate has not been
+    /// exported yet gets the default.
+    fn certified_for(&self, server_name: &str) -> Arc<CertifiedKey> {
         let exact = self
             .domains
             .iter()
             .find(|(name, _)| !name.as_str().starts_with("*.") && name.matches(server_name));
-        exact
-            .or_else(|| {
-                self.domains
-                    .iter()
-                    .find(|(name, _)| name.matches(server_name))
-            })
-            .map_or(&self.default, |(_, store)| store)
+        let store = exact.or_else(|| {
+            self.domains
+                .iter()
+                .find(|(name, _)| name.matches(server_name))
+        });
+        match store {
+            Some((_, DomainStore::Files(store))) => store.certified(),
+            Some((_, DomainStore::Exported(slot))) => {
+                slot.certified().unwrap_or_else(|| self.default.certified())
+            }
+            None => self.default.certified(),
+        }
     }
 }
 
 impl ResolvesServerCert for CertSet {
     fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        let store = client_hello
-            .server_name()
-            .map_or(&self.default, |name| self.store_for(name));
-        Some(store.certified())
+        Some(
+            client_hello
+                .server_name()
+                .map_or_else(|| self.default.certified(), |name| self.certified_for(name)),
+        )
     }
 }
 
@@ -409,26 +517,40 @@ impl Tls {
     /// Server TLS with aws-lc-rs from PEM files; HTTP/2 is offered via ALPN.
     #[cfg(test)]
     pub(crate) fn from_pem_files(cert_path: &Path, key_path: &Path) -> Result<Self, TlsError> {
-        Self::with_domains(cert_path, key_path, &[], &[])
+        Self::with_domains(cert_path, key_path, &[], &DomainCerts::Files(Vec::new()))
     }
 
     /// As [`Tls::from_pem_files`], with `domains` as the custom domains served
     /// here (each with its own client authentication, see
-    /// [`Tls::domain`]) and `certs` as the certificates of those that have
-    /// their own, served to clients whose SNI names the domain.
+    /// [`Tls::domain`]) and `certs` as where their own certificates come from,
+    /// served to clients whose SNI names the domain.
     pub(crate) fn with_domains(
         cert_path: &Path,
         key_path: &Path,
         domains: &[DomainName],
-        certs: &[DomainCert],
+        certs: &DomainCerts,
     ) -> Result<Self, TlsError> {
         let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-        let mut stores = Vec::with_capacity(certs.len());
-        for cert in certs {
-            stores.push((
-                cert.name.clone(),
-                CertStore::open(cert.name.as_str(), &cert.cert, &cert.key, &provider)?,
-            ));
+        let mut stores = Vec::with_capacity(domains.len());
+        let mut slots = Vec::new();
+        match certs {
+            DomainCerts::Files(files) => {
+                for cert in files {
+                    let store =
+                        CertStore::open(cert.name.as_str(), &cert.cert, &cert.key, &provider)?;
+                    stores.push((cert.name.clone(), DomainStore::Files(store)));
+                }
+            }
+            DomainCerts::Exported => {
+                for name in domains {
+                    let slot = Arc::new(ExportedSlot {
+                        name: name.to_string(),
+                        current: RwLock::new(None),
+                    });
+                    slots.push((name.clone(), Arc::clone(&slot)));
+                    stores.push((name.clone(), DomainStore::Exported(slot)));
+                }
+            }
         }
         let certs = Arc::new(CertSet {
             default: CertStore::open("default", cert_path, key_path, &provider)?,
@@ -443,6 +565,10 @@ impl Tls {
                     name: name.clone(),
                     provider: Arc::clone(&provider),
                     resolver: Arc::clone(&resolver),
+                    exported: slots
+                        .iter()
+                        .find(|(slot_name, _)| slot_name == name)
+                        .map(|(_, slot)| Arc::clone(slot)),
                     config: RwLock::new(None),
                     trust: RwLock::new(None),
                 })
@@ -522,6 +648,12 @@ impl Tls {
             .iter()
             .find(|d| !d.name.as_str().starts_with("*.") && d.name.matches(server_name));
         exact.or_else(|| self.domains.iter().find(|d| d.name.matches(server_name)))
+    }
+
+    /// The leaf certificate a client asking for `server_name` is served.
+    #[cfg(test)]
+    pub(crate) fn certificate_for(&self, server_name: &str) -> Option<CertificateDer<'static>> {
+        self.certs.certified_for(server_name).cert.first().cloned()
     }
 
     /// Whether a client asking for `server_name` would be served at all, rather
@@ -1285,7 +1417,7 @@ mod tests {
             })
             .collect();
         let names: Vec<DomainName> = domains.iter().map(|d| d.name.clone()).collect();
-        let tls = Tls::with_domains(&cert, &key, &names, &domains).unwrap();
+        let tls = Tls::with_domains(&cert, &key, &names, &DomainCerts::Files(domains)).unwrap();
         for name in &names {
             tls.domain(name)
                 .unwrap()
@@ -1370,11 +1502,11 @@ mod tests {
             &default_cert,
             &default_key,
             std::slice::from_ref(&name),
-            &[DomainCert {
+            &DomainCerts::Files(vec![DomainCert {
                 name: name.clone(),
                 cert: cert_path.clone(),
                 key: key_path.clone(),
-            }],
+            }]),
         )
         .unwrap();
         assert!(!tls.reload_if_changed().unwrap());
@@ -1417,11 +1549,11 @@ GET /spelling HTTP/1.1\r\nhost: localhost\r\nx-MIXED-case: x\r\nconnection: clos
             &cert,
             &key,
             &[secure_name.clone(), open_name.clone()],
-            &[DomainCert {
+            &DomainCerts::Files(vec![DomainCert {
                 name: secure_name.clone(),
                 cert: secure_cert,
                 key: secure_key,
-            }],
+            }]),
         )
         .unwrap();
         tls.domain(&open_name)
@@ -1685,6 +1817,82 @@ GET /spelling HTTP/1.1\r\nhost: localhost\r\nx-MIXED-case: x\r\nconnection: clos
         assert!(matches!(
             Tls::from_pem_files(&cert_path, &other_key),
             Err(TlsError::Config(_))
+        ));
+    }
+
+    /// The DER chain and key of `cert`, as an export hands them over.
+    fn id(serial: &str) -> ExportedId {
+        ExportedId {
+            arn: "arn:aws:acm:us-east-1:123456789012:certificate/1".to_owned(),
+            serial: serial.to_owned(),
+        }
+    }
+
+    fn exported(cert: &TestCert) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
+        let key = PrivateKeyDer::from_pem_slice(cert.key_pem.as_bytes()).unwrap();
+        (vec![cert.der()], key)
+    }
+
+    #[test]
+    fn an_exported_domain_serves_the_default_until_its_certificate_is_in_place() {
+        let default = generate();
+        let (cert, key) = default.write();
+        let name: DomainName = "api.example.test".parse().unwrap();
+        let tls = Tls::with_domains(
+            &cert,
+            &key,
+            std::slice::from_ref(&name),
+            &DomainCerts::Exported,
+        )
+        .unwrap();
+        let domain = tls.domain(&name).unwrap();
+        assert!(domain.takes_exported_certificate());
+        assert_eq!(tls.certificate_for("api.example.test"), Some(default.der()));
+        assert_eq!(domain.exported_certificate(), None);
+
+        let first = generate_for(&["api.example.test"]);
+        let (chain, key) = exported(&first);
+        domain.serve_exported(id("01"), chain, key).unwrap();
+        assert_eq!(tls.certificate_for("api.example.test"), Some(first.der()));
+        assert_eq!(domain.exported_certificate(), Some(id("01")));
+        assert_eq!(
+            tls.certificate_for("other.example.test"),
+            Some(default.der())
+        );
+
+        // A key that does not match its certificate is refused, and the
+        // certificate already served stays.
+        let other = generate_for(&["api.example.test"]);
+        let (_, wrong_key) = exported(&other);
+        assert!(
+            domain
+                .serve_exported(id("02"), vec![generate().der()], wrong_key)
+                .is_err()
+        );
+        let (_, key) = exported(&other);
+        assert!(domain.serve_exported(id("02"), Vec::new(), key).is_err());
+        assert_eq!(tls.certificate_for("api.example.test"), Some(first.der()));
+        assert_eq!(domain.exported_certificate(), Some(id("01")));
+    }
+
+    #[test]
+    fn a_domain_with_certificate_files_takes_no_exported_one() {
+        let default = generate();
+        let (cert, key) = default.write();
+        let name: DomainName = "api.example.test".parse().unwrap();
+        let tls = Tls::with_domains(
+            &cert,
+            &key,
+            std::slice::from_ref(&name),
+            &DomainCerts::Files(Vec::new()),
+        )
+        .unwrap();
+        let domain = tls.domain(&name).unwrap();
+        assert!(!domain.takes_exported_certificate());
+        let (chain, key) = exported(&generate());
+        assert!(matches!(
+            domain.serve_exported(id("01"), chain, key),
+            Err(TlsError::NotExported(_))
         ));
     }
 

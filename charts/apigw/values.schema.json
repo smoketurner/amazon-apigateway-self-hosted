@@ -26,6 +26,7 @@
         "restApiId": { "type": "string" },
         "httpApiId": { "type": "string" },
         "domainNames": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "domainCertSource": { "enum": ["files", "acm"] },
         "openapiFile": { "type": "string" },
         "type": { "enum": ["rest", "http"] },
         "stage": { "type": "string" },

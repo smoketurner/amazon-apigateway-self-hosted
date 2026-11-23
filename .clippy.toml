@@ -29,6 +29,7 @@ absolute-paths-allowed-crates = [
     "apigw_vtl",
     "aws_config",
     "aws_lc_rs",
+    "aws_sdk_acm",
     "aws_sdk_apigateway",
     "aws_sdk_apigatewayv2",
     "aws_sdk_cloudwatchlogs",
@@ -71,6 +72,7 @@ absolute-paths-allowed-crates = [
     "tracing_subscriber",
     "uuid",
     "x509_parser",
+    "zeroize",
 ]
 
 # Product names that are not code.

@@ -38,3 +38,8 @@ output "stranger_key_pem" {
   value       = tls_private_key.stranger.private_key_pem
   sensitive   = true
 }
+
+output "certificate_arn" {
+  description = "ACM certificate of both domains."
+  value       = aws_acm_certificate_validation.this.certificate_arn
+}

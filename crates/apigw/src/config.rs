@@ -13,7 +13,7 @@ use crate::aws::{
 use crate::domain::DomainName;
 use crate::gateway::{AuthorizationMode, Enforcement};
 use crate::identity::{TrustedProxies, TrustedProxy};
-use crate::listener::{DomainCert, Edge, ProxyProtocol};
+use crate::listener::{DomainCert, DomainCerts, Edge, ProxyProtocol};
 use crate::model::ApiKind;
 use crate::observability::{
     Delivery, LogGroup, MetricsDestination, MetricsNamespace, MetricsSettings, Settings,
@@ -63,6 +63,19 @@ pub(crate) struct Config {
     /// when they change. Without it every domain uses --tls-cert.
     #[arg(long, env = "APIGW_DOMAIN_CERT_DIR")]
     pub(crate) domain_cert_dir: Option<PathBuf>,
+
+    /// Where custom domain certificates come from: `files` (--domain-cert-dir,
+    /// or --tls-cert) or `acm`, which exports the certificate API Gateway
+    /// serves for each domain and keeps it current through renewals. The
+    /// certificate must be an exportable one; --tls-cert is served until the
+    /// first export succeeds.
+    #[arg(
+        long,
+        env = "APIGW_DOMAIN_CERT_SOURCE",
+        value_enum,
+        default_value_t = DomainCertSource::Files
+    )]
+    pub(crate) domain_cert_source: DomainCertSource,
 
     /// Serve an `OpenAPI` export from disk instead of downloading one.
     #[arg(long, env = "APIGW_OPENAPI_FILE")]
@@ -321,6 +334,15 @@ pub(crate) struct Config {
     pub(crate) log_stream: Option<String>,
 }
 
+/// Where custom domain certificates come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum DomainCertSource {
+    /// PEM files: --domain-cert-dir, or --tls-cert for every domain.
+    Files,
+    /// Exported from ACM: the certificate API Gateway serves for the domain.
+    Acm,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum LogFormat {
     Json,
@@ -354,19 +376,39 @@ impl Config {
         }
     }
 
-    /// The certificate files of each custom domain, under `--domain-cert-dir`.
-    pub(crate) fn domain_certs(&self) -> Vec<DomainCert> {
-        let Some(ref dir) = self.domain_cert_dir else {
-            return Vec::new();
-        };
-        self.domain_names
-            .iter()
-            .map(|name| DomainCert {
-                name: name.clone(),
-                cert: dir.join(name.as_str()).join("tls.crt"),
-                key: dir.join(name.as_str()).join("tls.key"),
-            })
-            .collect()
+    /// Where each custom domain's certificate comes from: exported from ACM,
+    /// or the files under `--domain-cert-dir`.
+    ///
+    /// # Errors
+    ///
+    /// When `--domain-cert-source acm` is given without `--domain-name`, or with
+    /// `--domain-cert-dir`, whose files it would leave unused.
+    pub(crate) fn domain_certs(&self) -> anyhow::Result<DomainCerts> {
+        if self.domain_cert_source == DomainCertSource::Acm && self.domain_names.is_empty() {
+            anyhow::bail!("--domain-cert-source acm needs --domain-name");
+        }
+        if self.domain_cert_source == DomainCertSource::Acm && self.refresh_seconds == 0 {
+            anyhow::bail!(
+                "--domain-cert-source acm needs --refresh-seconds above 0, or renewed certificates are never exported"
+            );
+        }
+        Ok(match (self.domain_cert_source, &self.domain_cert_dir) {
+            (DomainCertSource::Acm, Some(_)) => {
+                anyhow::bail!("--domain-cert-dir cannot be used with --domain-cert-source acm")
+            }
+            (DomainCertSource::Acm, None) => DomainCerts::Exported,
+            (DomainCertSource::Files, None) => DomainCerts::Files(Vec::new()),
+            (DomainCertSource::Files, Some(dir)) => DomainCerts::Files(
+                self.domain_names
+                    .iter()
+                    .map(|name| DomainCert {
+                        name: name.clone(),
+                        cert: dir.join(name.as_str()).join("tls.crt"),
+                        key: dir.join(name.as_str()).join("tls.key"),
+                    })
+                    .collect(),
+            ),
+        })
     }
 
     pub(crate) fn vpc_links(&self) -> VpcLinks {
@@ -634,13 +676,54 @@ mod tests {
             "/certs",
         ])
         .unwrap();
-        let certs = config.domain_certs();
+        let certs = match config.domain_certs().unwrap() {
+            DomainCerts::Files(certs) => certs,
+            DomainCerts::Exported => Vec::new(),
+        };
         assert_eq!(certs.len(), 1);
         let cert = certs.first().unwrap();
         assert_eq!(cert.cert, PathBuf::from("/certs/api.example.com/tls.crt"));
         assert_eq!(cert.key, PathBuf::from("/certs/api.example.com/tls.key"));
         let without = parse(&["--domain-name", "api.example.com"]).unwrap();
-        assert!(without.domain_certs().is_empty());
+        assert!(
+            matches!(without.domain_certs().unwrap(), DomainCerts::Files(files) if files.is_empty())
+        );
+    }
+
+    #[test]
+    fn domain_certificates_can_come_from_acm_instead_of_files() {
+        let acm = parse(&[
+            "--domain-name",
+            "api.example.com",
+            "--domain-cert-source",
+            "acm",
+        ])
+        .unwrap();
+        assert!(matches!(acm.domain_certs().unwrap(), DomainCerts::Exported));
+        let both = parse(&[
+            "--domain-name",
+            "api.example.com",
+            "--domain-cert-source",
+            "acm",
+            "--domain-cert-dir",
+            "/certs",
+        ])
+        .unwrap();
+        assert!(both.domain_certs().is_err());
+        let without_domain =
+            parse(&["--domain-cert-source", "acm", "--openapi-file", "x.json"]).unwrap();
+        assert!(without_domain.domain_certs().is_err());
+        let never_refreshed = parse(&[
+            "--domain-name",
+            "api.example.com",
+            "--domain-cert-source",
+            "acm",
+            "--refresh-seconds",
+            "0",
+        ])
+        .unwrap();
+        let err = never_refreshed.domain_certs().unwrap_err();
+        assert!(err.to_string().contains("--refresh-seconds"), "{err}");
     }
 
     #[test]

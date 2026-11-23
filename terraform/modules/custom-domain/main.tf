@@ -3,9 +3,24 @@ resource "aws_acm_certificate" "this" {
   subject_alternative_names = [local.mtls_domain]
   validation_method         = "DNS"
 
+  # ACM bills each exportable certificate it issues, renewals included.
+  dynamic "options" {
+    for_each = var.exportable_certificate ? [true] : []
+    content {
+      export = "ENABLED"
+    }
+  }
+
   lifecycle {
     create_before_destroy = true
+    # ACM cannot change Export on an existing certificate, though the provider
+    # plans it as an in-place update.
+    replace_triggered_by = [terraform_data.certificate_export]
   }
+}
+
+resource "terraform_data" "certificate_export" {
+  input = var.exportable_certificate
 }
 
 # New names only (_<token>.api.parity...); allow_overwrite stays false so an

@@ -17,6 +17,7 @@ apigw-vtl            = { workspace = true }
 anyhow               = { workspace = true, features = ["std"] }
 aws-lc-rs            = { workspace = true, features = ["aws-lc-sys", "alloc"] }
 aws-config           = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio", "credentials-process", "sso"] }
+aws-sdk-acm          = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 aws-sdk-apigateway   = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 aws-sdk-apigatewayv2 = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 aws-sdk-cloudwatchlogs = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
@@ -57,6 +58,7 @@ tracing              = { workspace = true, features = ["std", "attributes"] }
 tracing-subscriber   = { workspace = true, features = ["std", "fmt", "env-filter", "ansi", "json"] }
 uuid                 = { workspace = true, features = ["std", "v7"] }
 x509-parser          = { workspace = true }
+zeroize              = { workspace = true, features = ["alloc"] }
 
 [dev-dependencies]
 tokio                = { workspace = true, features = ["test-util"] }

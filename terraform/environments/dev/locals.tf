@@ -54,6 +54,7 @@ locals {
         api_port            = 8445
         admin_port          = 9445
         gateway_policy_json = data.aws_iam_policy_document.gateway_domain[0].json
+        domain_cert_source  = var.custom_domain_export_certificate ? "acm" : "files"
       }
     } : {},
   )

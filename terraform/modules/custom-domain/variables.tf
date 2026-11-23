@@ -28,3 +28,9 @@ variable "stage_name" {
   description = "Stage of both APIs that the mappings serve."
   type        = string
 }
+
+variable "exportable_certificate" {
+  description = "Request the domains' certificate as an ACM exportable certificate, so apigw can serve it with --domain-cert-source acm. ACM bills each exportable certificate it issues; changing this replaces the certificate."
+  type        = bool
+  default     = false
+}

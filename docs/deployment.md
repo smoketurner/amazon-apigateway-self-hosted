@@ -157,6 +157,7 @@ Always set `AWS_REGION` to the API's region.
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/usageplans`, `.../usageplans/*/keys`, `.../apikeys` | API keys and usage plans of a REST API stage |
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/apis/<id>/exports/OAS30`, `.../apis/<id>/stages/<stage>` | HTTP APIs |
 | `apigateway:GET` | `arn:aws:apigateway:<region>::/domainnames/<domain>`, `.../apimappings`, `.../routingrules`, and `arn:aws:apigateway:<region>::/restapis/<id>` for every mapped API, HTTP APIs included (the gateway tells REST from HTTP APIs by `GetRestApi`) | `--domain-name` |
+| `acm:DescribeCertificate`, `acm:ExportCertificate` | each mapped domain's certificate ARN. `ExportCertificate` hands the gateway the domain's private key: grant it only to the gateways that serve that domain | `--domain-cert-source acm` |
 | `s3:GetObject` | the truststore object of each mutual TLS domain (`s3:GetObjectVersion` when the domain pins a `truststoreVersion`) | mutual TLS |
 | `lambda:InvokeFunction` | each integrated function (and its aliases) and each Lambda authorizer function | `AWS_PROXY` and non-proxy `AWS` routes and Lambda authorizers; the same action covers `InvokeWithResponseStream` for streaming routes |
 | the service action the integration calls (`sqs:SendMessage`, `sqs:ReceiveMessage`, `sns:Publish`, `dynamodb:PutItem`, `dynamodb:GetItem`, `states:StartExecution`, `states:StartSyncExecution`, `kinesis:PutRecord`, `events:PutEvents`, `s3:GetObject`, `appconfig:GetConfiguration`, ...) | the queue, topic, table, state machine, stream, event bus, bucket, or configuration the route uses | REST `AWS` integrations and HTTP API integration subtypes; granted to each integration's `credentials` role, or to the gateway's own identity with `--integration-credentials=gateway` |
@@ -342,7 +343,7 @@ groups:
         expr: time() - apigw_usage_last_success_timestamp_seconds > 1800
       - alert: ApigwCertificateExpiring
         expr: apigw_tls_certificate_expiry_seconds < 14 * 86400
-      - alert: ApigwCertificateReloadFailing   # new files on disk that do not load
+      - alert: ApigwCertificateReloadFailing   # new files on disk, or an ACM export (labelled by domain), that do not load
         expr: increase(apigw_tls_reloads_total{outcome="failure"}[15m]) > 0
       - alert: ApigwUnservableRoutes           # routes answering 501
         expr: apigw_routes_unservable > 0
