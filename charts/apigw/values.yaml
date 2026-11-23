@@ -48,7 +48,8 @@ api:
 # apigw resolves AWS credentials and region the way the AWS CLI and SDKs do:
 # environment variables, shared config and credentials files, a profile, SSO,
 # credential_process, a web identity token, then container and instance
-# metadata. Nothing here is required; set what your environment uses.
+# metadata; or from IAM Roles Anywhere when `rolesAnywhere.roleArn` is set.
+# Nothing here is required; set what your environment uses.
 aws:
   region: ""
   profile: ""
@@ -66,6 +67,47 @@ aws:
     roleArn: ""
     audience: sts.amazonaws.com
     expirationSeconds: 3600
+  # IAM Roles Anywhere: apigw exchanges an X.509 certificate for the role's
+  # credentials itself (no helper binary). Used when `roleArn` is set. Name a
+  # `kubernetes.io/tls` Secret holding the certificate, have cert-manager issue
+  # one, or have csi-driver issue one per pod, from an issuer whose CA is the
+  # trust anchor. The files are re-read on every refresh, so renewals need no
+  # restart.
+  rolesAnywhere:
+    trustAnchorArn: ""
+    profileArn: ""
+    roleArn: ""
+    # 900 to 43200; the profile can lower the maximum.
+    sessionSeconds: 3600
+    existingSecret: ""
+    certManager:
+      enabled: false
+      # The certificate's common name. Defaults to the release's full name.
+      commonName: ""
+      issuerRef:
+        name: ""
+        kind: ClusterIssuer
+        group: cert-manager.io
+    # Or have cert-manager's csi-driver issue each pod its own certificate when
+    # it starts and renew it in place, with no Secret stored in the cluster.
+    # Needs csi-driver installed; use it instead of existingSecret and
+    # certManager.
+    csiDriver:
+      enabled: false
+      issuerRef:
+        name: ""
+        kind: ClusterIssuer
+        group: cert-manager.io
+      # csi-driver expands ${POD_NAME}, ${POD_NAMESPACE}, ${POD_UID}, and
+      # ${SERVICE_ACCOUNT_NAME}, and needs at least one DNS name.
+      commonName: "${POD_NAME}.${POD_NAMESPACE}"
+      dnsNames: "${POD_NAME}.${POD_NAMESPACE}"
+      # RSA (2048 to 4096) or ECDSA (256, 384, or 521).
+      keyAlgorithm: ECDSA
+      keySize: 256
+      duration: 24h
+      # The image's nonroot group, so apigw can read the key.
+      fsGroup: 65532
 
 # Every listener is TLS. Name a `kubernetes.io/tls` Secret, or have cert-manager
 # issue one. The files are re-read when they change.

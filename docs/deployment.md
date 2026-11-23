@@ -124,21 +124,44 @@ environment variables, the shared `config` and `credentials` files (with `AWS_PR
 instance or in EKS nothing needs configuring. `AWS_CONFIG_FILE` and
 `AWS_SHARED_CREDENTIALS_FILE` are never set for you: the systemd service's user has no home
 directory and the image has no `~/.aws`, so shared files are read only when you set these.
+Credentials in a shared file are read once: a rotated file takes effect on the next restart.
+The image has no shell, so `credential_process` cannot run there.
 
 Off AWS there is no IRSA or EKS Pod Identity. Options, in order of preference:
 
-1. **IAM Roles Anywhere** — short-lived credentials from an X.509 certificate through
-   `credential_process`. The distroless image has no `aws_signing_helper`, so build a derived
-   image that adds it and mount an AWS config file:
+1. **IAM Roles Anywhere** — short-lived credentials from an X.509 certificate issued by a CA
+   registered as a trust anchor. apigw signs the `CreateSession` request itself (no
+   `aws_signing_helper` or `credential_process`) and re-reads the certificate and key on every
+   refresh, so cert-manager renewals need no restart. With the chart:
 
-   ```ini
-   [default]
-   credential_process = /aws_signing_helper credential-process --certificate /etc/rolesanywhere/tls.crt --private-key /etc/rolesanywhere/tls.key --trust-anchor-arn ... --profile-arn ... --role-arn ...
+   ```yaml
+   aws:
+     region: us-east-1
+     rolesAnywhere:
+       trustAnchorArn: arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/...
+       profileArn: arn:aws:rolesanywhere:us-east-1:123456789012:profile/...
+       roleArn: arn:aws:iam::123456789012:role/apigw
+       certManager:
+         enabled: true
+         issuerRef:
+           name: roles-anywhere-ca   # an issuer whose CA is the trust anchor
    ```
 
+   or `aws.rolesAnywhere.existingSecret` for a `kubernetes.io/tls` Secret you manage. With
+   cert-manager's [csi-driver](https://cert-manager.io/docs/usage/csi-driver/) installed,
+   `aws.rolesAnywhere.csiDriver.enabled` instead issues each pod its own certificate when it
+   starts, with no Secret stored and a separate identity per replica in CloudTrail. The
+   certificate's common name and DNS name default to `${POD_NAME}.${POD_NAMESPACE}`. Outside
+   the chart, mount the files and pass their paths with the `--roles-anywhere-*`
+   [flags](configuration.md#flags). RSA, P-256, P-384,
+   and P-521 keys are supported; the certificate file holds the end-entity certificate, then any
+   intermediates. The role's trust policy must allow `rolesanywhere.amazonaws.com` the actions
+   `sts:AssumeRole`, `sts:TagSession`, and `sts:SetSourceIdentity`.
 2. **Web identity federation** — if the cluster's service-account issuer is registered as an
-   IAM OIDC provider, set `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE` to a projected
-   service-account token.
+   IAM OIDC provider, set `aws.webIdentity.roleArn` in the chart (or `AWS_ROLE_ARN` and
+   `AWS_WEB_IDENTITY_TOKEN_FILE` to a projected service-account token). STS must be able to
+   fetch the issuer's discovery document and keys: GKE and AKS issuers are public; an
+   on-premises cluster has to publish them.
 3. **Static access keys** from a Secret (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) —
    simplest, but long-lived; scope the IAM user to the [permissions below](#aws-permissions).
 
@@ -147,7 +170,7 @@ Always set `AWS_REGION` to the API's region.
 ## AWS permissions
 
 `apigw` uses the standard AWS credential chain (environment, shared config/profile,
-`credential_process`, web identity). It needs:
+`credential_process`, web identity) or IAM Roles Anywhere. It needs:
 
 | Action | Resource | For |
 |---|---|---|

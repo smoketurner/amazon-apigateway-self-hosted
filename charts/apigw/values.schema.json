@@ -55,6 +55,62 @@
             "audience": { "type": "string", "minLength": 1 },
             "expirationSeconds": { "type": "integer", "minimum": 600 }
           }
+        },
+        "rolesAnywhere": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "trustAnchorArn": {
+              "type": "string",
+              "pattern": "^$|^arn:[^:]+:rolesanywhere:[^:]+:[^:]+:trust-anchor/.+$"
+            },
+            "profileArn": {
+              "type": "string",
+              "pattern": "^$|^arn:[^:]+:rolesanywhere:[^:]+:[^:]+:profile/.+$"
+            },
+            "roleArn": { "type": "string", "pattern": "^$|^arn:[^:]+:iam::[^:]+:role/.+$" },
+            "sessionSeconds": { "type": "integer", "minimum": 900, "maximum": 43200 },
+            "existingSecret": { "type": "string" },
+            "certManager": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "commonName": { "type": "string" },
+                "issuerRef": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": { "type": "string" },
+                    "kind": { "type": "string" },
+                    "group": { "type": "string" }
+                  }
+                }
+              }
+            },
+            "csiDriver": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "issuerRef": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": { "type": "string" },
+                    "kind": { "type": "string" },
+                    "group": { "type": "string" }
+                  }
+                },
+                "commonName": { "type": "string" },
+                "dnsNames": { "type": "string" },
+                "keyAlgorithm": { "enum": ["RSA", "ECDSA"] },
+                "keySize": { "enum": [256, 384, 521, 2048, 3072, 4096] },
+                "duration": { "type": "string", "minLength": 1 },
+                "fsGroup": { "type": "integer", "minimum": 0 }
+              }
+            }
+          }
         }
       }
     },
