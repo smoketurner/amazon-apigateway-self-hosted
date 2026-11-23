@@ -20,7 +20,9 @@ repos:
         exclude: ^charts/[^/]+/templates/
       - id: check-toml
       - id: detect-private-key
-        exclude: ^crates/apigw/tests/fixtures/encrypted-keys/
+        # Throwaway test keys: the encrypted-key fixtures and the Roles Anywhere oracle's
+        # recordings.
+        exclude: ^crates/(apigw/tests/fixtures/encrypted-keys/|aws-rolesanywhere-credentials/tests/fixtures/signing-helper\.json$)
       - id: mixed-line-ending
         args: [--fix=lf]
 

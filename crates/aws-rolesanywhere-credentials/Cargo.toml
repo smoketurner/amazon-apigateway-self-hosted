@@ -1,0 +1,41 @@
+[package]
+name                   = "aws-rolesanywhere-credentials"
+description            = "AWS credentials from IAM Roles Anywhere for aws-config, signed in process from an X.509 certificate"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+publish.workspace      = true
+
+[lints]
+workspace = true
+
+[features]
+default-https-client = ["aws-smithy-runtime/default-https-client"]
+rt-tokio             = ["aws-smithy-runtime/rt-tokio", "aws-smithy-async/rt-tokio"]
+
+[dependencies]
+aws-credential-types   = { workspace = true }
+aws-lc-rs              = { workspace = true, features = ["aws-lc-sys", "alloc"] }
+aws-smithy-async       = { workspace = true }
+aws-smithy-runtime     = { workspace = true, features = ["client"] }
+aws-smithy-runtime-api = { workspace = true, features = ["client", "http-1x"] }
+aws-smithy-types       = { workspace = true }
+aws-types              = { workspace = true }
+base64                 = { workspace = true, features = ["std"] }
+http                   = { workspace = true, features = ["std"] }
+jiff                   = { workspace = true, features = ["std"] }
+p384                   = { workspace = true, features = ["ecdsa", "pkcs8"] }
+rustls-pki-types       = { workspace = true, features = ["std"] }
+serde                  = { workspace = true, features = ["std", "derive"] }
+serde_json             = { workspace = true, features = ["std"] }
+thiserror              = { workspace = true, features = ["std"] }
+tracing                = { workspace = true, features = ["std"] }
+x509-parser            = { workspace = true }
+
+[dev-dependencies]
+aws-smithy-async       = { workspace = true, features = ["test-util"] }
+proptest               = { workspace = true, features = ["std"] }
+rcgen                  = { workspace = true, features = ["aws_lc_rs", "pem"] }
+tokio                  = { workspace = true, features = ["macros", "rt"] }

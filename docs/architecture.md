@@ -8,6 +8,9 @@ an Apache Velocity 1.7 parser and renderer with API Gateway's `$input`, `$util`,
 `$stageVariables`, Jayway-compatible JSON paths, and limits on output size, steps, and nesting. The
 gateway supplies the request through `TemplateInput` and reads `requestOverride` and
 `responseOverride` back from the `$context` map it passed in.
+`crates/aws-rolesanywhere-credentials` is a credentials provider for `aws-config`: it signs IAM
+Roles Anywhere `CreateSession` requests with a certificate's private key, in process, and is
+checked against requests recorded from AWS's credential helper (`tools/rolesanywhere-oracle`).
 
 | Module | Responsibility |
 |---|---|
@@ -41,7 +44,7 @@ gateway supplies the request through `TemplateInput` and reads `requestOverride`
 | `header_case` | Recovers the client's HTTP/1 header name spelling (hyper keeps it private) by watching request heads on the connection |
 | `listener` | TLS accept loop, PROXY protocol v2, certificate reload |
 | `identity` | Client address and forwarded client certificate, from the peer and trusted proxies' headers |
-| `app` | Startup, refresh loop, shutdown |
+| `app` | Startup (including the AWS SDK configuration and its credentials provider), refresh loop, shutdown |
 
 ## Loading and refreshing
 

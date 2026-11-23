@@ -2,7 +2,8 @@
 
 apigw uses **aws-lc-rs** as the single crypto provider, everywhere — for the TLS listeners,
 outbound HTTPS to integrations, the AWS SDK's HTTPS client, and the OTLP exporters. OpenSSL and `ring` are deliberately kept out: they're
-banned in `deny.toml` and excluded by feature selection.
+banned in `deny.toml` and excluded by feature selection. The one exception is signing IAM Roles
+Anywhere requests with a P-384 key ([below](#iam-roles-anywhere-signatures)).
 
 Why: one audited, FIPS-capable provider; no system OpenSSL to cross-compile or patch; a
 smaller attack surface; and no ambiguity about which backend rustls picks at runtime.
@@ -70,6 +71,24 @@ alone (`pbkdf2` and `cipher`), so no PKCS #8 or PBES2 crate joins the graph:
   `PrivatePkcs8KeyDer` and the AWS SDK's request buffers are not, so copies of the key and the
   passphrase can stay in memory until the allocator reuses it.
 
+## IAM Roles Anywhere signatures
+
+`crates/aws-rolesanywhere-credentials` signs each `CreateSession` request with the certificate's
+private key. Roles Anywhere hashes the string to sign with SHA-256 for every key type, so:
+
+- **RSA** (PKCS #1 v1.5), **P-256**, and **P-521** keys sign with aws-lc-rs
+  (`RSA_PKCS1_SHA256`, `ECDSA_P256_SHA256_ASN1_SIGNING`, `ECDSA_P521_SHA256_ASN1_SIGNING`).
+- **P-384** keys sign with RustCrypto's `p384` crate (`key/nist_p384.rs`). aws-lc-rs 1.19.0 has
+  P-384 over SHA-256 only for verification (`ECDSA_P384_SHA256_ASN1`), and
+  `EcdsaKeyPair::sign_digest` refuses a digest other than the key's own, so it cannot produce
+  this signature. The SHA-256 digest itself still comes from aws-lc-rs, and every signature is
+  checked against the certificate's public key with aws-lc-rs before the key is used. P-384 is
+  a common AWS Private CA key type, so refusing it was not an option. Remove `p384` once
+  aws-lc-rs can sign P-384 over SHA-256.
+
+No external helper (`aws_signing_helper`) or `credential_process` is involved: the image has no
+shell for one to run in.
+
 ## Enforce it
 
 `deny.toml` already denies `openssl`, `openssl-sys`, `native-tls`, and `ring`, so a stray
@@ -79,6 +98,7 @@ feature fails `cargo deny check`. Double-check the resolved graph after wiring u
 cargo tree --target all -i ring          # expect: "nothing to print" (locked as an unused optional dependency)
 cargo tree --target all -i openssl-sys   # expect: "did not match any packages"
 cargo tree --target all -i aws-lc-rs     # expect: aws-lc-rs present, pulled by rustls
+cargo tree --target all -i p384          # expect: only aws-rolesanywhere-credentials
 ```
 
 Both answers for `ring` and `openssl-sys` mean the crate is not built. `ring` stays in

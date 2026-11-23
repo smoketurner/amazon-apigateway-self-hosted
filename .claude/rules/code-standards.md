@@ -12,6 +12,9 @@ Invariants the compiler does **not** catch. Read before implementing or reviewin
       80→443 redirect.
 - [ ] **aws-lc-rs is the only crypto provider.** No `openssl`, `native-tls`, or `ring`
       features; AWS SDK crates use `default-https-client`, never `rustls`/`legacy-https-client`.
+      The single exception is RustCrypto `p384` for P-384 Roles Anywhere signatures in
+      `aws-rolesanywhere-credentials` ([docs/crypto.md](../../docs/crypto.md#iam-roles-anywhere-signatures));
+      nothing else may use it, and `cargo tree -i p384` shows only that crate.
 - [ ] The default provider is installed once at the top of `main`.
 - [ ] After touching TLS deps: `cargo tree -i ring` and `cargo tree -i openssl-sys` match
       nothing; `cargo deny check` passes.
