@@ -273,7 +273,7 @@ impl GatewayMetrics {
             tls_reloads: counter(
                 "apigw.tls.reloads",
                 "",
-                "Reloads of changed certificate files and ACM exports, by outcome.",
+                "Reloads of changed certificate files and ACM exports, by outcome (and domain, for ACM exports).",
             ),
             state_errors: counter(
                 "apigw.state.errors",
@@ -563,6 +563,18 @@ impl GatewayMetrics {
             .add(1, &[KeyValue::new("outcome", outcome.label())]);
     }
 
+    /// A custom domain's ACM certificate export, labelled with the domain so an
+    /// alert can name the one that failed.
+    pub(crate) fn domain_certificate_reload(&self, domain: &str, outcome: Outcome) {
+        self.instruments.tls_reloads.add(
+            1,
+            &[
+                KeyValue::new("outcome", outcome.label()),
+                KeyValue::new("domain", domain.to_owned()),
+            ],
+        );
+    }
+
     pub(crate) fn state_error(&self, operation: &'static str) {
         self.instruments
             .state_errors
@@ -787,6 +799,7 @@ mod tests {
         );
         metrics.tls_reload(Outcome::Success);
         metrics.tls_reload(Outcome::Failure);
+        metrics.domain_certificate_reload("api.example.com", Outcome::Failure);
         metrics.state_error("take_token");
         metrics.authorizer_cache(&api, "auth", true);
         metrics.authorizer_cache(&api, "auth", false);
@@ -797,6 +810,7 @@ mod tests {
             r#"apigw_usage_refreshes_total{api_id="abc123",outcome="failure",stage="prod"} 1"#,
             r#"apigw_tls_reloads_total{outcome="success"} 1"#,
             r#"apigw_tls_reloads_total{outcome="failure"} 1"#,
+            r#"apigw_tls_reloads_total{domain="api.example.com",outcome="failure"} 1"#,
             r#"apigw_state_errors_total{operation="take_token"} 1"#,
             r#"apigw_authorizer_cache_hits_total{api_id="abc123",authorizer="auth",stage="prod"} 1"#,
             r#"apigw_authorizer_cache_misses_total{api_id="abc123",authorizer="auth",stage="prod"} 1"#,

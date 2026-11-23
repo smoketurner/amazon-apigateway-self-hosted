@@ -168,9 +168,9 @@ impl DomainTls {
         self.exported.is_some()
     }
 
-    /// The serial number of the exported certificate being served, if any.
-    pub(crate) fn exported_serial(&self) -> Option<String> {
-        self.exported.as_ref().and_then(|slot| slot.serial())
+    /// The ACM certificate being served, if one has been exported.
+    pub(crate) fn exported_certificate(&self) -> Option<ExportedId> {
+        self.exported.as_ref().and_then(|slot| slot.id())
     }
 
     /// Serves `chain` and `key`, exported from ACM, to new connections for the
@@ -183,7 +183,7 @@ impl DomainTls {
     /// served before stays in place.
     pub(crate) fn serve_exported(
         &self,
-        serial: String,
+        id: ExportedId,
         chain: Vec<CertificateDer<'static>>,
         key: PrivateKeyDer<'static>,
     ) -> Result<(), TlsError> {
@@ -198,8 +198,7 @@ impl DomainTls {
         }
         let key = CertifiedKey::from_der(chain, key, &self.provider)?;
         CertStore::report_expiry(&slot.name, &key);
-        *slot.current.write().unwrap_or_else(PoisonError::into_inner) =
-            Some((serial, Arc::new(key)));
+        *slot.current.write().unwrap_or_else(PoisonError::into_inner) = Some((id, Arc::new(key)));
         Ok(())
     }
 
@@ -318,13 +317,20 @@ pub(crate) enum DomainCerts {
     Exported,
 }
 
+/// Which ACM certificate an export is: its ARN and the serial number ACM
+/// reported, which tells renewals apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExportedId {
+    pub(crate) arn: String,
+    pub(crate) serial: String,
+}
+
 /// A custom domain's certificate exported from ACM, once there is one.
 #[derive(Debug)]
 struct ExportedSlot {
     /// The domain, for the expiry metric.
     name: String,
-    /// The serial number ACM reported and the certificate.
-    current: RwLock<Option<(String, Arc<CertifiedKey>)>>,
+    current: RwLock<Option<(ExportedId, Arc<CertifiedKey>)>>,
 }
 
 impl ExportedSlot {
@@ -336,12 +342,12 @@ impl ExportedSlot {
             .map(|(_, key)| Arc::clone(key))
     }
 
-    fn serial(&self) -> Option<String> {
+    fn id(&self) -> Option<ExportedId> {
         self.current
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
-            .map(|(serial, _)| serial.clone())
+            .map(|(id, _)| id.clone())
     }
 }
 
@@ -1815,6 +1821,13 @@ GET /spelling HTTP/1.1\r\nhost: localhost\r\nx-MIXED-case: x\r\nconnection: clos
     }
 
     /// The DER chain and key of `cert`, as an export hands them over.
+    fn id(serial: &str) -> ExportedId {
+        ExportedId {
+            arn: "arn:aws:acm:us-east-1:123456789012:certificate/1".to_owned(),
+            serial: serial.to_owned(),
+        }
+    }
+
     fn exported(cert: &TestCert) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
         let key = PrivateKeyDer::from_pem_slice(cert.key_pem.as_bytes()).unwrap();
         (vec![cert.der()], key)
@@ -1835,13 +1848,13 @@ GET /spelling HTTP/1.1\r\nhost: localhost\r\nx-MIXED-case: x\r\nconnection: clos
         let domain = tls.domain(&name).unwrap();
         assert!(domain.takes_exported_certificate());
         assert_eq!(tls.certificate_for("api.example.test"), Some(default.der()));
-        assert_eq!(domain.exported_serial(), None);
+        assert_eq!(domain.exported_certificate(), None);
 
         let first = generate_for(&["api.example.test"]);
         let (chain, key) = exported(&first);
-        domain.serve_exported("01".to_owned(), chain, key).unwrap();
+        domain.serve_exported(id("01"), chain, key).unwrap();
         assert_eq!(tls.certificate_for("api.example.test"), Some(first.der()));
-        assert_eq!(domain.exported_serial().as_deref(), Some("01"));
+        assert_eq!(domain.exported_certificate(), Some(id("01")));
         assert_eq!(
             tls.certificate_for("other.example.test"),
             Some(default.der())
@@ -1853,17 +1866,13 @@ GET /spelling HTTP/1.1\r\nhost: localhost\r\nx-MIXED-case: x\r\nconnection: clos
         let (_, wrong_key) = exported(&other);
         assert!(
             domain
-                .serve_exported("02".to_owned(), vec![generate().der()], wrong_key)
+                .serve_exported(id("02"), vec![generate().der()], wrong_key)
                 .is_err()
         );
         let (_, key) = exported(&other);
-        assert!(
-            domain
-                .serve_exported("02".to_owned(), Vec::new(), key)
-                .is_err()
-        );
+        assert!(domain.serve_exported(id("02"), Vec::new(), key).is_err());
         assert_eq!(tls.certificate_for("api.example.test"), Some(first.der()));
-        assert_eq!(domain.exported_serial().as_deref(), Some("01"));
+        assert_eq!(domain.exported_certificate(), Some(id("01")));
     }
 
     #[test]
@@ -1882,7 +1891,7 @@ GET /spelling HTTP/1.1\r\nhost: localhost\r\nx-MIXED-case: x\r\nconnection: clos
         assert!(!domain.takes_exported_certificate());
         let (chain, key) = exported(&generate());
         assert!(matches!(
-            domain.serve_exported("01".to_owned(), chain, key),
+            domain.serve_exported(id("01"), chain, key),
             Err(TlsError::NotExported(_))
         ));
     }

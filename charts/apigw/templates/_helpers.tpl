@@ -76,4 +76,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- if and .Values.api.domainNames (or .Values.api.stage .Values.api.basePath) }}
 {{- fail "api.domainNames cannot be combined with api.stage or api.basePath" }}
 {{- end }}
+{{- if and (eq .Values.api.domainCertSource "acm") (not .Values.api.domainNames) }}
+{{- fail "api.domainCertSource acm needs api.domainNames" }}
+{{- end }}
 {{- end }}

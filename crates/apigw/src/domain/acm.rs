@@ -32,12 +32,28 @@ pub(crate) enum AcmError {
     },
     #[error("no random passphrase could be generated")]
     Random,
+    #[error("decrypting the private key of {arn} did not finish: {reason}")]
+    Interrupted { arn: String, reason: String },
+}
+
+impl AcmError {
+    fn aws(arn: &str, err: impl std::error::Error) -> Self {
+        Self::Aws {
+            arn: arn.to_owned(),
+            reason: aws_sdk_acm::error::DisplayErrorContext(err).to_string(),
+        }
+    }
+
+    fn missing(arn: &str, what: &'static str) -> Self {
+        Self::Missing {
+            arn: arn.to_owned(),
+            what,
+        }
+    }
 }
 
 /// A certificate exported from ACM, with its key decrypted.
 pub(crate) struct ExportedCertificate {
-    /// The serial number as ACM reports it, which tells renewals apart.
-    pub(crate) serial: String,
     /// The certificate followed by its chain.
     pub(crate) chain: Vec<CertificateDer<'static>>,
     pub(crate) key: PrivateKeyDer<'static>,
@@ -56,9 +72,10 @@ impl AcmCertificates {
         }
     }
 
-    /// Sends a request to the region the certificate is in: an edge-optimized
-    /// domain's is always in us-east-1, whatever region the gateway is in.
-    fn region_of(arn: &str) -> aws_sdk_acm::config::Builder {
+    /// The configuration override that sends a request to the region the
+    /// certificate is in: an edge-optimized domain's is always in us-east-1,
+    /// whatever region the gateway is in.
+    fn in_region_of(arn: &str) -> aws_sdk_acm::config::Builder {
         let builder = aws_sdk_acm::config::Builder::default();
         match arn.split(':').nth(3).filter(|region| !region.is_empty()) {
             Some(region) => builder.region(aws_sdk_acm::config::Region::new(region.to_owned())),
@@ -73,23 +90,19 @@ impl AcmCertificates {
     ///
     /// When ACM cannot be reached, or the certificate is not issued or was not
     /// requested as exportable.
-    pub(crate) async fn serial(&self, arn: &str) -> Result<String, AcmError> {
+    pub(crate) async fn exportable_serial(&self, arn: &str) -> Result<String, AcmError> {
         let described = self
             .client
             .describe_certificate()
             .certificate_arn(arn)
             .customize()
-            .config_override(Self::region_of(arn))
+            .config_override(Self::in_region_of(arn))
             .send()
             .await
-            .map_err(|err| AcmError::Aws {
-                arn: arn.to_owned(),
-                reason: aws_sdk_acm::error::DisplayErrorContext(err).to_string(),
-            })?;
-        let detail = described.certificate().ok_or_else(|| AcmError::Missing {
-            arn: arn.to_owned(),
-            what: "certificate details",
-        })?;
+            .map_err(|err| AcmError::aws(arn, err))?;
+        let detail = described
+            .certificate()
+            .ok_or_else(|| AcmError::missing(arn, "certificate details"))?;
         let not_exportable = |reason| AcmError::NotExportable {
             arn: arn.to_owned(),
             reason,
@@ -119,24 +132,17 @@ impl AcmCertificates {
         detail
             .serial()
             .map(str::to_owned)
-            .ok_or_else(|| AcmError::Missing {
-                arn: arn.to_owned(),
-                what: "serial number",
-            })
+            .ok_or_else(|| AcmError::missing(arn, "serial number"))
     }
 
-    /// Exports `arn` and decrypts its key. The passphrase is random, made for
-    /// this one export, and never leaves the process: it only protects the key
-    /// on its way from ACM.
+    /// Exports `arn` and decrypts its key. The passphrase is random, sent to
+    /// ACM for this one export, and discarded afterwards: it only protects the
+    /// key on its way from ACM.
     ///
     /// # Errors
     ///
     /// When the export fails or what it returns cannot be read.
-    pub(crate) async fn export(
-        &self,
-        arn: &str,
-        serial: String,
-    ) -> Result<ExportedCertificate, AcmError> {
+    pub(crate) async fn export(&self, arn: &str) -> Result<ExportedCertificate, AcmError> {
         let passphrase = Passphrase::generate()?;
         let exported = self
             .client
@@ -144,23 +150,19 @@ impl AcmCertificates {
             .certificate_arn(arn)
             .passphrase(Blob::new(passphrase.0.to_vec()))
             .customize()
-            .config_override(Self::region_of(arn))
+            .config_override(Self::in_region_of(arn))
             .send()
             .await
-            .map_err(|err| AcmError::Aws {
-                arn: arn.to_owned(),
-                reason: aws_sdk_acm::error::DisplayErrorContext(err).to_string(),
-            })?;
-        let missing = |what| AcmError::Missing {
-            arn: arn.to_owned(),
-            what,
-        };
+            .map_err(|err| AcmError::aws(arn, err))?;
         let certificate = exported
             .certificate()
-            .ok_or_else(|| missing("certificate"))?;
-        let key = exported
-            .private_key()
-            .ok_or_else(|| missing("private key"))?;
+            .ok_or_else(|| AcmError::missing(arn, "certificate"))?;
+        let key = Zeroizing::new(
+            exported
+                .private_key()
+                .ok_or_else(|| AcmError::missing(arn, "private key"))?
+                .to_owned(),
+        );
         // `CertificateChain` leaves out the certificate itself.
         let pem = format!(
             "{certificate}\n{}",
@@ -172,13 +174,21 @@ impl AcmCertificates {
                 arn: arn.to_owned(),
                 source,
             })?;
-        let key = EncryptedKey(key)
-            .decrypt(passphrase.0.as_slice())
-            .map_err(|source| AcmError::Key {
-                arn: arn.to_owned(),
-                source,
-            })?;
-        Ok(ExportedCertificate { serial, chain, key })
+        // Up to MAX_ITERATIONS rounds of PBKDF2 take seconds, too long for an
+        // async worker.
+        let key = tokio::task::spawn_blocking(move || {
+            EncryptedKey(key.as_str()).decrypt(passphrase.0.as_slice())
+        })
+        .await
+        .map_err(|err| AcmError::Interrupted {
+            arn: arn.to_owned(),
+            reason: err.to_string(),
+        })?
+        .map_err(|source| AcmError::Key {
+            arn: arn.to_owned(),
+            source,
+        })?;
+        Ok(ExportedCertificate { chain, key })
     }
 }
 
@@ -211,7 +221,7 @@ pub(crate) mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::domain::encrypted_key::tests::encrypted_pem;
+    use crate::domain::encrypted_key::tests::{encrypt_for_test, encrypted_pem};
     use crate::observability::testing::{MockAws, Reply};
 
     const ARN: &str = "arn:aws:acm:us-east-1:123456789012:certificate/1";
@@ -223,7 +233,7 @@ pub(crate) mod tests {
         described_as("AMAZON_ISSUED", serial, status, export)
     }
 
-    fn described_as(kind: &str, serial: &str, status: &str, export: &str) -> Reply {
+    pub(crate) fn described_as(kind: &str, serial: &str, status: &str, export: &str) -> Reply {
         Reply::json(
             &json!({"Certificate": {
                 "CertificateArn": ARN, "Serial": serial, "Status": status,
@@ -233,10 +243,24 @@ pub(crate) mod tests {
         )
     }
 
-    /// Answers the next export with a certificate for `name` and its key,
-    /// encrypted under the passphrase the gateway sends, as ACM does.
+    /// Answers exports with a certificate for `name` and its key, encrypted
+    /// under the passphrase the gateway sends, as ACM does.
     pub(crate) fn answer_export(aws: &MockAws, name: &str) {
-        let key = rcgen::KeyPair::generate().unwrap();
+        answer_export_signed_by(aws, name, rcgen::KeyPair::generate().unwrap(), None);
+    }
+
+    /// Answers exports with a certificate for `name` and a key that is not its own.
+    pub(crate) fn answer_export_with_another_key(aws: &MockAws, name: &str) {
+        let other = rcgen::KeyPair::generate().unwrap();
+        answer_export_signed_by(aws, name, rcgen::KeyPair::generate().unwrap(), Some(other));
+    }
+
+    fn answer_export_signed_by(
+        aws: &MockAws,
+        name: &str,
+        key: rcgen::KeyPair,
+        returned: Option<rcgen::KeyPair>,
+    ) {
         let cert = rcgen::CertificateParams::new(vec![name.to_owned()])
             .unwrap()
             .self_signed(&key)
@@ -246,7 +270,7 @@ pub(crate) mod tests {
             .unwrap()
             .self_signed(&ca)
             .unwrap();
-        let key_der = key.serialize_der();
+        let key_der = returned.unwrap_or(key).serialize_der();
         aws.reply_with(EXPORT, move |request| {
             let passphrase = BASE64
                 .decode(request["Passphrase"].as_str().unwrap())
@@ -262,92 +286,21 @@ pub(crate) mod tests {
         });
     }
 
-    /// PBES2 (PBKDF2-HMAC-SHA256, AES-256-CBC) over `pkcs8`, the way OpenSSL
-    /// writes `openssl pkcs8 -topk8 -v2 aes-256-cbc`.
-    fn encrypt_for_test(pkcs8: &[u8], passphrase: &[u8]) -> String {
-        use aws_lc_rs::cipher::{
-            AES_256, EncryptionContext, PaddedBlockEncryptingKey, UnboundCipherKey,
-        };
-        use aws_lc_rs::iv::FixedLength;
-        let salt = [7_u8; 16];
-        let iv = [9_u8; 16];
-        let mut key = [0_u8; 32];
-        aws_lc_rs::pbkdf2::derive(
-            aws_lc_rs::pbkdf2::PBKDF2_HMAC_SHA256,
-            std::num::NonZeroU32::new(2048).unwrap(),
-            &salt,
-            passphrase,
-            &mut key,
-        );
-        let encrypting =
-            PaddedBlockEncryptingKey::cbc_pkcs7(UnboundCipherKey::new(&AES_256, &key).unwrap())
-                .unwrap();
-        let mut data = pkcs8.to_vec();
-        encrypting
-            .less_safe_encrypt(&mut data, EncryptionContext::Iv128(FixedLength::from(iv)))
+    #[tokio::test]
+    async fn requests_go_to_the_certificates_region() {
+        let aws = MockAws::start().await;
+        let acm = AcmCertificates::new(&aws.sdk_config());
+        aws.reply(DESCRIBE, described("01", "ISSUED", "ENABLED"));
+        acm.exportable_serial("arn:aws:acm:eu-west-1:1:certificate/x")
+            .await
             .unwrap();
-        let der = der_sequence(&[
-            der_sequence(&[
-                der_oid(&[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x05, 0x0d]),
-                der_sequence(&[
-                    der_sequence(&[
-                        der_oid(&[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x05, 0x0c]),
-                        der_sequence(&[
-                            der_tlv(0x04, &salt),
-                            der_tlv(0x02, &[0x08, 0x00]),
-                            der_sequence(&[
-                                der_oid(&[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x02, 0x09]),
-                                der_tlv(0x05, &[]),
-                            ]),
-                        ]),
-                    ]),
-                    der_sequence(&[
-                        der_oid(&[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x01, 0x2a]),
-                        der_tlv(0x04, &iv),
-                    ]),
-                ]),
-            ]),
-            der_tlv(0x04, &data),
-        ]);
-        encrypted_pem(&der)
-    }
-
-    fn der_tlv(tag: u8, content: &[u8]) -> Vec<u8> {
-        let mut out = vec![tag];
-        let len = content.len();
-        if len < 0x80 {
-            out.push(u8::try_from(len).unwrap());
-        } else if len < 0x100 {
-            out.extend([0x81, u8::try_from(len).unwrap()]);
-        } else {
-            out.extend([
-                0x82,
-                u8::try_from(len >> 8).unwrap(),
-                u8::try_from(len & 0xff).unwrap(),
-            ]);
-        }
-        out.extend_from_slice(content);
-        out
-    }
-
-    fn der_sequence(items: &[Vec<u8>]) -> Vec<u8> {
-        der_tlv(0x30, &items.concat())
-    }
-
-    fn der_oid(encoded: &[u8]) -> Vec<u8> {
-        der_tlv(0x06, encoded)
-    }
-
-    #[test]
-    fn requests_go_to_the_certificates_region() {
-        let region = |arn| AcmCertificates::region_of(arn).build().region().cloned();
+        acm.exportable_serial("not-an-arn").await.unwrap();
+        let regions: Vec<_> = aws.calls().into_iter().map(|c| c.region).collect();
         assert_eq!(
-            region("arn:aws:acm:eu-west-1:1:certificate/x")
-                .unwrap()
-                .as_ref(),
-            "eu-west-1"
+            regions,
+            [Some("eu-west-1".to_owned()), Some("us-east-1".to_owned())],
+            "an ARN without a region keeps the gateway's"
         );
-        assert!(region("not-an-arn").is_none());
     }
 
     #[test]
@@ -363,10 +316,10 @@ pub(crate) mod tests {
         let aws = MockAws::start().await;
         let acm = AcmCertificates::new(&aws.sdk_config());
         aws.reply_once(DESCRIBE, described("0a:01", "ISSUED", "ENABLED"));
-        assert_eq!(acm.serial(ARN).await.unwrap(), "0a:01");
+        assert_eq!(acm.exportable_serial(ARN).await.unwrap(), "0a:01");
         aws.reply_once(DESCRIBE, described("0a:01", "ISSUED", "DISABLED"));
         assert!(matches!(
-            acm.serial(ARN).await,
+            acm.exportable_serial(ARN).await,
             Err(AcmError::NotExportable { .. })
         ));
         aws.reply_once(
@@ -374,11 +327,14 @@ pub(crate) mod tests {
             described("0a:01", "PENDING_VALIDATION", "ENABLED"),
         );
         assert!(matches!(
-            acm.serial(ARN).await,
+            acm.exportable_serial(ARN).await,
             Err(AcmError::NotExportable { .. })
         ));
         aws.reply_once(DESCRIBE, Reply::error("ResourceNotFoundException"));
-        assert!(matches!(acm.serial(ARN).await, Err(AcmError::Aws { .. })));
+        assert!(matches!(
+            acm.exportable_serial(ARN).await,
+            Err(AcmError::Aws { .. })
+        ));
     }
 
     #[tokio::test]
@@ -389,20 +345,20 @@ pub(crate) mod tests {
             DESCRIBE,
             described_as("IMPORTED", "0a:01", "ISSUED", "ENABLED"),
         );
-        let err = acm.serial(ARN).await.unwrap_err();
+        let err = acm.exportable_serial(ARN).await.unwrap_err();
         assert!(err.to_string().contains("imported"), "{err}");
         assert!(err.to_string().contains("--domain-cert-dir"), "{err}");
         aws.reply_once(
             DESCRIBE,
             described_as("PRIVATE", "0a:02", "ISSUED", "DISABLED"),
         );
-        assert_eq!(acm.serial(ARN).await.unwrap(), "0a:02");
+        assert_eq!(acm.exportable_serial(ARN).await.unwrap(), "0a:02");
         aws.reply_once(
             DESCRIBE,
             described_as("PRIVATE", "0a:02", "EXPIRED", "DISABLED"),
         );
         assert!(matches!(
-            acm.serial(ARN).await,
+            acm.exportable_serial(ARN).await,
             Err(AcmError::NotExportable { .. })
         ));
     }
@@ -412,8 +368,7 @@ pub(crate) mod tests {
         let aws = MockAws::start().await;
         let acm = AcmCertificates::new(&aws.sdk_config());
         answer_export(&aws, "api.example.com");
-        let exported = acm.export(ARN, "0a:01".to_owned()).await.unwrap();
-        assert_eq!(exported.serial, "0a:01");
+        let exported = acm.export(ARN).await.unwrap();
         assert_eq!(exported.chain.len(), 2);
         let provider = rustls::crypto::aws_lc_rs::default_provider();
         rustls::sign::CertifiedKey::from_der(exported.chain, exported.key, &provider).unwrap();
@@ -430,13 +385,10 @@ pub(crate) mod tests {
         let aws = MockAws::start().await;
         let acm = AcmCertificates::new(&aws.sdk_config());
         aws.reply_once(EXPORT, Reply::error("ResourceNotFoundException"));
-        assert!(matches!(
-            acm.export(ARN, String::new()).await,
-            Err(AcmError::Aws { .. })
-        ));
+        assert!(matches!(acm.export(ARN).await, Err(AcmError::Aws { .. })));
         aws.reply_once(EXPORT, Reply::json(r#"{"Certificate":"x"}"#));
         assert!(matches!(
-            acm.export(ARN, String::new()).await,
+            acm.export(ARN).await,
             Err(AcmError::Missing {
                 what: "private key",
                 ..
@@ -448,6 +400,6 @@ pub(crate) mod tests {
                 &json!({"Certificate": "x", "PrivateKey": encrypted_pem(b"\0\0\0")}).to_string(),
             ),
         );
-        assert!(acm.export(ARN, String::new()).await.is_err());
+        assert!(acm.export(ARN).await.is_err());
     }
 }

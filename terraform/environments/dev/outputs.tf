@@ -83,8 +83,8 @@ output "ecs_gateway" {
     task_role_arn  = module.ecs_gateway[0].task_role_arn
     log_group_name = module.ecs_gateway[0].log_group_name
     ports          = module.ecs_gateway[0].ports
-    # Where the domain container's certificate comes from: files or acm.
-    domain_cert_source = var.custom_domain_export_certificate ? "acm" : "files"
+    # Where the domain container's certificate comes from (files or acm); null without one.
+    domain_cert_source = try(local.ecs_gateway_additional_apis.domain.domain_cert_source, null)
   } : null
 }
 

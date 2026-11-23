@@ -22,6 +22,8 @@ pub(crate) struct Call {
     pub(crate) target: String,
     pub(crate) query: Option<String>,
     pub(crate) body: Value,
+    /// The region the request was signed for, from its `SigV4` credential scope.
+    pub(crate) region: Option<String>,
 }
 
 /// What the mock answers with.
@@ -107,6 +109,13 @@ async fn handle(
         .and_then(|v| v.to_str().ok())
         .map_or_else(|| uri.path().to_owned(), str::to_owned);
     let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    // Credential=<key>/<date>/<region>/<service>/aws4_request
+    let region = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split("Credential=").nth(1))
+        .and_then(|scope| scope.split('/').nth(2))
+        .map(str::to_owned);
     let reply = shared.reply_for(&target, &body);
     shared
         .calls
@@ -116,6 +125,7 @@ async fn handle(
             target,
             query: uri.query().map(str::to_owned),
             body,
+            region,
         });
     (
         reply.status,
@@ -171,8 +181,14 @@ impl MockAws {
         aws_sdk_firehose::Client::new(&self.sdk_config())
     }
 
-    /// Answers every `target` request with `reply` from now on.
+    /// Answers every `target` request with `reply` from now on, replacing any
+    /// [`MockAws::reply_with`] responder.
     pub(crate) fn reply(&self, target: &str, reply: Reply) {
+        self.shared
+            .responders
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(target);
         self.shared
             .sticky
             .lock()
@@ -181,12 +197,18 @@ impl MockAws {
     }
 
     /// Answers every `target` request with what `respond` builds from its body,
-    /// unless a [`MockAws::reply_once`] reply is queued.
+    /// unless a [`MockAws::reply_once`] reply is queued. Replaces any
+    /// [`MockAws::reply`] answer.
     pub(crate) fn reply_with(
         &self,
         target: &str,
         respond: impl Fn(&Value) -> Reply + Send + Sync + 'static,
     ) {
+        self.shared
+            .sticky
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(target);
         self.shared
             .responders
             .lock()

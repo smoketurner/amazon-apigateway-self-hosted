@@ -17,7 +17,7 @@ use super::rules::Routing;
 use super::truststore::{Truststore, TruststoreRef, TruststoreSource};
 use super::{ApiMapping, ApiMappings, DomainName, MappingKey, RoutingMode, RoutingRule, StageRef};
 use crate::app::{ApiRuntime, Builder};
-use crate::listener::{ClientAuth, DomainTls, TlsError};
+use crate::listener::{ClientAuth, DomainTls, ExportedId, TlsError};
 use crate::model::ApiKind;
 use crate::router::{LoadSummary, Loaded};
 use crate::source::Source;
@@ -29,6 +29,8 @@ pub(crate) enum DomainError {
     Aws { domain: DomainName, reason: String },
     #[error("could not tell whether {api_id} is a REST or an HTTP API: {reason}")]
     UnknownApi { api_id: String, reason: String },
+    #[error("API Gateway reports no certificate for the domain")]
+    NoCertificate,
     #[error(transparent)]
     Acm(#[from] AcmError),
     #[error("the exported certificate was refused: {0}")]
@@ -95,12 +97,35 @@ struct RemoteDomain {
 /// The domain's certificate exported from ACM, as reported on `/routes`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ExportedCertificateSummary {
+    /// The certificate API Gateway serves for the domain.
     arn: Option<String>,
-    /// The certificate being served; `None` while `--tls-cert` stands in.
-    serial: Option<String>,
+    /// The certificate being served, which differs from `arn` while a new one
+    /// cannot be exported; `None` while `--tls-cert` stands in.
+    serving: Option<ServedCertificate>,
     /// Why the last attempt to read or export it failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ServedCertificate {
+    arn: String,
+    serial: String,
+}
+
+impl From<ExportedId> for ServedCertificate {
+    fn from(ExportedId { arn, serial }: ExportedId) -> Self {
+        Self { arn, serial }
+    }
+}
+
+/// What was last published for the domain, to tell whether a refresh changed it.
+#[derive(Clone, PartialEq)]
+struct Published {
+    routing: Routing,
+    running: BTreeSet<StageRef>,
+    requires_client_certificate: bool,
+    certificate: Option<ExportedCertificateSummary>,
 }
 
 /// The routing configuration of a domain and the APIs it serves.
@@ -240,12 +265,7 @@ pub(crate) struct DomainSupervisor {
     runtimes: BTreeMap<StageRef, ApiRuntime>,
     kinds: BTreeMap<String, ApiKind>,
     shutdown: CancellationToken,
-    published: Option<(
-        Routing,
-        BTreeSet<StageRef>,
-        bool,
-        Option<ExportedCertificateSummary>,
-    )>,
+    published: Option<Published>,
     tls: Option<Arc<DomainTls>>,
     truststores: TruststoreSource,
     truststore: Option<Truststore>,
@@ -370,27 +390,44 @@ impl DomainSupervisor {
         }
     }
 
-    /// Serves the domain's ACM certificate, exporting it again only when its
-    /// serial number changes (a renewal, or a different certificate on the
-    /// domain). A failure leaves the certificate being served in place.
+    /// Serves the domain's ACM certificate, exporting it again only when it
+    /// changes (a renewal, or a different certificate on the domain). A failure
+    /// leaves the certificate being served in place; it is logged as an error
+    /// when it first happens or changes, and at debug level while it persists.
     async fn apply_certificate(&mut self, arn: Option<&str>) {
         let (Some(acm), Some(tls)) = (self.certificates.clone(), self.tls.clone()) else {
             return;
         };
-        let error = match arn {
-            None => Some("API Gateway reports no certificate for the domain".to_owned()),
-            Some(arn) => match self.refresh_certificate(&acm, &tls, arn).await {
-                Ok(()) => None,
-                Err(err) => {
-                    GatewayMetrics::global().tls_reload(Outcome::Failure);
-                    tracing::error!(%err, domain = %self.domain, "failed to serve the domain's ACM certificate; keeping the current one");
-                    Some(err.to_string())
+        let result = match arn {
+            None => Err(DomainError::NoCertificate),
+            Some(arn) => self.refresh_certificate(&acm, &tls, arn).await,
+        };
+        let previous = self
+            .certificate
+            .as_ref()
+            .and_then(|certificate| certificate.error.clone());
+        let error = match result {
+            Ok(()) => {
+                if previous.is_some() {
+                    tracing::info!(domain = %self.domain, "the domain's ACM certificate can be read and exported again");
                 }
-            },
+                None
+            }
+            Err(err) => {
+                GatewayMetrics::global()
+                    .domain_certificate_reload(self.domain.as_str(), Outcome::Failure);
+                let error = err.to_string();
+                if previous.as_deref() == Some(error.as_str()) {
+                    tracing::debug!(%err, domain = %self.domain, "the domain's ACM certificate still cannot be served; keeping the current one");
+                } else {
+                    tracing::error!(%err, domain = %self.domain, "failed to serve the domain's ACM certificate; keeping the current one");
+                }
+                Some(error)
+            }
         };
         self.certificate = Some(ExportedCertificateSummary {
             arn: arn.map(str::to_owned),
-            serial: tls.exported_serial(),
+            serving: tls.exported_certificate().map(ServedCertificate::from),
             error,
         });
     }
@@ -401,15 +438,17 @@ impl DomainSupervisor {
         tls: &DomainTls,
         arn: &str,
     ) -> Result<(), DomainError> {
-        let serial = acm.serial(arn).await?;
-        if tls.exported_serial().as_deref() == Some(serial.as_str()) {
+        let id = ExportedId {
+            arn: arn.to_owned(),
+            serial: acm.exportable_serial(arn).await?,
+        };
+        if tls.exported_certificate().as_ref() == Some(&id) {
             return Ok(());
         }
-        let exported = acm.export(arn, serial).await?;
-        let serial = exported.serial.clone();
-        tls.serve_exported(exported.serial, exported.chain, exported.key)?;
-        GatewayMetrics::global().tls_reload(Outcome::Success);
-        tracing::info!(domain = %self.domain, arn, serial, "serving the domain's ACM certificate");
+        let exported = acm.export(arn).await?;
+        tls.serve_exported(id.clone(), exported.chain, exported.key)?;
+        GatewayMetrics::global().domain_certificate_reload(self.domain.as_str(), Outcome::Success);
+        tracing::info!(domain = %self.domain, arn, serial = id.serial, "serving the domain's ACM certificate");
         Ok(())
     }
 
@@ -560,12 +599,12 @@ impl DomainSupervisor {
             }
         }
         let running: BTreeSet<StageRef> = self.runtimes.keys().cloned().collect();
-        self.published = Some((
-            routing.clone(),
+        self.published = Some(Published {
+            routing: routing.clone(),
             running,
             requires_client_certificate,
-            self.certificate.clone(),
-        ));
+            certificate: self.certificate.clone(),
+        });
         DomainState {
             requires_client_certificate,
             certificate: self.certificate.clone(),
@@ -1046,11 +1085,15 @@ mod tests {
 
     mod acm_certificates {
         use super::*;
-        use crate::domain::acm::tests::{DESCRIBE, EXPORT, answer_export, described};
+        use crate::domain::acm::tests::{
+            DESCRIBE, EXPORT, answer_export, answer_export_with_another_key, described,
+            described_as,
+        };
         use crate::listener::test_tls::generate;
         use crate::listener::{DomainCerts, Tls};
 
         const ARN: &str = "arn:aws:acm:us-east-1:123456789012:certificate/1";
+        const OTHER_ARN: &str = "arn:aws:acm:us-east-1:123456789012:certificate/2";
 
         fn tls() -> (Tls, rustls::pki_types::CertificateDer<'static>) {
             let cert = generate();
@@ -1065,11 +1108,16 @@ mod tests {
             (tls, cert.der())
         }
 
-        fn domain_with_certificate(aws: &MockAws) {
+        /// Points the domain at `arn`, or at no certificate.
+        fn domain_with_certificate(aws: &MockAws, arn: Option<&str>) {
+            let configuration = arn.map_or_else(
+                || r#"{"endpointType":"REGIONAL"}"#.to_owned(),
+                |arn| format!(r#"{{"certificateArn":"{arn}","endpointType":"REGIONAL"}}"#),
+            );
             aws.reply(
                 &format!("/v2/domainnames/{DOMAIN}"),
                 Reply::json(&format!(
-                    r#"{{"domainName":"{DOMAIN}","routingMode":"API_MAPPING_ONLY","domainNameConfigurations":[{{"certificateArn":"{ARN}","endpointType":"REGIONAL"}}]}}"#
+                    r#"{{"domainName":"{DOMAIN}","routingMode":"API_MAPPING_ONLY","domainNameConfigurations":[{configuration}]}}"#
                 )),
             );
             aws.reply(
@@ -1100,17 +1148,51 @@ mod tests {
             aws.calls().iter().filter(|c| c.target == EXPORT).count()
         }
 
+        /// The domain's `/routes` certificate entry.
+        fn reported(registry: &DomainRegistry) -> serde_json::Value {
+            serde_json::to_value(registry.summaries()).unwrap()[0]["certificate"].clone()
+        }
+
+        /// Waits for the domain's `/routes` certificate entry to satisfy `done`.
+        async fn reported_until(
+            registry: &DomainRegistry,
+            done: impl Fn(&serde_json::Value) -> bool,
+        ) -> serde_json::Value {
+            for _ in 0..300 {
+                let certificate = reported(registry);
+                if done(&certificate) {
+                    return certificate;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!(
+                "/routes never reported the expected certificate: {}",
+                reported(registry)
+            );
+        }
+
+        fn error_contains(text: &'static str) -> impl Fn(&serde_json::Value) -> bool {
+            move |certificate| {
+                certificate["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains(text))
+            }
+        }
+
         #[tokio::test]
         async fn the_domain_serves_its_acm_certificate_and_exports_again_only_on_renewal() {
             let aws = MockAws::start().await;
-            domain_with_certificate(&aws);
+            domain_with_certificate(&aws, Some(ARN));
             aws.reply(DESCRIBE, described("01", "ISSUED", "ENABLED"));
             answer_export(&aws, DOMAIN);
             let (tls, default) = tls();
             let (registry, shutdown, _task) = start(&aws, &tls).await;
 
             let domain = tls.domain(&DOMAIN.parse().unwrap()).unwrap();
-            assert_eq!(domain.exported_serial().as_deref(), Some("01"));
+            assert_eq!(
+                domain.exported_certificate().map(|id| id.serial).as_deref(),
+                Some("01")
+            );
             assert_ne!(tls.certificate_for(DOMAIN), Some(default.clone()));
             let described_arn = aws
                 .calls()
@@ -1125,73 +1207,135 @@ mod tests {
             assert_eq!(exports(&aws), 1);
 
             aws.reply(DESCRIBE, described("02", "ISSUED", "ENABLED"));
-            aws.wait_for(EXPORT, 2).await;
-            for _ in 0..100 {
-                if domain.exported_serial().as_deref() == Some("02") {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            assert_eq!(domain.exported_serial().as_deref(), Some("02"));
-            for _ in 0..100 {
-                let summary = serde_json::to_value(registry.summaries()).unwrap();
-                if summary[0]["certificate"]["serial"] == "02" {
-                    assert_eq!(summary[0]["certificate"]["arn"], ARN);
-                    assert!(summary[0]["certificate"].get("error").is_none());
-                    shutdown.cancel();
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            panic!("the renewed serial never reached /routes");
+            let certificate = reported_until(&registry, |c| c["serving"]["serial"] == "02").await;
+            assert_eq!(certificate["arn"], ARN);
+            assert_eq!(certificate["serving"]["arn"], ARN);
+            assert!(certificate.get("error").is_none());
+            assert_eq!(exports(&aws), 2);
+            shutdown.cancel();
         }
 
         #[tokio::test]
         async fn a_certificate_that_cannot_be_exported_leaves_the_default_in_place() {
             let aws = MockAws::start().await;
-            domain_with_certificate(&aws);
+            domain_with_certificate(&aws, Some(ARN));
             aws.reply(DESCRIBE, described("01", "ISSUED", "DISABLED"));
             let (tls, default) = tls();
             let (registry, shutdown, _task) = start(&aws, &tls).await;
             assert_eq!(tls.certificate_for(DOMAIN), Some(default));
             assert_eq!(exports(&aws), 0);
-            let summary = serde_json::to_value(registry.summaries()).unwrap();
-            let certificate = &summary[0]["certificate"];
-            assert_eq!(certificate["serial"], serde_json::Value::Null);
-            assert!(
-                certificate["error"]
-                    .as_str()
-                    .unwrap()
-                    .contains("exportable"),
-                "{certificate}"
-            );
+            let certificate = reported(&registry);
+            assert_eq!(certificate["serving"], serde_json::Value::Null);
+            assert!(error_contains("exportable")(&certificate), "{certificate}");
             shutdown.cancel();
         }
 
         #[tokio::test]
         async fn a_failed_export_keeps_the_default_and_is_reported() {
             let aws = MockAws::start().await;
-            domain_with_certificate(&aws);
+            domain_with_certificate(&aws, Some(ARN));
             aws.reply(DESCRIBE, described("01", "ISSUED", "ENABLED"));
             aws.reply(EXPORT, Reply::error("AccessDeniedException"));
             let (tls, default) = tls();
             let (registry, shutdown, _task) = start(&aws, &tls).await;
             assert_eq!(tls.certificate_for(DOMAIN), Some(default));
-            let summary = serde_json::to_value(registry.summaries()).unwrap();
+            let certificate = reported(&registry);
             assert!(
-                summary[0]["certificate"]["error"]
-                    .as_str()
-                    .unwrap()
-                    .contains("AccessDenied"),
-                "{summary}"
+                error_contains("AccessDenied")(&certificate),
+                "{certificate}"
             );
+            shutdown.cancel();
+        }
+
+        #[tokio::test]
+        async fn a_domain_without_a_certificate_keeps_the_default_and_calls_no_acm() {
+            let aws = MockAws::start().await;
+            domain_with_certificate(&aws, None);
+            let (tls, default) = tls();
+            let (registry, shutdown, _task) = start(&aws, &tls).await;
+            assert_eq!(tls.certificate_for(DOMAIN), Some(default));
+            let certificate = reported(&registry);
+            assert_eq!(certificate["arn"], serde_json::Value::Null);
+            assert!(
+                error_contains("no certificate")(&certificate),
+                "{certificate}"
+            );
+            assert!(
+                aws.calls()
+                    .iter()
+                    .all(|c| !c.target.starts_with("CertificateManager."))
+            );
+            shutdown.cancel();
+        }
+
+        /// Once a certificate is served, every later failure keeps serving it
+        /// and is reported, and the error clears when ACM answers again.
+        #[tokio::test]
+        async fn the_served_certificate_survives_later_failures_until_one_succeeds() {
+            let aws = MockAws::start().await;
+            domain_with_certificate(&aws, Some(ARN));
+            aws.reply(DESCRIBE, described("01", "ISSUED", "ENABLED"));
+            answer_export(&aws, DOMAIN);
+            let (tls, _) = tls();
+            let (registry, shutdown, _task) = start(&aws, &tls).await;
+            let first = tls.certificate_for(DOMAIN).unwrap();
+
+            let keeps_serving_01 = |certificate: &serde_json::Value| {
+                assert_eq!(certificate["serving"]["serial"], "01", "{certificate}");
+                assert_eq!(tls.certificate_for(DOMAIN).as_ref(), Some(&first));
+            };
+
+            aws.reply(DESCRIBE, Reply::error("AccessDeniedException"));
+            keeps_serving_01(&reported_until(&registry, error_contains("AccessDenied")).await);
+
+            aws.reply(
+                DESCRIBE,
+                described_as("IMPORTED", "02", "ISSUED", "DISABLED"),
+            );
+            keeps_serving_01(&reported_until(&registry, error_contains("imported")).await);
+
+            aws.reply(DESCRIBE, described("02", "ISSUED", "ENABLED"));
+            aws.reply(EXPORT, Reply::error("RequestInProgressException"));
+            keeps_serving_01(&reported_until(&registry, error_contains("RequestInProgress")).await);
+
+            answer_export_with_another_key(&aws, DOMAIN);
+            keeps_serving_01(&reported_until(&registry, error_contains("refused")).await);
+
+            answer_export(&aws, DOMAIN);
+            let certificate = reported_until(&registry, |c| c["serving"]["serial"] == "02").await;
+            assert!(certificate.get("error").is_none(), "{certificate}");
+            assert_ne!(tls.certificate_for(DOMAIN).as_ref(), Some(&first));
+            shutdown.cancel();
+        }
+
+        /// A different certificate is exported even when its serial matches the
+        /// served one, and until it is, `/routes` names the one still served.
+        #[tokio::test]
+        async fn a_different_certificate_on_the_domain_is_exported_whatever_its_serial() {
+            let aws = MockAws::start().await;
+            domain_with_certificate(&aws, Some(ARN));
+            aws.reply(DESCRIBE, described("01", "ISSUED", "ENABLED"));
+            answer_export(&aws, DOMAIN);
+            let (tls, _) = tls();
+            let (registry, shutdown, _task) = start(&aws, &tls).await;
+
+            aws.reply(EXPORT, Reply::error("AccessDeniedException"));
+            domain_with_certificate(&aws, Some(OTHER_ARN));
+            let certificate = reported_until(&registry, error_contains("AccessDenied")).await;
+            assert_eq!(certificate["arn"], OTHER_ARN);
+            assert_eq!(certificate["serving"]["arn"], ARN);
+
+            answer_export(&aws, DOMAIN);
+            let certificate = reported_until(&registry, |c| c["serving"]["arn"] == OTHER_ARN).await;
+            assert_eq!(certificate["serving"]["serial"], "01");
+            assert!(certificate.get("error").is_none(), "{certificate}");
             shutdown.cancel();
         }
 
         #[tokio::test]
         async fn a_domain_with_certificate_files_never_calls_acm() {
             let aws = MockAws::start().await;
-            domain_with_certificate(&aws);
+            domain_with_certificate(&aws, Some(ARN));
             let cert = generate();
             let (cert_path, key_path) = cert.write();
             let tls = Tls::with_domains(

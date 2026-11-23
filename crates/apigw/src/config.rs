@@ -387,6 +387,11 @@ impl Config {
         if self.domain_cert_source == DomainCertSource::Acm && self.domain_names.is_empty() {
             anyhow::bail!("--domain-cert-source acm needs --domain-name");
         }
+        if self.domain_cert_source == DomainCertSource::Acm && self.refresh_seconds == 0 {
+            anyhow::bail!(
+                "--domain-cert-source acm needs --refresh-seconds above 0, or renewed certificates are never exported"
+            );
+        }
         Ok(match (self.domain_cert_source, &self.domain_cert_dir) {
             (DomainCertSource::Acm, Some(_)) => {
                 anyhow::bail!("--domain-cert-dir cannot be used with --domain-cert-source acm")
@@ -708,6 +713,17 @@ mod tests {
         let without_domain =
             parse(&["--domain-cert-source", "acm", "--openapi-file", "x.json"]).unwrap();
         assert!(without_domain.domain_certs().is_err());
+        let never_refreshed = parse(&[
+            "--domain-name",
+            "api.example.com",
+            "--domain-cert-source",
+            "acm",
+            "--refresh-seconds",
+            "0",
+        ])
+        .unwrap();
+        let err = never_refreshed.domain_certs().unwrap_err();
+        assert!(err.to_string().contains("--refresh-seconds"), "{err}");
     }
 
     #[test]

@@ -343,7 +343,7 @@ groups:
         expr: time() - apigw_usage_last_success_timestamp_seconds > 1800
       - alert: ApigwCertificateExpiring
         expr: apigw_tls_certificate_expiry_seconds < 14 * 86400
-      - alert: ApigwCertificateReloadFailing   # new files on disk, or an ACM export, that do not load
+      - alert: ApigwCertificateReloadFailing   # new files on disk, or an ACM export (labelled by domain), that do not load
         expr: increase(apigw_tls_reloads_total{outcome="failure"}[15m]) > 0
       - alert: ApigwUnservableRoutes           # routes answering 501
         expr: apigw_routes_unservable > 0

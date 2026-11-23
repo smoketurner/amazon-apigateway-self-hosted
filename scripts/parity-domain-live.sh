@@ -37,8 +37,9 @@ cargo build --quiet -p apigw-parity
 certificates_differ=0
 if [[ "$(jq -r .domain_cert_source <<<"$ecs")" == "acm" ]]; then
   fingerprint() {
-    openssl s_client -connect "$1" -servername "$2" </dev/null 2>/dev/null |
-      openssl x509 -noout -fingerprint -sha256
+    # An unreachable gateway prints nothing, reported below, instead of ending the script.
+    { openssl s_client -connect "$1" -servername "$2" </dev/null 2>/dev/null |
+      openssl x509 -noout -fingerprint -sha256 2>/dev/null; } || true
   }
   host="$(jq -r .domain.base_url "$work/outputs.json" | sed -E 's|^https://||; s|/.*$||')"
   aws_print="$(fingerprint "$host:443" "$host")"

@@ -5,6 +5,10 @@
 //! Only PBES2 with PBKDF2 (HMAC-SHA1/256/384/512) and AES-CBC is accepted: the
 //! scheme OpenSSL writes by default and the one RFC 8018 recommends. Anything
 //! else (scrypt, PBES1, other ciphers) is refused rather than guessed at.
+//!
+//! The derived key and the ciphertext buffer are zeroized when dropped. The
+//! decrypted key is handed to rustls as a `PrivatePkcs8KeyDer`, which does not
+//! zeroize, so a copy of it stays in memory until the allocator reuses it.
 
 use std::num::NonZeroU32;
 
@@ -28,9 +32,10 @@ const LABELS: [&str; 2] = ["ENCRYPTED PRIVATE KEY", "PRIVATE KEY"];
 const PBES2: &str = "1.2.840.113549.1.5.13";
 const PBKDF2: &str = "1.2.840.113549.1.5.12";
 
-/// More rounds than any exporter writes; the bound keeps a hostile key from
-/// costing minutes of CPU.
-const MAX_ITERATIONS: u32 = 10_000_000;
+/// Far more rounds than exporters write (OpenSSL writes 2048). The key comes
+/// from ACM over TLS, so this only bounds the cost of a corrupted one; the
+/// caller decrypts off the async runtime, as this many rounds take seconds.
+pub(crate) const MAX_ITERATIONS: u32 = 10_000_000;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum EncryptedKeyError {
@@ -284,6 +289,143 @@ pub(crate) mod tests {
         )
     }
 
+    pub(crate) fn der_tlv(tag: u8, content: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        let len = content.len();
+        if len < 0x80 {
+            out.push(u8::try_from(len).unwrap());
+        } else if len < 0x100 {
+            out.extend([0x81, u8::try_from(len).unwrap()]);
+        } else {
+            out.extend([
+                0x82,
+                u8::try_from(len >> 8).unwrap(),
+                u8::try_from(len & 0xff).unwrap(),
+            ]);
+        }
+        out.extend_from_slice(content);
+        out
+    }
+
+    pub(crate) fn der_sequence(items: &[Vec<u8>]) -> Vec<u8> {
+        der_tlv(0x30, &items.concat())
+    }
+
+    fn der_oid(encoded: &[u8]) -> Vec<u8> {
+        der_tlv(0x06, encoded)
+    }
+
+    fn der_uint(n: u32) -> Vec<u8> {
+        let bytes = n.to_be_bytes();
+        let start = bytes.iter().position(|b| *b != 0).unwrap_or(3);
+        let mut content = bytes.get(start..).unwrap().to_vec();
+        if content.first().is_some_and(|b| b & 0x80 != 0) {
+            content.insert(0, 0);
+        }
+        der_tlv(0x02, &content)
+    }
+
+    const SALT: [u8; 16] = [7; 16];
+    const IV: [u8; 16] = [9; 16];
+    const ROUNDS: u32 = 2048;
+
+    /// The DER fields of an `EncryptedPrivateKeyInfo`, each replaceable so a
+    /// test can get one of them wrong. The default is PBKDF2-HMAC-SHA256 with
+    /// AES-256-CBC, as `openssl pkcs8 -topk8 -v2 aes-256-cbc` writes.
+    pub(crate) struct Pbes2Der {
+        scheme: Vec<u8>,
+        kdf: Vec<u8>,
+        salt: Vec<u8>,
+        iterations: Vec<u8>,
+        key_length: Option<Vec<u8>>,
+        prf: Vec<u8>,
+        cipher: Vec<u8>,
+        /// Left out of the cipher parameters when `None`.
+        iv: Option<Vec<u8>>,
+        data: Vec<u8>,
+        trailing: Vec<u8>,
+    }
+
+    impl Default for Pbes2Der {
+        fn default() -> Self {
+            Self {
+                scheme: der_oid(&[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x05, 0x0d]),
+                kdf: der_oid(&[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x05, 0x0c]),
+                salt: der_tlv(0x04, &SALT),
+                iterations: der_uint(ROUNDS),
+                key_length: None,
+                prf: der_sequence(&[
+                    der_oid(&[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x02, 0x09]),
+                    der_tlv(0x05, &[]),
+                ]),
+                cipher: der_oid(&[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x01, 0x2a]),
+                iv: Some(der_tlv(0x04, &IV)),
+                data: der_tlv(0x04, &[]),
+                trailing: Vec::new(),
+            }
+        }
+    }
+
+    impl Pbes2Der {
+        fn encode(&self) -> Vec<u8> {
+            let mut kdf_parameters = vec![self.salt.clone(), self.iterations.clone()];
+            kdf_parameters.extend(self.key_length.clone());
+            kdf_parameters.push(self.prf.clone());
+            let mut cipher = vec![self.cipher.clone()];
+            cipher.extend(self.iv.clone());
+            let mut out = der_sequence(&[
+                der_sequence(&[
+                    self.scheme.clone(),
+                    der_sequence(&[
+                        der_sequence(&[self.kdf.clone(), der_sequence(&kdf_parameters)]),
+                        der_sequence(&cipher),
+                    ]),
+                ]),
+                self.data.clone(),
+            ]);
+            out.extend_from_slice(&self.trailing);
+            out
+        }
+    }
+
+    /// `pkcs8` encrypted under `passphrase` the way ACM's export is.
+    pub(crate) fn encrypt_for_test(pkcs8: &[u8], passphrase: &[u8]) -> String {
+        use aws_lc_rs::cipher::{EncryptionContext, PaddedBlockEncryptingKey};
+        let mut key = [0_u8; 32];
+        pbkdf2::derive(
+            pbkdf2::PBKDF2_HMAC_SHA256,
+            NonZeroU32::new(ROUNDS).unwrap(),
+            &SALT,
+            passphrase,
+            &mut key,
+        );
+        let encrypting =
+            PaddedBlockEncryptingKey::cbc_pkcs7(UnboundCipherKey::new(&AES_256, &key).unwrap())
+                .unwrap();
+        let mut data = pkcs8.to_vec();
+        encrypting
+            .less_safe_encrypt(&mut data, EncryptionContext::Iv128(FixedLength::from(IV)))
+            .unwrap();
+        encrypted_pem(
+            &Pbes2Der {
+                data: der_tlv(0x04, &data),
+                ..Pbes2Der::default()
+            }
+            .encode(),
+        )
+    }
+
+    /// The PBES2 parameters of `der`, read without deriving a key.
+    fn parameters(der: &Pbes2Der) -> Result<NonZeroU32, EncryptedKeyError> {
+        let encoded = der.encode();
+        let (_, info) =
+            parse_der(&encoded).map_err(|_| EncryptedKeyError::Malformed("test DER"))?;
+        let algorithm = sequence(&info, "test DER")?
+            .first()
+            .ok_or(EncryptedKeyError::Malformed("test DER"))?;
+        Pbes2::parse(algorithm).map(|scheme| scheme.iterations)
+    }
+
     macro_rules! fixture {
         ($name:literal) => {
             include_str!(concat!("../../tests/fixtures/encrypted-keys/", $name))
@@ -402,10 +544,118 @@ pub(crate) mod tests {
         assert!(EncryptedKey(&acm_label).decrypt(PASSPHRASE).is_ok());
     }
 
+    #[test]
+    fn a_key_encrypted_like_acms_decrypts() {
+        let plain = rcgen::KeyPair::generate().unwrap().serialize_der();
+        let key = EncryptedKey(&encrypt_for_test(&plain, PASSPHRASE))
+            .decrypt(PASSPHRASE)
+            .unwrap();
+        assert_eq!(pkcs8(&key), plain);
+    }
+
+    #[test]
+    fn the_iteration_count_must_be_between_one_and_the_cap() {
+        let rounds = |n| {
+            parameters(&Pbes2Der {
+                iterations: der_uint(n),
+                ..Pbes2Der::default()
+            })
+        };
+        assert_eq!(rounds(1).unwrap().get(), 1);
+        assert_eq!(rounds(MAX_ITERATIONS).unwrap().get(), MAX_ITERATIONS);
+        for n in [0, MAX_ITERATIONS + 1, u32::MAX] {
+            assert!(
+                matches!(
+                    rounds(n),
+                    Err(EncryptedKeyError::Malformed("iterationCount"))
+                ),
+                "{n}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_length_must_match_the_cipher() {
+        let with_length = |n| {
+            parameters(&Pbes2Der {
+                key_length: Some(der_uint(n)),
+                ..Pbes2Der::default()
+            })
+        };
+        assert!(with_length(32).is_ok());
+        assert!(matches!(
+            with_length(16),
+            Err(EncryptedKeyError::Malformed("keyLength"))
+        ));
+    }
+
+    #[test]
+    fn the_cipher_must_be_aes_cbc_with_a_16_byte_iv() {
+        let triple_des = parameters(&Pbes2Der {
+            cipher: der_oid(&[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x03, 0x07]),
+            ..Pbes2Der::default()
+        });
+        assert!(
+            matches!(triple_des, Err(EncryptedKeyError::Unsupported(ref reason)) if reason.starts_with("cipher")),
+            "{triple_des:?}"
+        );
+        for iv in [None, Some(der_tlv(0x04, &[9; 8])), Some(der_tlv(0x05, &[]))] {
+            assert!(matches!(
+                parameters(&Pbes2Der {
+                    iv,
+                    ..Pbes2Der::default()
+                }),
+                Err(EncryptedKeyError::Malformed("AES-CBC IV"))
+            ));
+        }
+    }
+
+    #[test]
+    fn a_salt_must_be_an_octet_string() {
+        let err = parameters(&Pbes2Der {
+            salt: der_sequence(&[]),
+            ..Pbes2Der::default()
+        })
+        .unwrap_err();
+        assert!(
+            matches!(err, EncryptedKeyError::Unsupported(ref reason) if reason.contains("salt")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn data_after_the_key_is_refused() {
+        let pem = encrypted_pem(
+            &Pbes2Der {
+                trailing: vec![0],
+                ..Pbes2Der::default()
+            }
+            .encode(),
+        );
+        assert!(matches!(
+            EncryptedKey(&pem).decrypt(PASSPHRASE),
+            Err(EncryptedKeyError::Malformed("trailing data"))
+        ));
+    }
+
     proptest::proptest! {
         #[test]
         fn arbitrary_bytes_never_panic(bytes in proptest::collection::vec(proptest::num::u8::ANY, 0..400)) {
             drop(EncryptedKey(&encrypted_pem(&bytes)).decrypt(PASSPHRASE));
+        }
+
+        /// Random bytes rarely get past the outer DER; a valid key with one
+        /// byte changed reaches every field the parser reads.
+        #[test]
+        fn a_valid_key_with_one_byte_changed_never_panics(at in 0_usize..512, flip in 1_u8..=255) {
+            let pem = fixture!("aes256-sha256.pem");
+            let body: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
+            let mut der = BASE64.decode(body).unwrap();
+            let len = der.len();
+            if let Some(byte) = der.get_mut(at.checked_rem(len).unwrap()) {
+                *byte ^= flip;
+            }
+            drop(EncryptedKey(&encrypted_pem(&der)).decrypt(PASSPHRASE));
         }
     }
 }
