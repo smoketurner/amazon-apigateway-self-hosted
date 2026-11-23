@@ -467,3 +467,32 @@ routes. It deliberately does not cover resource policies, which are always evalu
 allowlist is not something a front proxy usually enforces. With the flag a route's authorizer is
 taken to have allowed the caller, so the policy then decides through explicit denies (and, on
 routes without an authorizer, needs an explicit allow).
+
+## When AWS is unreachable
+
+`apigw` reads its definition, API keys, and usage plans from API Gateway, and some integrations
+and authorizers call AWS on every request. When AWS is unreachable, whether `apigw` runs alone
+or shares a DNS name with API Gateway for failover, this is how long each kind of route keeps
+working:
+
+| Route | While AWS is unreachable | After a restart during the outage |
+|---|---|---|
+| `HTTP_PROXY`, VPC link, and `MOCK` integrations, mapping templates, response cache | Keep working on the current definition; a failed refresh keeps the current routes | Keep working only with `--config-cache`; without it the gateway has no definition to start from |
+| `AWS_PROXY` Lambda, non-proxy Lambda, and AWS service integrations | Fail at once with `502` | Same |
+| Lambda authorizers | Cached results are used until their TTL ends (REST default 300 s, at most an hour; HTTP caching is off by default), then `500` | `500` at once with the in-memory backend; with `--valkey-url`, cached results until their TTL ends |
+| Cognito authorizers | Cached signing keys are used for up to two hours, then requests are refused | Refused at once: signing keys are not persisted |
+| JWT authorizers whose issuer is outside AWS | Keep working | Keep working |
+| API keys and usage plans | Keep working for up to an hour after the last successful read, then every key is refused with `403` | Every key is refused at once: keys are not persisted |
+
+The hour limit on API keys is deliberate. A key disabled or deleted in API Gateway keeps
+working in `apigw` until the next successful read, so a longer outage must not keep it working
+indefinitely.
+
+### Usage-plan quotas behind a shared DNS name
+
+`apigw` counts usage-plan quotas and throttles in its own state backend. It does not read or
+update API Gateway's usage counters, and API Gateway does not see requests `apigw` served. When
+a weighted or failover DNS record sends a key's traffic to both, each counts it separately, so a
+client on a plan of 10,000 requests a day can make up to 10,000 through each, 20,000 in all.
+To keep quotas exact, send key-protected routes to only one of them, for example under a
+separate hostname.
