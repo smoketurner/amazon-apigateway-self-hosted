@@ -11,13 +11,14 @@ Every flag has an environment variable (`apigw --help` lists them). The main one
 |---|---|---|---|
 | `--rest-api-id` + `--stage` | `APIGW_REST_API_ID`, `APIGW_STAGE` | | Mirror a REST API stage |
 | `--http-api-id` + `--stage` | `APIGW_HTTP_API_ID`, `APIGW_STAGE` | | Mirror an HTTP API stage (the deployed configuration) |
-| `--openapi-file` + `--api-type` | `APIGW_OPENAPI_FILE` | `rest` | Serve an export from disk (no AWS calls for config) |
+| `--openapi-file` + `--api-type` | `APIGW_OPENAPI_FILE`, `APIGW_API_TYPE` | `rest` | Serve an export from disk (no AWS calls for config); `--api-type` is `rest` or `http` |
 | `--tls-cert`, `--tls-key` | `APIGW_TLS_CERT`, `APIGW_TLS_KEY` | required | PEM files; reloaded automatically when they change |
 | `--listen` | `APIGW_LISTEN` | `0.0.0.0:8443` | API traffic |
+| `--max-connections` | `APIGW_MAX_CONNECTIONS` | `10000` | Connections served at once on each listener; further clients wait in the kernel's accept backlog |
 | `--allowed-host` | `APIGW_ALLOWED_HOSTS` | any | Serve only these `Host` names (repeatable) and answer `403` to the rest, as API Gateway does for a host that is not the API's |
 | `--admin-listen` | `APIGW_ADMIN_LISTEN` | off | `/healthz`, `/routes`, and Prometheus `/metrics` (also TLS) |
 | `--base-path` | `APIGW_BASE_PATH` | none | Serve under `/prod` etc., like an `execute-api` URL |
-| `--refresh-seconds` | `APIGW_REFRESH_SECONDS` | `60` | Re-download interval; `0` disables |
+| `--refresh-seconds` | `APIGW_REFRESH_SECONDS` | `60` | Re-download interval; `0` disables (refused with `--domain-cert-source acm`, which needs refreshes to export renewals) |
 | `--config-cache` | `APIGW_CONFIG_CACHE` | none | Last-known-good definition, used when AWS is unreachable at startup |
 | `--stage-variable NAME=VALUE` | `APIGW_STAGE_VARIABLE_<NAME>` | | Override a stage variable |
 | `--integration-overrides` | `APIGW_INTEGRATION_OVERRIDES` | none | Re-point individual routes (below) |
@@ -29,6 +30,7 @@ Every flag has an environment variable (`apigw --help` lists them). The main one
 | `--vpc-link CONNECTION_ID=URL` | `APIGW_VPC_LINKS` | none | Serve a VPC link's integrations from an in-cluster URL (repeatable; [VPC links](deployment.md#vpc-links)) |
 | `--issuer-endpoint ISSUER=URL` | `APIGW_ISSUER_ENDPOINTS` | none | Fetch a token issuer's signing keys from URL instead of from the issuer (an in-cluster mirror of the identity provider); plain `http` URLs are allowed and logged as a warning |
 | `--lambda-endpoint FUNCTION=URL` | `APIGW_LAMBDA_ENDPOINTS` | none | Invoke a function at a URL speaking Lambda's Invoke protocol (e.g. the Runtime Interface Emulator in-cluster) |
+| `--aws-endpoint SERVICE=URL` | `APIGW_AWS_ENDPOINTS` | none | Send REST `AWS` integrations and HTTP API integration subtypes for `SERVICE` (`sqs`, `sns`, `dynamodb`, `states`, `kinesis`, `events`, `s3`, or `appconfig`) to a URL instead of the service's endpoint, such as LocalStack or an in-cluster mock (repeatable or comma-separated); requests are still signed |
 | `--trusted-proxies` | `APIGW_TRUSTED_PROXIES` | none | Comma-separated CIDRs or addresses of proxies whose `X-Forwarded-For` and `X-Forwarded-Client-Cert` are believed ([Client IP](deployment.md#client-ip)) |
 | `--trusted-proxy-hops` | `APIGW_TRUSTED_PROXY_HOPS` | `1` | Proxies between the client and `apigw`, counting the one that connects to it |
 | `--replicas` | `APIGW_REPLICAS` | `1` | Gateway replicas serving the API; throttle rates and bursts are divided by this because each replica keeps its own buckets ([parity](parity.md#throttling-caching-and-releases)) |
@@ -48,8 +50,9 @@ Every flag has an environment variable (`apigw --help` lists them). The main one
 | `--domain-cert-source` | `APIGW_DOMAIN_CERT_SOURCE` | `files` | `files` reads certificates from `--domain-cert-dir` (or serves `--tls-cert`); `acm` exports the ACM certificate API Gateway serves for each domain and follows its renewals ([Custom domains](operations.md#custom-domains)) |
 | `--canary-export-stage` | `APIGW_CANARY_EXPORT_STAGE` | none | REST stage that holds the canary deployment of `--stage`, exported to build the canary release ([Canary releases](operations.md#canary-releases)) |
 | `--log-stream` | `APIGW_LOG_STREAM` | `{HOSTNAME}/{start time}/{suffix}` | Log stream this process writes to in every log group |
+| `--log-format` | `APIGW_LOG_FORMAT` | `json` | The gateway's own logs on standard output: `json`, or `text` for reading in a terminal |
 
-Logs are JSON on stdout by default (`--log-format text` for humans); filter with `RUST_LOG`.
+Filter the gateway's own logs with `RUST_LOG`.
 
 ## Pointing routes at different targets
 
