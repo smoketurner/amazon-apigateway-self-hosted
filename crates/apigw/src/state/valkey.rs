@@ -16,9 +16,11 @@ use std::fmt;
 use std::time::Duration;
 
 use axum::body::Bytes;
+use glide::{
+    AsyncCommands as _, GlideClient, GlideClientConfiguration, GlideError, Script, SetExpiry,
+    SetOptions,
+};
 use jiff::Timestamp;
-use redis::aio::{ConnectionManager, ConnectionManagerConfig};
-use redis::{AsyncCommands as _, Client, Script, TlsCertificates};
 
 use super::bucket::{Admission, BucketLimits};
 use super::cache::CacheStore;
@@ -85,8 +87,6 @@ return limit - used
 pub(crate) enum ValkeyError {
     #[error("the Valkey URL must look like rediss://host:port")]
     InvalidUrl,
-    #[error("could not use the CA certificate: {0}")]
-    CaCertificate(String),
     #[error("could not connect to {server}: {reason}")]
     Connect { server: String, reason: String },
 }
@@ -165,7 +165,7 @@ impl fmt::Debug for ValkeyUrl {
 
 /// The state kept in Valkey.
 pub(crate) struct Valkey {
-    connection: ConnectionManager,
+    client: GlideClient,
     take_token: Script,
     consume_quota: Script,
     timeout: Duration,
@@ -189,38 +189,28 @@ impl Valkey {
         ca_pem: Option<&[u8]>,
     ) -> Result<Self, ValkeyError> {
         let server = url.redacted();
-        let client = match ca_pem {
-            Some(pem) => Client::build_with_tls(
-                url.as_str(),
-                TlsCertificates {
-                    client_tls: None,
-                    root_cert: Some(pem.to_vec()),
-                },
-            )
-            .map_err(|e| ValkeyError::CaCertificate(e.to_string()))?,
-            None => Client::open(url.as_str()).map_err(|e| ValkeyError::Connect {
+        let mut config = GlideClientConfiguration::from_url(url.as_str())
+            .map_err(|e| ValkeyError::Connect {
                 server: server.clone(),
                 reason: e.to_string(),
-            })?,
-        };
-        let config = ConnectionManagerConfig::new()
-            .set_connection_timeout(Some(CONNECT_TIMEOUT))
-            .set_response_timeout(Some(COMMAND_TIMEOUT));
-        let connection = tokio::time::timeout(
-            CONNECT_TIMEOUT,
-            ConnectionManager::new_with_config(client, config),
-        )
-        .await
-        .map_err(|_| ValkeyError::Connect {
-            server: server.clone(),
-            reason: "timed out".to_owned(),
-        })?
-        .map_err(|e| ValkeyError::Connect {
-            server,
-            reason: e.to_string(),
-        })?;
+            })?
+            .connection_timeout(CONNECT_TIMEOUT)
+            .request_timeout(COMMAND_TIMEOUT);
+        if let Some(pem) = ca_pem {
+            config = config.tls_ca_cert(pem);
+        }
+        let client = tokio::time::timeout(CONNECT_TIMEOUT, GlideClient::connect(config))
+            .await
+            .map_err(|_| ValkeyError::Connect {
+                server: server.clone(),
+                reason: "timed out".to_owned(),
+            })?
+            .map_err(|e| ValkeyError::Connect {
+                server,
+                reason: e.to_string(),
+            })?;
         Ok(Self {
-            connection,
+            client,
             take_token: Script::new(TAKE_TOKEN),
             consume_quota: Script::new(CONSUME_QUOTA),
             timeout: COMMAND_TIMEOUT,
@@ -236,7 +226,7 @@ impl Valkey {
     async fn timed<T>(
         &self,
         operation: &'static str,
-        call: impl Future<Output = redis::RedisResult<T>>,
+        call: impl Future<Output = Result<T, GlideError>>,
     ) -> Result<T, StateError> {
         let result = match tokio::time::timeout(self.timeout, call).await {
             Ok(Ok(value)) => Ok(value),
@@ -279,7 +269,6 @@ impl Valkey {
         key: &StateKey,
         limits: BucketLimits,
     ) -> Result<Admission, StateError> {
-        let mut connection = self.connection.clone();
         let admitted: i64 = self
             .timed(
                 "take_token",
@@ -288,7 +277,7 @@ impl Valkey {
                     .arg(limits.rate_per_second())
                     .arg(limits.capacity())
                     .arg(Self::millis(Self::bucket_ttl(limits)))
-                    .invoke_async(&mut connection),
+                    .invoke_async(&self.client),
             )
             .await?;
         Ok(if admitted == 1 {
@@ -316,7 +305,6 @@ impl Valkey {
             .try_into()
             .unwrap_or(Duration::ZERO);
         let ttl = remaining_in_window.saturating_add(QUOTA_GRACE);
-        let mut connection = self.connection.clone();
         let remaining: i64 = self
             .timed(
                 "consume_quota",
@@ -324,7 +312,7 @@ impl Valkey {
                     .key(name)
                     .arg(quota.limit)
                     .arg(Self::millis(ttl))
-                    .invoke_async(&mut connection),
+                    .invoke_async(&self.client),
             )
             .await?;
         Ok(match u64::try_from(remaining) {
@@ -336,9 +324,8 @@ impl Valkey {
     }
 
     pub(crate) async fn cache_get(&self, key: &StateKey) -> Result<Option<Bytes>, StateError> {
-        let mut connection = self.connection.clone();
         let value: Option<Vec<u8>> = self
-            .timed("cache_get", connection.get(Self::name(key)))
+            .timed("cache_get", self.client.get(Self::name(key)))
             .await?;
         Ok(value.map(Bytes::from))
     }
@@ -352,14 +339,12 @@ impl Valkey {
         if ttl.is_zero() || value.len() > MAX_CACHED_BYTES {
             return Ok(CacheStore::Rejected);
         }
-        let mut connection = self.connection.clone();
         self.timed(
             "cache_put",
-            connection.set_options::<_, _, ()>(
+            self.client.set_options::<_, _, ()>(
                 Self::name(key),
                 value.as_ref(),
-                redis::SetOptions::default()
-                    .with_expiration(redis::SetExpiry::PX(Self::millis(ttl))),
+                SetOptions::default().with_expiration(SetExpiry::PX(Self::millis(ttl))),
             ),
         )
         .await?;
@@ -367,9 +352,11 @@ impl Valkey {
     }
 
     pub(crate) async fn cache_invalidate(&self, key: &StateKey) -> Result<(), StateError> {
-        let mut connection = self.connection.clone();
-        self.timed("cache_invalidate", connection.del::<_, ()>(Self::name(key)))
-            .await
+        self.timed(
+            "cache_invalidate",
+            self.client.del::<_, ()>(Self::name(key)),
+        )
+        .await
     }
 }
 
