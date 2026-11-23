@@ -151,6 +151,25 @@ impl RoleArn {
     }
 }
 
+impl FromStr for RoleArn {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        let is_role = raw
+            .strip_prefix("arn:")
+            .and_then(|rest| rest.split_once(":iam::"))
+            .is_some_and(|(_, rest)| {
+                rest.split_once(":role/")
+                    .is_some_and(|(account, name)| !account.is_empty() && !name.is_empty())
+            });
+        if is_role {
+            Ok(Self(raw.to_owned()))
+        } else {
+            Err(format!("{raw:?} is not an IAM role ARN"))
+        }
+    }
+}
+
 /// What an integration's `credentials` field asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum IntegrationCredentials {
@@ -168,18 +187,7 @@ impl FromStr for IntegrationCredentials {
         if raw == "arn:aws:iam::*:user/*" {
             return Ok(Self::Caller);
         }
-        let is_role = raw
-            .strip_prefix("arn:")
-            .and_then(|rest| rest.split_once(":iam::"))
-            .is_some_and(|(_, rest)| {
-                rest.split_once(":role/")
-                    .is_some_and(|(account, name)| !account.is_empty() && !name.is_empty())
-            });
-        if is_role {
-            Ok(Self::Role(RoleArn(raw.to_owned())))
-        } else {
-            Err(format!("{raw:?} is not an IAM role ARN"))
-        }
+        raw.parse().map(Self::Role)
     }
 }
 

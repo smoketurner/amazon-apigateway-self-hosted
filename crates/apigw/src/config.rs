@@ -4,11 +4,12 @@ use std::num::{NonZeroU8, NonZeroU32};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use aws_rolesanywhere_credentials::{ProfileArn, TrustAnchorArn};
 use clap::{ArgGroup, Parser, ValueEnum};
 
 use crate::authz::IssuerEndpoint;
 use crate::aws::{
-    CredentialsMode, LambdaEndpoint, LambdaEndpoints, ServiceEndpoint, ServiceEndpoints,
+    CredentialsMode, LambdaEndpoint, LambdaEndpoints, RoleArn, ServiceEndpoint, ServiceEndpoints,
 };
 use crate::domain::DomainName;
 use crate::gateway::{AuthorizationMode, Enforcement};
@@ -137,6 +138,70 @@ pub(crate) struct Config {
     /// `gateway` uses the gateway's own credentials.
     #[arg(long, env = "APIGW_INTEGRATION_CREDENTIALS", value_enum, default_value_t = CredentialsMode::Assume)]
     pub(crate) integration_credentials: CredentialsMode,
+
+    /// Get the gateway's AWS credentials from IAM Roles Anywhere: path to a PEM file with the
+    /// end-entity certificate, then any intermediates, such as `tls.crt` of a mounted
+    /// `kubernetes.io/tls` Secret. Needs the other --roles-anywhere-* settings. The file and the
+    /// key are re-read on every refresh, so a renewed Secret is picked up without a restart;
+    /// --aws-endpoint rolesanywhere=URL replaces the region's endpoint.
+    #[arg(
+        long,
+        value_name = "PATH",
+        env = "APIGW_ROLES_ANYWHERE_CERTIFICATE",
+        requires_all = [
+            "roles_anywhere_private_key",
+            "roles_anywhere_trust_anchor_arn",
+            "roles_anywhere_profile_arn",
+            "roles_anywhere_role_arn",
+        ]
+    )]
+    pub(crate) roles_anywhere_certificate: Option<PathBuf>,
+
+    /// Path to the Roles Anywhere certificate's private key, such as `tls.key` of the same
+    /// Secret: an unencrypted PEM file (PKCS#8, PKCS#1, or SEC1) with an RSA, P-256, P-384, or
+    /// P-521 key.
+    #[arg(
+        long,
+        value_name = "PATH",
+        env = "APIGW_ROLES_ANYWHERE_PRIVATE_KEY",
+        requires = "roles_anywhere_certificate"
+    )]
+    pub(crate) roles_anywhere_private_key: Option<PathBuf>,
+
+    /// The Roles Anywhere trust anchor the certificate chains to. Its region is the region
+    /// credentials are requested in.
+    #[arg(
+        long,
+        env = "APIGW_ROLES_ANYWHERE_TRUST_ANCHOR_ARN",
+        requires = "roles_anywhere_certificate"
+    )]
+    pub(crate) roles_anywhere_trust_anchor_arn: Option<TrustAnchorArn>,
+
+    /// The Roles Anywhere profile that allows the role, in the trust anchor's region.
+    #[arg(
+        long,
+        env = "APIGW_ROLES_ANYWHERE_PROFILE_ARN",
+        requires = "roles_anywhere_certificate"
+    )]
+    pub(crate) roles_anywhere_profile_arn: Option<ProfileArn>,
+
+    /// The IAM role the gateway runs as through Roles Anywhere.
+    #[arg(
+        long,
+        env = "APIGW_ROLES_ANYWHERE_ROLE_ARN",
+        requires = "roles_anywhere_certificate"
+    )]
+    pub(crate) roles_anywhere_role_arn: Option<RoleArn>,
+
+    /// How long each Roles Anywhere session's credentials last, in seconds (900 to 43200; the
+    /// profile can lower the maximum).
+    #[arg(
+        long,
+        env = "APIGW_ROLES_ANYWHERE_SESSION_SECONDS",
+        default_value_t = 3600,
+        value_parser = clap::value_parser!(u64).range(900..=43_200)
+    )]
+    pub(crate) roles_anywhere_session_seconds: u64,
 
     /// Serve a Lambda function from a URL speaking Lambda's Invoke protocol, such
     /// as the Lambda Runtime Interface Emulator in a pod (repeatable;
@@ -334,6 +399,17 @@ pub(crate) struct Config {
     pub(crate) log_stream: Option<String>,
 }
 
+/// Where the gateway's AWS credentials come from with IAM Roles Anywhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RolesAnywhere {
+    pub(crate) certificate: PathBuf,
+    pub(crate) private_key: PathBuf,
+    pub(crate) trust_anchor: TrustAnchorArn,
+    pub(crate) profile: ProfileArn,
+    pub(crate) role: RoleArn,
+    pub(crate) session_duration: Duration,
+}
+
 /// Where custom domain certificates come from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum DomainCertSource {
@@ -413,6 +489,19 @@ impl Config {
 
     pub(crate) fn vpc_links(&self) -> VpcLinks {
         VpcLinks::new(self.vpc_links.clone())
+    }
+
+    /// The IAM Roles Anywhere settings, when --roles-anywhere-certificate is set (clap requires
+    /// the rest with it).
+    pub(crate) fn roles_anywhere(&self) -> Option<RolesAnywhere> {
+        Some(RolesAnywhere {
+            certificate: self.roles_anywhere_certificate.clone()?,
+            private_key: self.roles_anywhere_private_key.clone()?,
+            trust_anchor: self.roles_anywhere_trust_anchor_arn.clone()?,
+            profile: self.roles_anywhere_profile_arn.clone()?,
+            role: self.roles_anywhere_role_arn.clone()?,
+            session_duration: Duration::from_secs(self.roles_anywhere_session_seconds),
+        })
     }
 
     pub(crate) fn service_endpoints(&self) -> ServiceEndpoints {
@@ -545,6 +634,112 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Config, clap::Error> {
         Config::try_parse_from(std::iter::once(&"apigw").chain(args).chain(TLS.iter()))
+    }
+
+    const ROLES_ANYWHERE: [&str; 10] = [
+        "--roles-anywhere-certificate",
+        "ra.crt",
+        "--roles-anywhere-private-key",
+        "ra.key",
+        "--roles-anywhere-trust-anchor-arn",
+        "arn:aws:rolesanywhere:us-east-1:111122223333:trust-anchor/t",
+        "--roles-anywhere-profile-arn",
+        "arn:aws:rolesanywhere:us-east-1:111122223333:profile/p",
+        "--roles-anywhere-role-arn",
+        "arn:aws:iam::111122223333:role/gateway",
+    ];
+
+    /// The Roles Anywhere settings with `replace` swapped in by flag name and `omit` left out.
+    fn roles_anywhere_args<'a>(replace: &[(&str, &'a str)], omit: &str) -> Vec<&'a str> {
+        let mut args = vec!["--openapi-file", "a.json"];
+        for [flag, value] in ROLES_ANYWHERE.as_chunks::<2>().0 {
+            if *flag == omit {
+                continue;
+            }
+            let value = replace
+                .iter()
+                .find(|(name, _)| name == flag)
+                .map_or(*value, |(_, value)| *value);
+            args.extend_from_slice(&[flag, value]);
+        }
+        args
+    }
+
+    #[test]
+    fn roles_anywhere_is_off_by_default_and_needs_every_setting() {
+        assert_eq!(
+            parse(&["--openapi-file", "a.json"])
+                .unwrap()
+                .roles_anywhere(),
+            None
+        );
+        let settings = parse(&roles_anywhere_args(&[], ""))
+            .unwrap()
+            .roles_anywhere()
+            .unwrap();
+        assert_eq!(settings.certificate, PathBuf::from("ra.crt"));
+        assert_eq!(settings.private_key, PathBuf::from("ra.key"));
+        assert_eq!(settings.trust_anchor.region(), "us-east-1");
+        assert_eq!(
+            settings.profile.as_str(),
+            "arn:aws:rolesanywhere:us-east-1:111122223333:profile/p"
+        );
+        assert_eq!(
+            settings.role.as_str(),
+            "arn:aws:iam::111122223333:role/gateway"
+        );
+        assert_eq!(settings.session_duration, Duration::from_hours(1));
+
+        for [flag, _] in ROLES_ANYWHERE.as_chunks::<2>().0 {
+            let error = parse(&roles_anywhere_args(&[], flag)).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "without {flag}: {error}"
+            );
+        }
+        let alone = parse(&[
+            "--openapi-file",
+            "a.json",
+            "--roles-anywhere-session-seconds",
+            "900",
+        ]);
+        assert_eq!(
+            alone.unwrap().roles_anywhere(),
+            None,
+            "the session length alone is ignored"
+        );
+    }
+
+    #[test]
+    fn roles_anywhere_arns_and_session_length_are_checked() {
+        let session = |seconds: &str| {
+            let mut args = roles_anywhere_args(&[], "");
+            args.extend_from_slice(&["--roles-anywhere-session-seconds", seconds]);
+            parse(&args).map(|config| config.roles_anywhere().unwrap().session_duration)
+        };
+        assert_eq!(session("900").unwrap(), Duration::from_mins(15));
+        assert_eq!(session("43200").unwrap(), Duration::from_hours(12));
+        for bad in ["899", "43201"] {
+            let error = session(bad).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{bad}"
+            );
+        }
+        for (flag, bad) in [
+            ("--roles-anywhere-trust-anchor-arn", "arn:aws:iam::1:role/r"),
+            ("--roles-anywhere-profile-arn", "profile"),
+            ("--roles-anywhere-role-arn", "arn:aws:iam::1:user/u"),
+        ] {
+            let error = parse(&roles_anywhere_args(&[(flag, bad)], "")).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{flag} {bad}: {error}"
+            );
+        }
     }
 
     #[test]

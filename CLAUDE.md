@@ -23,8 +23,9 @@ Cargo.toml            # virtual workspace: pinned deps + strict lints + profiles
 crates/apigw/src/     # the binary — module map in docs/architecture.md
 crates/apigw-regex/   # java.util.regex translator (library, pure)
 crates/apigw-vtl/     # Velocity 1.7 mapping templates + JSON paths (library, pure)
+crates/aws-rolesanywhere-credentials/  # IAM Roles Anywhere credentials provider for aws-config (library)
 fuzz/                 # detached cargo-fuzz crate (own workspace)
-tools/                # Docker-run Java oracles that generate test fixtures
+tools/                # Docker-run oracles (Java, Go) that generate test fixtures
 docs/                 # architecture, deployment (k8s/Istio), crypto, CI
 charts/apigw/         # Helm chart, published to GHCR as an OCI artifact
 packaging/            # nfpm config, systemd unit, and scripts for the .rpm and .deb
@@ -41,8 +42,8 @@ Dockerfile.release    # the published image, from the prebuilt binaries
   narrowly with `#[expect(clippy::unwrap_used, reason = "...")]`.
 - **Dependencies are pinned** `=x.y.z` with `default-features = false` in
   `[workspace.dependencies]`; look up the current version when adding one.
-- The `apigw` binary crate keeps items `pub(crate)`; library crates (`apigw-regex`, `apigw-vtl`) expose a
-  documented `pub` API.
+- The `apigw` binary crate keeps items `pub(crate)`; library crates (`apigw-regex`, `apigw-vtl`,
+  `aws-rolesanywhere-credentials`) expose a documented `pub` API.
 - Own-crate items are imported with `use`, not written as deep `crate::` paths
   (`clippy::absolute_paths`); a new workspace dependency also goes in `.clippy.toml`'s
   `absolute-paths-allowed-crates`.

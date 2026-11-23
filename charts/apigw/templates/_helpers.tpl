@@ -51,6 +51,15 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 {{- end }}
 
+{{- define "apigw.rolesAnywhereSecretName" -}}
+{{- $ra := .Values.aws.rolesAnywhere }}
+{{- if $ra.certManager.enabled }}
+{{- default (printf "%s-roles-anywhere" (include "apigw.fullname" .)) $ra.existingSecret }}
+{{- else }}
+{{- required "set aws.rolesAnywhere.existingSecret or aws.rolesAnywhere.certManager.enabled with aws.rolesAnywhere.roleArn" $ra.existingSecret }}
+{{- end }}
+{{- end }}
+
 {{/* OTEL_RESOURCE_ATTRIBUTES from a map: key=value pairs, sorted by key. */}}
 {{- define "apigw.resourceAttributes" -}}
 {{- $pairs := list }}

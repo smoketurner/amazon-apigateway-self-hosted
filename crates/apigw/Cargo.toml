@@ -17,6 +17,7 @@ apigw-vtl            = { workspace = true }
 anyhow               = { workspace = true, features = ["std"] }
 aws-lc-rs            = { workspace = true, features = ["aws-lc-sys", "alloc"] }
 aws-config           = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio", "credentials-process", "sso"] }
+aws-rolesanywhere-credentials = { workspace = true, features = ["default-https-client", "rt-tokio"] }
 aws-sdk-acm          = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 aws-sdk-apigateway   = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 aws-sdk-apigatewayv2 = { workspace = true, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }

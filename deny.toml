@@ -40,7 +40,9 @@ multiple-versions   = "warn"
 wildcards           = "deny"
 allow-wildcard-paths = true
 # Keep the alternative TLS/crypto stacks out of the tree. aws-lc-rs is the
-# single crypto provider for this template (see docs/crypto.md).
+# single crypto provider for this template (see docs/crypto.md). RustCrypto's
+# p384 is allowed only for P-384 IAM Roles Anywhere signatures, which aws-lc-rs
+# cannot produce (docs/crypto.md#iam-roles-anywhere-signatures).
 deny = [
     { name = "openssl" },
     { name = "openssl-sys" },

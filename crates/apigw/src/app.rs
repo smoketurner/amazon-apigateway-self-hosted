@@ -7,6 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
+use aws_rolesanywhere_credentials::RolesAnywhereCredentialsProvider;
+use aws_sdk_lambda::config::SharedCredentialsProvider;
 use axum::Router;
 use serde_json::Value;
 use tokio::net::TcpListener;
@@ -21,7 +23,7 @@ use crate::aws::{CredentialsMode, LambdaEndpoints};
 use crate::backoff::Backoff;
 use crate::cache::CacheScope;
 use crate::canary::{CanaryRelease, CanaryStructure, CanarySummary, Release, TrafficShare};
-use crate::config::Config;
+use crate::config::{Config, RolesAnywhere};
 use crate::cors::Cors;
 use crate::domain::{DomainRegistry, DomainSupervisor};
 #[cfg(test)]
@@ -717,6 +719,50 @@ async fn serve_admin(
     ))
 }
 
+/// The AWS SDK configuration: the standard credential chain, or IAM Roles Anywhere when
+/// --roles-anywhere-certificate is set.
+async fn load_sdk_config(config: &Config) -> anyhow::Result<aws_config::SdkConfig> {
+    let sdk_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+    let Some(settings) = config.roles_anywhere() else {
+        return Ok(sdk_config);
+    };
+    let provider = roles_anywhere_provider(
+        &settings,
+        config.service_endpoints().get("rolesanywhere"),
+        &sdk_config,
+    )?;
+    tracing::info!(
+        trust_anchor = %settings.trust_anchor,
+        role = settings.role.as_str(),
+        "AWS credentials come from IAM Roles Anywhere"
+    );
+    Ok(sdk_config
+        .into_builder()
+        .credentials_provider(SharedCredentialsProvider::new(provider))
+        .build())
+}
+
+fn roles_anywhere_provider(
+    settings: &RolesAnywhere,
+    endpoint: Option<&reqwest::Url>,
+    sdk_config: &aws_config::SdkConfig,
+) -> anyhow::Result<RolesAnywhereCredentialsProvider> {
+    let mut builder = RolesAnywhereCredentialsProvider::builder()
+        .certificate_path(&settings.certificate)
+        .private_key_path(&settings.private_key)
+        .trust_anchor_arn(settings.trust_anchor.clone())
+        .profile_arn(settings.profile.clone())
+        .role_arn(settings.role.as_str())
+        .session_duration(settings.session_duration)
+        .configure(sdk_config);
+    if let Some(endpoint) = endpoint {
+        builder = builder.endpoint_url(endpoint.as_str());
+    }
+    builder
+        .build()
+        .context("failed to set up IAM Roles Anywhere credentials")
+}
+
 pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
     let telemetry = start_telemetry(&config)?;
     let tls = Tls::with_domains(
@@ -726,7 +772,7 @@ pub(crate) async fn run(config: Config) -> anyhow::Result<()> {
         &config.domain_certs()?,
     )
     .context("failed to load the TLS certificates")?;
-    let sdk_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+    let sdk_config = load_sdk_config(&config).await?;
     let http = integration_tls::client_builder()
         .build()
         .context("failed to build the HTTP client")?;
@@ -1389,5 +1435,75 @@ mod tests {
             run(&aws, snapshot, 1).await;
             assert_eq!(lines(&aws, ACCESS_GROUP), ["prod -"]);
         }
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "tests assert on known-good fixtures")]
+mod roles_anywhere_tests {
+    use super::*;
+    use crate::listener::test_tls;
+
+    fn settings(certificate: PathBuf, private_key: PathBuf, profile: &str) -> RolesAnywhere {
+        RolesAnywhere {
+            certificate,
+            private_key,
+            trust_anchor: "arn:aws:rolesanywhere:us-east-1:111122223333:trust-anchor/t"
+                .parse()
+                .unwrap(),
+            profile: profile.parse().unwrap(),
+            role: "arn:aws:iam::111122223333:role/gateway".parse().unwrap(),
+            session_duration: Duration::from_hours(1),
+        }
+    }
+
+    const PROFILE: &str = "arn:aws:rolesanywhere:us-east-1:111122223333:profile/p";
+
+    fn sdk_config() -> aws_config::SdkConfig {
+        aws_config::SdkConfig::builder()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .build()
+    }
+
+    #[test]
+    fn the_settings_and_the_endpoint_override_reach_the_provider() {
+        let (certificate, key) = test_tls::generate().write();
+        let settings = settings(certificate, key, PROFILE);
+        assert!(roles_anywhere_provider(&settings, None, &sdk_config()).is_ok());
+        let local = reqwest::Url::parse("http://localhost:4566").unwrap();
+        assert!(roles_anywhere_provider(&settings, Some(&local), &sdk_config()).is_ok());
+        let unusable = reqwest::Url::parse("ftp://localhost/").unwrap();
+        let error = roles_anywhere_provider(&settings, Some(&unusable), &sdk_config()).unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            "failed to set up IAM Roles Anywhere credentials: \
+             \"ftp://localhost/\" is not an http or https URL with a host"
+        );
+    }
+
+    #[test]
+    fn unusable_settings_fail_startup_with_the_reason() {
+        let (certificate, key) = test_tls::generate().write();
+        let elsewhere = settings(
+            certificate.clone(),
+            key,
+            "arn:aws:rolesanywhere:eu-west-1:111122223333:profile/p",
+        );
+        let error = roles_anywhere_provider(&elsewhere, None, &sdk_config()).unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            "failed to set up IAM Roles Anywhere credentials: \
+             the trust anchor is in us-east-1 but the profile is in eu-west-1"
+        );
+        let missing = settings(
+            certificate.clone(),
+            certificate.with_file_name("none.pem"),
+            PROFILE,
+        );
+        let error = roles_anywhere_provider(&missing, None, &sdk_config()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("could not read the private key"),
+            "{error:#}"
+        );
     }
 }

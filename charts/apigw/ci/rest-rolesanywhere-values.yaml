@@ -1,0 +1,16 @@
+api:
+  restApiId: a1b2c3d4e5
+  stage: prod
+aws:
+  region: us-east-1
+  rolesAnywhere:
+    trustAnchorArn: arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/0a1b2c3d-1111-2222-3333-444455556666
+    profileArn: arn:aws:rolesanywhere:us-east-1:123456789012:profile/9f8e7d6c-1111-2222-3333-444455556666
+    roleArn: arn:aws:iam::123456789012:role/apigw
+    sessionSeconds: 7200
+    certManager:
+      enabled: true
+      issuerRef:
+        name: roles-anywhere-ca
+tls:
+  existingSecret: apigw-tls

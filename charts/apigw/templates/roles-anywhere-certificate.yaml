@@ -1,0 +1,20 @@
+{{- $ra := .Values.aws.rolesAnywhere }}
+{{- if and $ra.roleArn $ra.certManager.enabled }}
+{{- $fullname := include "apigw.fullname" . }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $fullname }}-roles-anywhere
+  labels:
+    {{- include "apigw.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "apigw.rolesAnywhereSecretName" . }}
+  commonName: {{ default $fullname $ra.certManager.commonName | quote }}
+  usages:
+    - digital signature
+    - client auth
+  issuerRef:
+    name: {{ required "aws.rolesAnywhere.certManager.issuerRef.name is required when aws.rolesAnywhere.certManager.enabled" $ra.certManager.issuerRef.name }}
+    kind: {{ $ra.certManager.issuerRef.kind }}
+    group: {{ $ra.certManager.issuerRef.group }}
+{{- end }}
