@@ -109,7 +109,7 @@ jobs:
               exit 1
             fi
           done
-      - uses: EmbarkStudios/cargo-deny-action@v2.1.1
+      - uses: EmbarkStudios/cargo-deny-action@v2.1.2
         with:
           command: check
 
